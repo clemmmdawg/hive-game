@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#05050f">
+  <title>HIVE</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <div id="crt" aria-hidden="true"></div>
+
+  <!-- MENU SCREEN -->
+  <div id="menu-screen" aria-hidden="true">
+    <div id="menu-title">
+      <span class="title-letter t-p1">H</span><span
+            class="title-letter t-p2">I</span><span
+            class="title-letter t-p1">V</span><span
+            class="title-letter t-p2">E</span>
+    </div>
+    <p id="menu-subtitle">CAPTURE THE QUEEN</p>
+
+    <div id="mode-row">
+      <button class="mode-btn selected" data-mode="LOCAL">
+        <span class="mode-icon">🏠</span>
+        <span class="mode-label">LOCAL</span>
+        <span class="mode-sub">PASS &amp; PLAY</span>
+      </button>
+      <button class="mode-btn" data-mode="HOST" data-disabled="true" disabled>
+        <span class="mode-icon">📡</span>
+        <span class="mode-label">HOST</span>
+        <span class="mode-sub">ONLINE</span>
+        <span class="soon-badge">SOON</span>
+      </button>
+      <button class="mode-btn" data-mode="JOIN" data-disabled="true" disabled>
+        <span class="mode-icon">🎮</span>
+        <span class="mode-label">JOIN</span>
+        <span class="mode-sub">BY CODE</span>
+        <span class="soon-badge">SOON</span>
+      </button>
+    </div>
+
+    <div id="settings-panel"></div>
+    <button id="btn-start" class="ready">START GAME</button>
+  </div>
+
+  <!-- GAME UI -->
+  <header id="hud">
+    <div id="player-tag" class="p1">P1</div>
+    <div id="status-text">SELECT A PIECE</div>
+    <button class="hud-btn hidden" id="btn-cancel" aria-label="Cancel selection">✕</button>
+    <button class="hud-btn" id="btn-resign" aria-label="Quit to menu">⬡</button>
+  </header>
+
+  <div id="piece-desc" aria-live="polite"></div>
+
+  <canvas id="board" aria-label="Hive game board"></canvas>
+  <canvas id="emoji-layer" aria-hidden="true"></canvas>
+
+  <footer id="tray">
+    <div id="tray-pieces"></div>
+  </footer>
+
+  <div id="interstitial" aria-hidden="true">
+    <div class="inter-hex-ring" id="inter-ring"></div>
+    <p id="inter-headline"></p>
+    <p id="inter-sub">TAP TO CONTINUE</p>
+  </div>
+
+  <canvas id="confetti-layer" aria-hidden="true"></canvas>
+  <div id="win-screen" aria-hidden="true">
+    <p id="win-headline"></p>
+    <div id="win-actions">
+      <button id="btn-play-again">PLAY AGAIN</button>
+      <button id="btn-to-menu">MAIN MENU</button>
+    </div>
+  </div>
+
+  <!-- RESIGN CONFIRM -->
+  <div id="resign-confirm" aria-hidden="true" role="dialog">
+    <div id="resign-dialog">
+      <p id="resign-question">QUIT TO MENU?</p>
+      <p id="resign-sub">current game will be lost</p>
+      <div id="resign-btns">
+        <button id="btn-resign-yes">YES, QUIT</button>
+        <button id="btn-resign-no">KEEP PLAYING</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
