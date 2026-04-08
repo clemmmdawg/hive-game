@@ -386,13 +386,6 @@ function showWinScreen() {
   launchConfetti();
 }
 
-document.getElementById('btn-play-again').addEventListener('click', () => {
-  const screen = document.getElementById('win-screen');
-  screen.classList.remove('active');
-  screen.setAttribute('aria-hidden', 'true');
-  startGame(gameSettings);
-});
-
 document.getElementById('btn-to-menu').addEventListener('click', () => {
   const screen = document.getElementById('win-screen');
   screen.classList.remove('active');

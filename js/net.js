@@ -33,7 +33,16 @@ const MAX_DELAY = 16_000;
  * @param {string} [url] - e.g. 'ws://localhost:3000' — defaults to same origin
  */
 export function connect(url) {
-  _url              = url ?? location.origin.replace(/^http/, 'ws');
+  if (!url) {
+    // Derive WebSocket URL from the current page location, preserving any
+    // proxy path prefix (e.g. code-server's /proxy/3000/ pass-through).
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const path  = location.pathname.endsWith('/')
+      ? location.pathname
+      : location.pathname.substring(0, location.pathname.lastIndexOf('/') + 1);
+    url = `${proto}//${location.host}${path}`;
+  }
+  _url              = url;
   _intentionalClose = false;
   _reconnectDelay   = 2000;
   _open();

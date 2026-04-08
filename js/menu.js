@@ -151,7 +151,7 @@ function _startJoinFlow() {
   const code      = (codeInput?.value ?? '').toUpperCase().trim();
 
   if (code.length !== 4) {
-    _setOnlineStatus('Enter a 4-letter room code.');
+    _setOnlineStatus('Enter a 4-letter room code.', true);
     _showOnlinePanel();
     return;
   }
@@ -165,11 +165,11 @@ function _startJoinFlow() {
   });
 
   net.on('ROOM_NOT_FOUND', () => {
-    _setOnlineStatus('Room not found. Check the code and try again.');
+    _setOnlineStatus('Room not found. Check the code and try again.', true);
   });
 
   net.on('ERROR', ({ reason }) => {
-    _setOnlineStatus(`Error: ${reason}`);
+    _setOnlineStatus(`Error: ${reason}`, true);
   });
 
   _attachOnlineGameHandlers();
@@ -219,9 +219,24 @@ function _hideOnlinePanel() {
   startBtn.style.display = '';
 }
 
-function _setOnlineStatus(html) {
+let _statusDismissTimer = null;
+
+function _setOnlineStatus(html, autoDismiss = false) {
   const el = document.getElementById('online-status');
   if (el) el.innerHTML = html;
+
+  if (_statusDismissTimer) { clearTimeout(_statusDismissTimer); _statusDismissTimer = null; }
+
+  if (autoDismiss) {
+    _statusDismissTimer = setTimeout(() => {
+      _statusDismissTimer = null;
+      net.disconnect();
+      _roomCode = null;
+      _myPlayer = null;
+      _hideOnlinePanel();
+      _syncModeButtons();
+    }, 3000);
+  }
 }
 
 function _showCancelBtn() {
@@ -283,8 +298,7 @@ function _buildSettingsHTML() {
        </div>`
     : '';
 
-  return `
-    ${joinInput}
+  const gameOptions = mode !== 'JOIN' ? `
     <div class="settings-group">
       <div class="settings-label">EXPANSIONS</div>
       <div class="settings-row">
@@ -298,7 +312,11 @@ function _buildSettingsHTML() {
       <div class="settings-row">
         ${_toggle('tournament', '👑', 'TOURNAMENT OPENING', s.tournamentRule)}
       </div>
-    </div>`;
+    </div>` : '';
+
+  return `
+    ${joinInput}
+    ${gameOptions}`;
 }
 
 function _buildGameSettings() {
