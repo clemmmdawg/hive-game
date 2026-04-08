@@ -735,3 +735,64 @@ html, body {
   0%, 100% { transform: scale(1);    }
   50%       { transform: scale(1.07); }
 }
+
+/* ── Online panel ───────────────────────────────────────── */
+#online-panel {
+  margin-top: 8px;
+  text-align: center;
+}
+
+#online-status {
+  font-family: var(--font);
+  font-size: 8px;
+  color: var(--ui-text);
+  line-height: 1.8;
+  letter-spacing: 1px;
+}
+
+.room-code {
+  font-family: var(--font);
+  font-size: 20px;
+  letter-spacing: 6px;
+  color: var(--gold);
+  display: block;
+  margin: 6px 0;
+}
+
+#btn-cancel-online {
+  font-family: var(--font);
+  font-size: 8px;
+  letter-spacing: 2px;
+  background: transparent;
+  border: 1px solid rgba(255,255,255,.25);
+  color: var(--ui-text);
+  padding: 8px 18px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+#btn-cancel-online:hover {
+  border-color: rgba(255,255,255,.5);
+  color: white;
+}
+
+.room-code-input {
+  font-family: var(--font);
+  font-size: 18px;
+  letter-spacing: 6px;
+  text-align: center;
+  background: rgba(255,255,255,.06);
+  border: 1.5px solid rgba(255,255,255,.20);
+  color: var(--gold);
+  padding: 10px 16px;
+  border-radius: 4px;
+  width: 120px;
+  text-transform: uppercase;
+}
+.room-code-input::placeholder {
+  color: rgba(255,255,255,.20);
+}
+.room-code-input:focus {
+  outline: none;
+  border-color: var(--gold);
+  box-shadow: 0 0 8px rgba(255,215,0,.25);
+}

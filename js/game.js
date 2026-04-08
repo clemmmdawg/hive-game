@@ -763,6 +763,46 @@ export function checkWin(state) {
   return null;
 }
 
+// ── Serialization ────────────────────────────────────────────────────────────
+
+/**
+ * Serialize a GameState to a plain JSON-safe object.
+ * Converts the Map-based board to an array of [key, stack] pairs.
+ * Safe to pass through JSON.stringify / JSON.parse.
+ */
+export function serializeState(state) {
+  return {
+    board:                [...state.board.entries()],
+    supply:               state.supply,
+    turn:                 state.turn,
+    turnNumber:           state.turnNumber,
+    queenPlaced:          state.queenPlaced,
+    lastMovedHex:         state.lastMovedHex,
+    lastOpponentMovedHex: state.lastOpponentMovedHex,
+    pillbugThrewHex:      state.pillbugThrewHex,
+    winner:               state.winner,
+    settings:             state.settings,
+  };
+}
+
+/**
+ * Deserialize a plain object (from JSON) back into a live GameState with Map.
+ */
+export function deserializeState(data) {
+  return {
+    board:                new Map(data.board),
+    supply:               data.supply,
+    turn:                 data.turn,
+    turnNumber:           data.turnNumber,
+    queenPlaced:          data.queenPlaced,
+    lastMovedHex:         data.lastMovedHex,
+    lastOpponentMovedHex: data.lastOpponentMovedHex,
+    pillbugThrewHex:      data.pillbugThrewHex,
+    winner:               data.winner,
+    settings:             data.settings,
+  };
+}
+
 // ── State mutation ───────────────────────────────────────────────────────────
 
 /**

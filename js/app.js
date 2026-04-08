@@ -5,9 +5,10 @@ import {
   PieceType, ActionType,
   createGame, applyAction,
   getLegalPlacements, getLegalMoves, getLegalThrows,
-  getAllLegalActions,
+  getAllLegalActions, deserializeState,
 } from './game.js';
 import { initMenu, showMenu, showResignConfirm } from './menu.js';
+import * as net from './net.js';
 
 // ── Piece display definitions ──────────────────────────
 
@@ -66,6 +67,8 @@ setupCanvas();
 
 let gameState    = null;
 let gameSettings = null;   // saved so "play again" can reuse them
+let gameMode     = 'LOCAL'; // 'LOCAL' | 'ONLINE'
+let myPlayer     = 1;       // 1 or 2 — only meaningful in ONLINE mode
 
 const uiState = {
   phase:           'IDLE',
@@ -93,15 +96,32 @@ function hideGame() {
 // ── Start / restart game ───────────────────────────────
 
 function startGame(settings) {
+  gameMode     = 'LOCAL';
   gameSettings = settings;
 
-  const gsCfg = {
+  gameState = createGame({
     expansions:     settings.expansions,
     tournamentRule: settings.tournamentRule,
     clock:          settings.clock,
-  };
+  });
 
-  gameState = createGame(gsCfg);
+  clearSelection();
+  syncBoardRenderer();
+  syncUI();
+  showGame();
+}
+
+/**
+ * Start an online game received from the server.
+ * @param {object} settings        - Game settings (from GAME_START)
+ * @param {number} playerNum       - 1 or 2
+ * @param {object} serializedState - JSON-safe state from serializeState()
+ */
+export function startOnlineGame(settings, playerNum, serializedState) {
+  gameMode     = 'ONLINE';
+  myPlayer     = playerNum;
+  gameSettings = settings;
+  gameState    = deserializeState(serializedState);
 
   clearSelection();
   syncBoardRenderer();
@@ -196,6 +216,11 @@ function selectThrowPiece(fromKey, pillbugKey) {
 }
 
 function doPlace(toKey) {
+  if (gameMode === 'ONLINE') {
+    net.send('PLACE_PIECE', { pieceType: uiState.trayPick.type, to: toKey });
+    clearSelection();
+    return;
+  }
   gameState = applyAction(gameState, {
     type:      ActionType.PLACE,
     pieceType: uiState.trayPick.type,
@@ -207,6 +232,11 @@ function doPlace(toKey) {
 }
 
 function doMove(toKey) {
+  if (gameMode === 'ONLINE') {
+    net.send('MOVE_PIECE', { from: uiState.boardPick, to: toKey });
+    clearSelection();
+    return;
+  }
   gameState = applyAction(gameState, {
     type: ActionType.MOVE,
     from: uiState.boardPick,
@@ -218,6 +248,15 @@ function doMove(toKey) {
 }
 
 function doThrow(toKey) {
+  if (gameMode === 'ONLINE') {
+    net.send('THROW_PIECE', {
+      pillbugHex: uiState.throwPillbugHex,
+      from: uiState.boardPick,
+      to:   toKey,
+    });
+    clearSelection();
+    return;
+  }
   gameState = applyAction(gameState, {
     type:       ActionType.THROW,
     pillbugHex: uiState.throwPillbugHex,
@@ -369,6 +408,7 @@ document.getElementById('btn-to-menu').addEventListener('click', () => {
 
 board.onTap = (q, r) => {
   if (!gameState) return;
+  if (gameMode === 'ONLINE' && gameState.turn !== myPlayer) return;
   const key      = hexKey(q, r);
   const stack    = gameState.board.get(key);
   const topPiece = stack ? stack[stack.length - 1] : null;
@@ -415,7 +455,8 @@ function renderTray() {
       const ui       = PIECE_UI[type];
       const selected = uiState.trayPick?.type === type;
       const hasSpots = (actions.placements.get(type) || []).length > 0;
-      const disabled = count === 0 || !hasSpots;
+      const myTurn   = gameMode !== 'ONLINE' || gameState.turn === myPlayer;
+      const disabled = count === 0 || !hasSpots || !myTurn;
       return `<div class="piece-slot ${playerCls}${selected ? ' selected' : ''}${disabled ? ' disabled' : ''}"
            data-type="${type}" role="button"
            aria-label="${ui.label} x${count}" tabindex="${disabled ? -1 : 0}">
@@ -487,11 +528,15 @@ document.getElementById('btn-cancel').addEventListener('click', clearSelection);
 
 document.getElementById('btn-resign').addEventListener('click', () => {
   showResignConfirm(() => {
+    if (gameMode === 'ONLINE') {
+      net.send('RESIGN');
+      net.disconnect();
+    }
     hideGame();
     board.pieces.clear();
-    board.ghosts = new Set();
+    board.ghosts      = new Set();
     board.selectedHex = null;
-    gameState = null;
+    gameState         = null;
     showMenu();
   });
 });
@@ -531,13 +576,73 @@ function showInterstitial() {
       overlay.classList.remove('active');
       overlay.setAttribute('aria-hidden', 'true');
       if (actions.mustPass) {
-        gameState = applyAction(gameState, { type: ActionType.PASS });
-        setTimeout(showInterstitial, 120);
+        if (gameMode === 'ONLINE') {
+          net.send('PASS_TURN');
+        } else {
+          gameState = applyAction(gameState, { type: ActionType.PASS });
+          setTimeout(showInterstitial, 120);
+        }
       } else {
         syncUI();
       }
     }, { once: true });
   }, 350);
+}
+
+// ── Net event handlers (ONLINE mode) ──────────────────────
+
+/**
+ * Called once by menu.js after a connection is established and the
+ * PLAYER_ASSIGNMENT + GAME_START sequence completes. Wires up all
+ * server-push events that affect the game UI.
+ */
+export function initNetHandlers() {
+  // Authoritative game state after any action
+  net.on('GAME_STATE', ({ gameState: snap }) => {
+    gameState = deserializeState(snap);
+    syncBoardRenderer();
+    if (gameState.winner) {
+      setTimeout(showWinScreen, 420);
+    } else if (gameMode === 'ONLINE' && gameState.turn === myPlayer) {
+      // It's now my turn — no interstitial needed in online mode
+      syncUI();
+    } else {
+      syncUI();
+    }
+  });
+
+  // Server confirmed game over (e.g. resign)
+  net.on('GAME_OVER', ({ winner }) => {
+    if (gameState) gameState = { ...gameState, winner };
+    setTimeout(showWinScreen, 420);
+  });
+
+  // Server rejected a move (shouldn't happen with correct client logic)
+  net.on('INVALID_MOVE', ({ reason }) => {
+    console.warn('[app] Server rejected move:', reason);
+    syncBoardRenderer();
+    syncUI();
+  });
+
+  // Opponent left
+  net.on('OPPONENT_DISCONNECTED', () => {
+    const statusEl = document.getElementById('status-text');
+    if (statusEl) {
+      statusEl.textContent = 'OPPONENT DISCONNECTED';
+      statusEl.classList.add('active');
+    }
+  });
+
+  // Server closed the room (timeout, etc.)
+  net.on('ROOM_CLOSED', () => {
+    net.disconnect();
+    hideGame();
+    board.pieces.clear();
+    board.ghosts      = new Set();
+    board.selectedHex = null;
+    gameState         = null;
+    showMenu();
+  });
 }
 
 // ── Boot ───────────────────────────────────────────────
@@ -547,4 +652,4 @@ document.getElementById('hud').style.display  = 'flex';
 document.getElementById('tray').style.display = 'flex';
 hideGame();
 
-initMenu(settings => startGame(settings));
+initMenu({ onLocalStart: startGame, onOnlineStart: startOnlineGame, onNetReady: initNetHandlers });

@@ -30,22 +30,26 @@
         <span class="mode-label">LOCAL</span>
         <span class="mode-sub">PASS &amp; PLAY</span>
       </button>
-      <button class="mode-btn" data-mode="HOST" data-disabled="true" disabled>
+      <button class="mode-btn" data-mode="HOST">
         <span class="mode-icon">📡</span>
         <span class="mode-label">HOST</span>
         <span class="mode-sub">ONLINE</span>
-        <span class="soon-badge">SOON</span>
       </button>
-      <button class="mode-btn" data-mode="JOIN" data-disabled="true" disabled>
+      <button class="mode-btn" data-mode="JOIN">
         <span class="mode-icon">🎮</span>
         <span class="mode-label">JOIN</span>
         <span class="mode-sub">BY CODE</span>
-        <span class="soon-badge">SOON</span>
       </button>
     </div>
 
     <div id="settings-panel"></div>
     <button id="btn-start" class="ready">START GAME</button>
+
+    <!-- Online connection panel (hidden until HOST/JOIN flow begins) -->
+    <div id="online-panel" style="display:none; flex-direction:column; align-items:center; gap:12px;">
+      <p id="online-status"></p>
+      <button id="btn-cancel-online" style="display:none">CANCEL</button>
+    </div>
   </div>
 
   <!-- GAME UI -->
