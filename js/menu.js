@@ -20,6 +20,7 @@ let _onNetReady    = null; // called just before handing off to the online game
 // Room state (for HOST/JOIN flow)
 let _roomCode  = null; // code we're hosting/joining
 let _myPlayer  = null; // 1 or 2
+let _playerToken = null;
 
 function deepClone(obj) { return JSON.parse(JSON.stringify(obj)); }
 
@@ -36,6 +37,7 @@ export function initMenu({ onLocalStart, onOnlineStart, onNetReady }) {
   _settings      = deepClone(DEFAULT_SETTINGS);
   _bindMenu();
   showMenu();
+  _tryResumeSavedSession();
 }
 
 /** Fade the menu in and reset to the initial state. */
@@ -43,6 +45,7 @@ export function showMenu() {
   _settings  = deepClone(DEFAULT_SETTINGS);
   _roomCode  = null;
   _myPlayer  = null;
+  _playerToken = null;
   _hideOnlinePanel();
 
   const el = document.getElementById('menu-screen');
@@ -50,6 +53,15 @@ export function showMenu() {
   el.classList.add('active');
   _renderSettings();
   _syncModeButtons();
+}
+
+/** Leave any online session and clear reconnect credentials. */
+export function leaveOnlineSession() {
+  net.disconnect();
+  _roomCode = null;
+  _myPlayer = null;
+  _playerToken = null;
+  localStorage.removeItem('hiveSession');
 }
 
 /** Fade the menu out. */
@@ -70,19 +82,33 @@ export function showResignConfirm(onConfirm) {
 
   const yes = document.getElementById('btn-resign-yes');
   const no  = document.getElementById('btn-resign-no');
+  const previousFocus = document.activeElement;
 
   function cleanup() {
     el.classList.remove('active');
     el.setAttribute('aria-hidden', 'true');
     yes.removeEventListener('click', handleYes);
     no.removeEventListener('click',  handleNo);
+    el.removeEventListener('keydown', handleKeydown);
+    previousFocus?.focus?.();
   }
 
   function handleYes() { cleanup(); onConfirm(); }
   function handleNo()  { cleanup(); }
+  function handleKeydown(event) {
+    if (event.key === 'Escape') handleNo();
+    if (event.key === 'Tab') {
+      const target = document.activeElement === yes && event.shiftKey ? no
+        : document.activeElement === no && !event.shiftKey ? yes
+        : null;
+      if (target) { event.preventDefault(); target.focus(); }
+    }
+  }
 
   yes.addEventListener('click', handleYes, { once: true });
   no.addEventListener('click',  handleNo,  { once: true });
+  el.addEventListener('keydown', handleKeydown);
+  no.focus();
 }
 
 // ── Internal ────────────────────────────────────────────
@@ -100,6 +126,11 @@ function _bindMenu() {
 
   // Start / Create / Join button
   document.getElementById('btn-start').addEventListener('click', _handleStart);
+  document.getElementById('btn-cancel-online').addEventListener('click', () => {
+    leaveOnlineSession();
+    _hideOnlinePanel();
+    _syncModeButtons();
+  });
 }
 
 function _handleStart() {
@@ -127,15 +158,21 @@ function _handleStart() {
 function _startHostFlow() {
   _setOnlineStatus('Connecting…');
   _showOnlinePanel();
+  _showCancelBtn();
 
   net.on('_connected', () => {
-    net.send('CREATE_ROOM', { settings: _buildGameSettings() });
+    if (_roomCode && _playerToken) {
+      net.send('RESUME_ROOM', { code: _roomCode, token: _playerToken });
+    } else {
+      net.send('CREATE_ROOM', { settings: _buildGameSettings() });
+    }
   });
 
   net.on('ROOM_CREATED', ({ code, player, token }) => {
     _roomCode = code;
     _myPlayer = player;
-    localStorage.setItem('hiveToken', token);
+    _playerToken = token;
+    _saveSession();
     _setOnlineStatus(`Room code: <span class="room-code">${code}</span><br>Waiting for opponent…`);
     _showCancelBtn();
   });
@@ -159,17 +196,15 @@ function _startJoinFlow() {
   _roomCode = code;
   _setOnlineStatus('Connecting…');
   _showOnlinePanel();
+  _showCancelBtn();
 
   net.on('_connected', () => {
-    net.send('JOIN_ROOM', { code: _roomCode });
+    if (_playerToken) net.send('RESUME_ROOM', { code: _roomCode, token: _playerToken });
+    else net.send('JOIN_ROOM', { code: _roomCode });
   });
 
   net.on('ROOM_NOT_FOUND', () => {
     _setOnlineStatus('Room not found. Check the code and try again.', true);
-  });
-
-  net.on('ERROR', ({ reason }) => {
-    _setOnlineStatus(`Error: ${reason}`, true);
   });
 
   _attachOnlineGameHandlers();
@@ -181,7 +216,8 @@ function _startJoinFlow() {
 function _attachOnlineGameHandlers() {
   net.on('PLAYER_ASSIGNMENT', ({ player, token }) => {
     _myPlayer = player;
-    if (token) localStorage.setItem('hiveToken', token);
+    if (token) _playerToken = token;
+    _saveSession();
   });
 
   net.on('GAME_START', ({ gameState, settings }) => {
@@ -195,6 +231,24 @@ function _attachOnlineGameHandlers() {
     if (_roomCode) {
       _setOnlineStatus('Disconnected. Reconnecting…');
     }
+  });
+
+  net.on('ROOM_RESUMED', ({ player, token, gameState, settings }) => {
+    _myPlayer = player;
+    _playerToken = token;
+    _saveSession();
+    if (gameState) {
+      _onNetReady();
+      hideMenu();
+      _onOnlineStart(settings, player, gameState);
+    } else {
+      _setOnlineStatus(`Room code: <span class="room-code">${_roomCode}</span><br>Waiting for opponent…`);
+      _showCancelBtn();
+    }
+  });
+
+  net.on('ERROR', ({ reason }) => {
+    _setOnlineStatus(_friendlyError(reason), true);
   });
 }
 
@@ -230,9 +284,7 @@ function _setOnlineStatus(html, autoDismiss = false) {
   if (autoDismiss) {
     _statusDismissTimer = setTimeout(() => {
       _statusDismissTimer = null;
-      net.disconnect();
-      _roomCode = null;
-      _myPlayer = null;
+      leaveOnlineSession();
       _hideOnlinePanel();
       _syncModeButtons();
     }, 3000);
@@ -248,7 +300,9 @@ function _showCancelBtn() {
 
 function _syncModeButtons() {
   document.querySelectorAll('.mode-btn').forEach(btn => {
-    btn.classList.toggle('selected', btn.dataset.mode === _settings.mode);
+    const selected = btn.dataset.mode === _settings.mode;
+    btn.classList.toggle('selected', selected);
+    btn.setAttribute('aria-pressed', String(selected));
   });
 
   const startBtn = document.getElementById('btn-start');
@@ -274,14 +328,40 @@ function _renderSettings() {
   panel.innerHTML = _buildSettingsHTML();
   _bindSettingsEvents();
 
-  // Bind cancel-online button if present
-  document.getElementById('btn-cancel-online')?.addEventListener('click', () => {
-    net.disconnect();
-    _roomCode = null;
-    _myPlayer = null;
-    _hideOnlinePanel();
-    _syncModeButtons();
+}
+
+function _saveSession() {
+  if (!_roomCode || !_playerToken) return;
+  localStorage.setItem('hiveSession', JSON.stringify({ code: _roomCode, token: _playerToken, player: _myPlayer }));
+}
+
+function _tryResumeSavedSession() {
+  let saved;
+  try { saved = JSON.parse(localStorage.getItem('hiveSession')); } catch { return; }
+  if (!saved?.code || !saved?.token) return;
+
+  _roomCode = String(saved.code).toUpperCase();
+  _playerToken = String(saved.token);
+  _myPlayer = Number(saved.player) || null;
+  _setOnlineStatus('Reconnecting to your game…');
+  _showOnlinePanel();
+  _showCancelBtn();
+  _attachOnlineGameHandlers();
+  net.on('_connected', () => {
+    net.send('RESUME_ROOM', { code: _roomCode, token: _playerToken });
   });
+  net.connect();
+}
+
+function _friendlyError(reason) {
+  const messages = {
+    ROOM_NOT_FOUND: 'Room not found. Check the code and try again.',
+    ROOM_FULL: 'That room already has two players.',
+    INVALID_RESUME_TOKEN: 'This saved seat is no longer valid.',
+    SEAT_OCCUPIED: 'This player seat is already connected.',
+    NO_ACTIVE_GAME: 'That game is no longer active.',
+  };
+  return messages[reason] ?? 'Unable to connect. Please try again.';
 }
 
 function _buildSettingsHTML() {

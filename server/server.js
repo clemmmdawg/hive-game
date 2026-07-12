@@ -6,11 +6,13 @@
  * validates with game.js, broadcasts canonical state to both players.
  *
  * Usage:
- *   node server/server.js          # production
+ *   node server/server.js          # production (port 3000)
+ *   node server/server.js 4000     # choose a port
+ *   node server/server.js --port 4000
  *   node --watch server/server.js  # dev (auto-restart on file change)
  *
  * Environment:
- *   PORT  — TCP port (default 3000)
+ *   PORT  — TCP port (default 3000; overridden by a CLI argument)
  */
 
 import { createServer }       from 'http';
@@ -30,6 +32,7 @@ import {
   createRoom,
   getRoom,
   joinRoom,
+  resumeRoom,
   removeSocket,
   broadcast,
   sendTo,
@@ -38,11 +41,30 @@ import {
 
 import { validateAction } from './validator.js';
 
+const DEFAULT_SETTINGS = Object.freeze({
+  expansions: { mosquito: false, ladybug: false, pillbug: false },
+  tournamentRule: false,
+  clock: { enabled: false },
+});
+
 // ── Paths ────────────────────────────────────────────────────────────────────
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const ROOT      = join(__dirname, '..');
-const PORT      = Number(process.env.PORT) || 3000;
+const PORT      = readPort(process.argv.slice(2), process.env.PORT);
+
+function readPort(args, envPort) {
+  const flagIndex = args.findIndex(arg => arg === '--port' || arg === '-p');
+  const raw = flagIndex >= 0 ? args[flagIndex + 1] : args[0] ?? envPort ?? '3000';
+  const port = Number(raw);
+
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    console.error(`Invalid port: ${raw}. Use an integer from 1 to 65535.`);
+    process.exit(1);
+  }
+
+  return port;
+}
 
 // ── MIME types ───────────────────────────────────────────────────────────────
 
@@ -115,7 +137,7 @@ function handleMessage(socket, msg) {
 
     // ── Host creates a new room ────────────────────────────────────────────
     case 'CREATE_ROOM': {
-      const settings = msg.settings ?? {};
+      const settings = normalizeSettings(msg.settings);
       const room     = createRoom(settings);
 
       const result = joinRoom(room.code, socket);
@@ -171,6 +193,27 @@ function handleMessage(socket, msg) {
       broadcast(room, { type: 'GAME_START', gameState: snap, settings: room.settings });
 
       console.log(`[server] Room ${room.code} game started`);
+      break;
+    }
+
+    // Reclaim a reserved seat after a network interruption.
+    case 'RESUME_ROOM': {
+      const code  = String(msg.code ?? '').toUpperCase().trim();
+      const token = String(msg.token ?? '');
+      const result = resumeRoom(code, token, socket);
+      if (result.error) { socket.send(err(result.error)); return; }
+
+      socket.send(JSON.stringify({
+        type: 'ROOM_RESUMED',
+        code,
+        player: result.playerNum,
+        token: result.token,
+        gameState: result.room.gameState ? serializeState(result.room.gameState) : null,
+        settings: result.room.settings,
+      }));
+
+      const opponent = result.playerNum === 1 ? 2 : 1;
+      sendTo(result.room, opponent, { type: 'OPPONENT_RECONNECTED' });
       break;
     }
 
@@ -242,6 +285,20 @@ function msgToAction(msg) {
 
 function err(reason) {
   return JSON.stringify({ type: 'ERROR', reason });
+}
+
+function normalizeSettings(input = {}) {
+  const expansions = input && typeof input.expansions === 'object' ? input.expansions : {};
+  return {
+    expansions: {
+      mosquito: !!expansions.mosquito,
+      ladybug:  !!expansions.ladybug,
+      pillbug:  !!expansions.pillbug,
+    },
+    tournamentRule: !!input.tournamentRule,
+    // Clocks are not implemented yet; never trust arbitrary client shapes.
+    clock: { ...DEFAULT_SETTINGS.clock },
+  };
 }
 
 // ── Boot ─────────────────────────────────────────────────────────────────────

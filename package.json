@@ -6,10 +6,11 @@
   "main": "server/server.js",
   "scripts": {
     "start": "node server/server.js",
-    "dev": "node --watch server/server.js"
+    "dev": "node --watch server/server.js",
+    "test": "node --test",
+    "check": "node --check js/game.js && node --check js/board.js && node --check js/app.js && node --check js/menu.js && node --check js/net.js && node --check server/server.js && node --check server/rooms.js && node --check server/validator.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
     "ws": "^8.17.1"
   }
 }

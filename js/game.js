@@ -597,8 +597,8 @@ export function getLegalPlacements(state, pieceType) {
 
   if ((supply[turn][pieceType] || 0) === 0) return [];
 
-  // Tournament rule: queen cannot be placed on turn 1 (first move of the game)
-  if (pieceType === PieceType.QUEEN && settings.tournamentRule && turnNumber === 1) return [];
+  // Tournament rule: neither player may open with their queen.
+  if (pieceType === PieceType.QUEEN && settings.tournamentRule && countPlacedByPlayer(state.board, turn) === 0) return [];
 
   // Forced queen placement: if this is turn 4 for this player, only queen is legal to place
   const placed = countPlacedByPlayer(state.board, turn);
@@ -706,7 +706,7 @@ export function getAllLegalActions(state) {
     for (const pieceType of Object.keys(supply[turn])) {
       if ((supply[turn][pieceType] || 0) === 0) continue;
       if (isTurn4 && pieceType !== PieceType.QUEEN) continue;
-      if (pieceType === PieceType.QUEEN && state.settings.tournamentRule && state.turnNumber === 1) continue;
+      if (pieceType === PieceType.QUEEN && state.settings.tournamentRule && placed === 0) continue;
       placements.set(pieceType, placementHexes);
     }
   }

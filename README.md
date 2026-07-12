@@ -17,9 +17,10 @@ No build step, no framework — vanilla HTML, CSS, and ES modules.
 - Win and draw detection
 - Must-pass turn handling (automatic with interstitial)
 - Online multiplayer via 4-character room codes
+- Automatic seat recovery after transient disconnects
 - Pass-and-play interstitial screen between turns
 - Pan and pinch-zoom on the board canvas
-- Retro CRT aesthetic with scanlines, vignette, and twinkling starfield
+- Responsive neon interface with reduced-motion and keyboard focus support
 
 ---
 
@@ -34,10 +35,24 @@ npm start
 
 Then open `http://localhost:3000` in your browser.
 
+If port 3000 is already in use, pass another port directly:
+
+```bash
+npm start -- 3001
+# or: npm start -- --port 3001
+# or: PORT=3001 npm start
+```
+
 For development with auto-restart on file changes:
 
 ```bash
 npm run dev
+```
+
+Run the rule and multiplayer regression suite with:
+
+```bash
+npm test
 ```
 
 ---
@@ -79,6 +94,7 @@ The server is authoritative — all moves are validated server-side using the sa
 CLIENT → SERVER
   CREATE_ROOM   { settings }
   JOIN_ROOM     { code }
+  RESUME_ROOM   { code, token }
   PLACE_PIECE   { pieceType, to }
   MOVE_PIECE    { from, to }
   THROW_PIECE   { pillbugHex, from, to }
@@ -87,12 +103,14 @@ CLIENT → SERVER
 
 SERVER → CLIENT
   ROOM_CREATED          { code, player, token }
+  ROOM_RESUMED          { code, player, token, gameState, settings }
   PLAYER_ASSIGNMENT     { player, token }
   GAME_START            { gameState, settings }
   GAME_STATE            { gameState }
   INVALID_MOVE          { reason }
   GAME_OVER             { winner }
   OPPONENT_DISCONNECTED {}
+  OPPONENT_RECONNECTED  {}
   WAITING_FOR_OPPONENT  {}
 ```
 

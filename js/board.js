@@ -417,6 +417,11 @@ export class Board {
 
     c.addEventListener('pointercancel', e => {
       this._pts.delete(e.pointerId);
+      this._pinchLast = 0;
+      if (this._pts.size === 0) {
+        this._dragOrigin = null;
+        this._hasMoved = false;
+      }
     });
 
     // Desktop scroll-wheel zoom

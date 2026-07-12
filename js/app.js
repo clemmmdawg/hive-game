@@ -7,7 +7,7 @@ import {
   getLegalPlacements, getLegalMoves, getLegalThrows,
   getAllLegalActions, deserializeState,
 } from './game.js';
-import { initMenu, showMenu, showResignConfirm } from './menu.js';
+import { initMenu, showMenu, showResignConfirm, leaveOnlineSession } from './menu.js';
 import * as net from './net.js';
 
 // ── Piece display definitions ──────────────────────────
@@ -69,6 +69,7 @@ let gameState    = null;
 let gameSettings = null;   // saved so "play again" can reuse them
 let gameMode     = 'LOCAL'; // 'LOCAL' | 'ONLINE'
 let myPlayer     = 1;       // 1 or 2 — only meaningful in ONLINE mode
+let winPresented = false;
 
 const uiState = {
   phase:           'IDLE',
@@ -98,6 +99,7 @@ function hideGame() {
 function startGame(settings) {
   gameMode     = 'LOCAL';
   gameSettings = settings;
+  winPresented = false;
 
   gameState = createGame({
     expansions:     settings.expansions,
@@ -121,6 +123,7 @@ export function startOnlineGame(settings, playerNum, serializedState) {
   gameMode     = 'ONLINE';
   myPlayer     = playerNum;
   gameSettings = settings;
+  winPresented = false;
   gameState    = deserializeState(serializedState);
 
   clearSelection();
@@ -370,6 +373,8 @@ function launchConfetti() {
 
 function showWinScreen() {
   const screen   = document.getElementById('win-screen');
+  if (winPresented || !gameState?.winner) return;
+  winPresented = true;
   const headline = document.getElementById('win-headline');
   const winner   = gameState.winner;
 
@@ -383,6 +388,7 @@ function showWinScreen() {
 
   screen.setAttribute('aria-hidden', 'false');
   screen.classList.add('active');
+  document.getElementById('btn-to-menu').focus();
   launchConfetti();
 }
 
@@ -394,6 +400,8 @@ document.getElementById('btn-to-menu').addEventListener('click', () => {
   board.pieces.clear();
   board.ghosts = new Set();
   board.selectedHex = null;
+  if (gameMode === 'ONLINE') leaveOnlineSession();
+  gameState = null;
   showMenu();
 });
 
@@ -487,7 +495,16 @@ function syncUI() {
   const status = document.getElementById('status-text');
   const desc   = document.getElementById('piece-desc');
 
-  if (actions.mustPass) {
+  const myTurn = gameMode !== 'ONLINE' || turn === myPlayer;
+  const passBtn = document.getElementById('btn-pass');
+  passBtn.classList.toggle('hidden', !(gameMode === 'ONLINE' && myTurn && actions.mustPass));
+
+  if (!myTurn) {
+    status.textContent = `WAITING FOR PLAYER ${turn}`;
+    status.classList.remove('active');
+    desc.textContent = '';
+    desc.classList.remove('visible');
+  } else if (actions.mustPass) {
     status.textContent = 'NO MOVES — TURN PASSES';
     status.classList.add('active');
     desc.textContent = '';
@@ -518,12 +535,18 @@ function syncUI() {
 // ── Buttons ────────────────────────────────────────────
 
 document.getElementById('btn-cancel').addEventListener('click', clearSelection);
+document.getElementById('btn-pass').addEventListener('click', () => {
+  if (gameMode !== 'ONLINE' || !gameState || gameState.turn !== myPlayer) return;
+  if (!getAllLegalActions(gameState).mustPass) return;
+  document.getElementById('btn-pass').classList.add('hidden');
+  net.send('PASS_TURN');
+});
 
 document.getElementById('btn-resign').addEventListener('click', () => {
   showResignConfirm(() => {
     if (gameMode === 'ONLINE') {
       net.send('RESIGN');
-      net.disconnect();
+      leaveOnlineSession();
     }
     hideGame();
     board.pieces.clear();
@@ -563,11 +586,19 @@ function showInterstitial() {
 
   overlay.setAttribute('aria-hidden', 'false');
   overlay.classList.add('active');
+  overlay.tabIndex = 0;
+  overlay.focus();
 
   setTimeout(() => {
-    overlay.addEventListener('click', () => {
+    let handled = false;
+    const proceed = () => {
+      if (handled) return;
+      handled = true;
+      overlay.removeEventListener('click', proceed);
+      overlay.removeEventListener('keydown', onKeydown);
       overlay.classList.remove('active');
       overlay.setAttribute('aria-hidden', 'true');
+      overlay.tabIndex = -1;
       if (actions.mustPass) {
         if (gameMode === 'ONLINE') {
           net.send('PASS_TURN');
@@ -578,7 +609,15 @@ function showInterstitial() {
       } else {
         syncUI();
       }
-    }, { once: true });
+    };
+    const onKeydown = event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        proceed();
+      }
+    };
+    overlay.addEventListener('click', proceed, { once: true });
+    overlay.addEventListener('keydown', onKeydown);
   }, 350);
 }
 
@@ -590,6 +629,14 @@ function showInterstitial() {
  * server-push events that affect the game UI.
  */
 export function initNetHandlers() {
+  net.on('_disconnected', () => {
+    const statusEl = document.getElementById('status-text');
+    if (statusEl) {
+      statusEl.textContent = 'RECONNECTING…';
+      statusEl.classList.add('active');
+    }
+  });
+
   // Authoritative game state after any action
   net.on('GAME_STATE', ({ gameState: snap }) => {
     gameState = deserializeState(snap);
@@ -600,6 +647,15 @@ export function initNetHandlers() {
       // It's now my turn — no interstitial needed in online mode
       syncUI();
     } else {
+      syncUI();
+    }
+  });
+
+  net.on('ROOM_RESUMED', ({ player, gameState: snap }) => {
+    myPlayer = player;
+    if (snap) {
+      gameState = deserializeState(snap);
+      syncBoardRenderer();
       syncUI();
     }
   });
@@ -626,9 +682,11 @@ export function initNetHandlers() {
     }
   });
 
+  net.on('OPPONENT_RECONNECTED', () => syncUI());
+
   // Server closed the room (timeout, etc.)
   net.on('ROOM_CLOSED', () => {
-    net.disconnect();
+    leaveOnlineSession();
     hideGame();
     board.pieces.clear();
     board.ghosts      = new Set();
@@ -646,3 +704,10 @@ document.getElementById('tray').style.display = 'flex';
 hideGame();
 
 initMenu({ onLocalStart: startGame, onOnlineStart: startOnlineGame, onNetReady: initNetHandlers });
+
+const boardHint = document.getElementById('board-hint');
+if (localStorage.getItem('hiveBoardHintSeen')) boardHint.classList.add('hidden');
+canvas.addEventListener('pointerdown', () => {
+  boardHint.classList.add('hidden');
+  localStorage.setItem('hiveBoardHintSeen', '1');
+}, { once: true });

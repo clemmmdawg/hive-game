@@ -56,6 +56,7 @@ export function createRoom(settings) {
   room.idleTimer = setTimeout(() => {
     if (!room.sockets[1]) cleanupRoom(code);
   }, WAIT_TIMEOUT);
+  room.idleTimer.unref?.();
 
   return room;
 }
@@ -70,7 +71,9 @@ export function joinRoom(code, socket) {
   const room = rooms.get(code);
   if (!room) return { error: 'ROOM_NOT_FOUND' };
 
-  const slot = room.sockets.findIndex(s => s === null);
+  // Tokens reserve seats across disconnects. A normal join may only claim a
+  // seat that has never been assigned; reconnects must use resumeRoom().
+  const slot = room.tokens.findIndex(token => token === null);
   if (slot === -1) return { error: 'ROOM_FULL' };
 
   const playerNum = slot + 1; // 1 or 2
@@ -84,6 +87,26 @@ export function joinRoom(code, socket) {
   socket._hivePlayer = playerNum;
   socket._hiveToken  = token;
 
+  touchActivity(room);
+  return { playerNum, token, room };
+}
+
+/** Reclaim a reserved player seat using the token issued on initial join. */
+export function resumeRoom(code, token, socket) {
+  const room = rooms.get(code);
+  if (!room) return { error: 'ROOM_NOT_FOUND' };
+
+  const slot = room.tokens.findIndex(saved => saved === token);
+  if (slot === -1) return { error: 'INVALID_RESUME_TOKEN' };
+
+  const current = room.sockets[slot];
+  if (current && current.readyState === WS_OPEN) return { error: 'SEAT_OCCUPIED' };
+
+  const playerNum = slot + 1;
+  room.sockets[slot] = socket;
+  socket._hiveRoom   = code;
+  socket._hivePlayer = playerNum;
+  socket._hiveToken  = token;
   touchActivity(room);
   return { playerNum, token, room };
 }
@@ -106,11 +129,12 @@ export function removeSocket(socket) {
 
   // Both gone — clean up after a short grace period (allow reconnect)
   if (!room.sockets[0] && !room.sockets[1]) {
-    setTimeout(() => {
+    const cleanupTimer = setTimeout(() => {
       // Only delete if still vacant
       const r = rooms.get(code);
       if (r && !r.sockets[0] && !r.sockets[1]) cleanupRoom(code);
     }, 30_000);
+    cleanupTimer.unref?.();
   }
 }
 
@@ -144,6 +168,7 @@ function touchActivity(room) {
   room.lastActivity = Date.now();
   if (room.idleTimer) clearTimeout(room.idleTimer);
   room.idleTimer = setTimeout(() => cleanupRoom(room.code), IDLE_TIMEOUT);
+  room.idleTimer.unref?.();
 }
 
 export { touchActivity };
