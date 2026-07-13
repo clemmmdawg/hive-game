@@ -20,6 +20,8 @@ No build step, no framework — vanilla HTML, CSS, and ES modules.
 - Automatic seat recovery after transient disconnects
 - Pass-and-play interstitial screen between turns
 - Pan and pinch-zoom on the board canvas
+- Piece tooltips in the tray and on the board
+- Built-in How to Play reference on the main menu
 - Responsive neon interface with reduced-motion and keyboard focus support
 
 ---
@@ -42,6 +44,16 @@ npm start -- 3001
 # or: npm start -- --port 3001
 # or: PORT=3001 npm start
 ```
+
+The game uses system emoji for pieces by default. To opt into the generated PNG
+piece set for a session, add `?pieceArt=png` to the URL:
+
+```text
+http://localhost:3001/?pieceArt=png
+```
+
+Edge uses a built-in letter tile for the beetle when PNG artwork is disabled,
+avoiding the missing beetle glyph found in some Windows emoji fonts.
 
 For development with auto-restart on file changes:
 

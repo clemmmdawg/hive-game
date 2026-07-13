@@ -21,6 +21,7 @@ let _onNetReady    = null; // called just before handing off to the online game
 let _roomCode  = null; // code we're hosting/joining
 let _myPlayer  = null; // 1 or 2
 let _playerToken = null;
+let _rulesPreviousFocus = null;
 
 function deepClone(obj) { return JSON.parse(JSON.stringify(obj)); }
 
@@ -126,11 +127,49 @@ function _bindMenu() {
 
   // Start / Create / Join button
   document.getElementById('btn-start').addEventListener('click', _handleStart);
+  document.getElementById('btn-rules').addEventListener('click', _showRules);
+  document.getElementById('btn-close-rules').addEventListener('click', _hideRules);
+  document.getElementById('rules-overlay').addEventListener('click', event => {
+    if (event.target.id === 'rules-overlay') _hideRules();
+  });
   document.getElementById('btn-cancel-online').addEventListener('click', () => {
     leaveOnlineSession();
     _hideOnlinePanel();
     _syncModeButtons();
   });
+}
+
+function _showRules() {
+  const overlay = document.getElementById('rules-overlay');
+  const menu = document.getElementById('menu-screen');
+  _rulesPreviousFocus = document.activeElement;
+  overlay.classList.add('active');
+  overlay.setAttribute('aria-hidden', 'false');
+  menu.inert = true;
+  document.addEventListener('keydown', _handleRulesKeydown);
+  document.getElementById('btn-close-rules').focus();
+}
+
+function _hideRules() {
+  const overlay = document.getElementById('rules-overlay');
+  if (!overlay.classList.contains('active')) return;
+  overlay.classList.remove('active');
+  overlay.setAttribute('aria-hidden', 'true');
+  document.getElementById('menu-screen').inert = false;
+  document.removeEventListener('keydown', _handleRulesKeydown);
+  _rulesPreviousFocus?.focus?.();
+  _rulesPreviousFocus = null;
+}
+
+function _handleRulesKeydown(event) {
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    _hideRules();
+  } else if (event.key === 'Tab') {
+    // The close button is the dialog's only interactive control.
+    event.preventDefault();
+    document.getElementById('btn-close-rules').focus();
+  }
 }
 
 function _handleStart() {

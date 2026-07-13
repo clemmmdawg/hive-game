@@ -13,15 +13,43 @@ import * as net from './net.js';
 // ── Piece display definitions ──────────────────────────
 
 const PIECE_UI = {
-  [PieceType.QUEEN]:       { emoji: '🐝', label: 'QUEEN'  },
-  [PieceType.BEETLE]:      { emoji: '🪲', label: 'BEETLE' },
-  [PieceType.GRASSHOPPER]: { emoji: '🦗', label: 'HOP'    },
-  [PieceType.ANT]:         { emoji: '🐜', label: 'ANT'    },
-  [PieceType.SPIDER]:      { emoji: '🕷️', label: 'SPIDER' },
-  [PieceType.MOSQUITO]:    { emoji: '🦟', label: 'MOSQ'   },
-  [PieceType.LADYBUG]:     { emoji: '🐞', label: 'LADY'   },
-  [PieceType.PILLBUG]:     { emoji: '🐛', label: 'PILL'   },
+  [PieceType.QUEEN]:       { emoji: '🐝', label: 'QUEEN',  image: 'assets/pieces/queen.png'       },
+  [PieceType.BEETLE]:      { emoji: '🪲', label: 'BEETLE', image: 'assets/pieces/beetle.png'      },
+  [PieceType.GRASSHOPPER]: { emoji: '🦗', label: 'HOP',    image: 'assets/pieces/grasshopper.png' },
+  [PieceType.ANT]:         { emoji: '🐜', label: 'ANT',    image: 'assets/pieces/ant.png'         },
+  [PieceType.SPIDER]:      { emoji: '🕷️', label: 'SPIDER', image: 'assets/pieces/spider.png'      },
+  [PieceType.MOSQUITO]:    { emoji: '🦟', label: 'MOSQ',   image: 'assets/pieces/mosquito.png'    },
+  [PieceType.LADYBUG]:     { emoji: '🐞', label: 'LADY',   image: 'assets/pieces/ladybug.png'     },
+  [PieceType.PILLBUG]:     { emoji: '🐛', label: 'PILL',   image: 'assets/pieces/pillbug.png'     },
 };
+
+const startupFlags = new URLSearchParams(window.location.search);
+const USE_PIECE_ART = ['png', '1', 'true'].includes(
+  (startupFlags.get('pieceArt') ?? startupFlags.get('piece-art') ?? '').toLowerCase()
+);
+const EDGE_USES_BEETLE_FALLBACK = /Edg\//.test(navigator.userAgent);
+
+function pieceGlyph(type) {
+  if (type === PieceType.BEETLE && EDGE_USES_BEETLE_FALLBACK) {
+    return { text: 'B', kind: 'letter' };
+  }
+  return { text: PIECE_UI[type]?.emoji ?? '?', kind: 'emoji' };
+}
+
+// PNGs are opt-in progressive enhancement; emojis remain the default.
+const PIECE_IMAGES = new Map();
+if (USE_PIECE_ART) {
+  for (const [type, ui] of Object.entries(PIECE_UI)) {
+    const image = new Image();
+    image.decoding = 'async';
+    image.onload = () => {
+      if (gameState) syncBoardRenderer();
+    };
+    image.onerror = () => PIECE_IMAGES.delete(type);
+    image.src = ui.image;
+    PIECE_IMAGES.set(type, image);
+  }
+}
 
 const TRAY_ORDER = [
   PieceType.QUEEN,
@@ -47,11 +75,49 @@ const PIECE_DESC = {
   PILLBUG:     'Slides 1 space, or tosses an adjacent tile over itself.',
 };
 
+const PIECE_NAMES = {
+  QUEEN: 'QUEEN BEE', BEETLE: 'BEETLE', GRASSHOPPER: 'GRASSHOPPER', ANT: 'SOLDIER ANT',
+  SPIDER: 'SPIDER', MOSQUITO: 'MOSQUITO', LADYBUG: 'LADYBUG', PILLBUG: 'PILLBUG',
+};
+
 // ── Canvas setup ───────────────────────────────────────
 
 const canvas      = document.getElementById('board');
 const emojiCanvas = document.getElementById('emoji-layer');
 const board       = new Board(canvas, emojiCanvas);
+const pieceTooltip = document.getElementById('piece-tooltip');
+let pieceTooltipTimer = null;
+
+function showPieceTooltip(type, x, y, preferAbove = false) {
+  if (!PIECE_DESC[type]) return;
+  if (pieceTooltipTimer) { clearTimeout(pieceTooltipTimer); pieceTooltipTimer = null; }
+  document.getElementById('piece-tooltip-name').textContent = PIECE_NAMES[type] ?? type;
+  document.getElementById('piece-tooltip-copy').textContent = PIECE_DESC[type];
+  pieceTooltip.setAttribute('aria-hidden', 'false');
+  pieceTooltip.classList.add('visible');
+  pieceTooltip.style.left = '0px';
+  pieceTooltip.style.top = '0px';
+
+  const rect = pieceTooltip.getBoundingClientRect();
+  const margin = 12;
+  const left = Math.min(window.innerWidth - rect.width - margin, Math.max(margin, x + 14));
+  let top = preferAbove ? y - rect.height - 12 : y + 14;
+  if (top + rect.height > window.innerHeight - margin) top = y - rect.height - 14;
+  top = Math.max(margin, top);
+  pieceTooltip.style.left = `${left}px`;
+  pieceTooltip.style.top = `${top}px`;
+}
+
+function hidePieceTooltip() {
+  if (pieceTooltipTimer) { clearTimeout(pieceTooltipTimer); pieceTooltipTimer = null; }
+  pieceTooltip.classList.remove('visible');
+  pieceTooltip.setAttribute('aria-hidden', 'true');
+}
+
+function showBriefPieceTooltip(type, x, y) {
+  showPieceTooltip(type, x, y);
+  pieceTooltipTimer = setTimeout(hidePieceTooltip, 2400);
+}
 
 function setupCanvas() {
   canvas.width  = window.innerWidth;
@@ -86,6 +152,7 @@ function showGame() {
 }
 
 function hideGame() {
+  hidePieceTooltip();
   document.getElementById('hud').classList.remove('game-visible');
   document.getElementById('tray').classList.remove('game-visible');
   // Hide win screen too
@@ -139,9 +206,13 @@ function syncBoardRenderer() {
   if (!gameState) return;
   for (const [key, stack] of gameState.board.entries()) {
     board.pieces.set(key, stack.map(p => ({
+      ...pieceGlyph(p.type),
       player: p.player,
       type:   p.type,
       emoji:  PIECE_UI[p.type]?.emoji ?? '?',
+      image:  PIECE_IMAGES.get(p.type)?.complete && PIECE_IMAGES.get(p.type)?.naturalWidth
+        ? PIECE_IMAGES.get(p.type)
+        : null,
     })));
   }
 }
@@ -189,6 +260,7 @@ function clearSelection() {
 }
 
 function selectTrayPiece(type) {
+  hidePieceTooltip();
   if (uiState.trayPick?.type === type) { clearSelection(); return; }
   uiState.phase     = 'TRAY';
   uiState.trayPick  = { type };
@@ -407,17 +479,22 @@ document.getElementById('btn-to-menu').addEventListener('click', () => {
 
 // ── Tap handler ────────────────────────────────────────
 
-board.onTap = (q, r) => {
+board.onTap = (q, r, clientX, clientY) => {
   if (!gameState) return;
-  if (gameMode === 'ONLINE' && gameState.turn !== myPlayer) return;
   const key      = hexKey(q, r);
   const stack    = gameState.board.get(key);
   const topPiece = stack ? stack[stack.length - 1] : null;
   const turn     = gameState.turn;
 
+  if (gameMode === 'ONLINE' && turn !== myPlayer) {
+    if (topPiece) showBriefPieceTooltip(topPiece.type, clientX, clientY);
+    return;
+  }
+
   if (uiState.phase === 'TRAY') {
     if (board.ghosts.has(key))          doPlace(key);
     else if (topPiece?.player === turn) selectBoardPiece(key);
+    else if (topPiece)                  showBriefPieceTooltip(topPiece.type, clientX, clientY);
     else                                clearSelection();
     return;
   }
@@ -427,17 +504,28 @@ board.onTap = (q, r) => {
     else if (board.throwTargets.has(key)) selectThrowPiece(key, uiState.boardPick);
     else if (key === uiState.boardPick) clearSelection();
     else if (topPiece?.player === turn) selectBoardPiece(key);
+    else if (topPiece)                  showBriefPieceTooltip(topPiece.type, clientX, clientY);
     else                                clearSelection();
     return;
   }
 
   if (uiState.phase === 'THROW') {
     if (board.ghosts.has(key)) doThrow(key);
+    else if (topPiece)         showBriefPieceTooltip(topPiece.type, clientX, clientY);
     else                       clearSelection();
     return;
   }
 
   if (topPiece?.player === turn) selectBoardPiece(key);
+  else if (topPiece) showBriefPieceTooltip(topPiece.type, clientX, clientY);
+};
+
+board.onHover = (q, r, clientX, clientY) => {
+  if (q == null || !gameState) { hidePieceTooltip(); return; }
+  const stack = gameState.board.get(hexKey(q, r));
+  const topPiece = stack?.[stack.length - 1];
+  if (topPiece) showPieceTooltip(topPiece.type, clientX, clientY);
+  else hidePieceTooltip();
 };
 
 // ── Tray rendering ─────────────────────────────────────
@@ -458,10 +546,18 @@ function renderTray() {
       const hasSpots = (actions.placements.get(type) || []).length > 0;
       const myTurn   = gameMode !== 'ONLINE' || gameState.turn === myPlayer;
       const disabled = count === 0 || !hasSpots || !myTurn;
+      const glyph    = pieceGlyph(type);
+      const imageMarkup = USE_PIECE_ART
+        ? `<img class="piece-art" src="${ui.image}" alt="" aria-hidden="true">`
+        : '';
       return `<div class="piece-slot ${playerCls}${selected ? ' selected' : ''}${disabled ? ' disabled' : ''}"
            data-type="${type}" role="button"
-           aria-label="${ui.label} x${count}" tabindex="${disabled ? -1 : 0}">
-        <div class="piece-hex">${ui.emoji}</div>
+           aria-label="${PIECE_NAMES[type] ?? ui.label} x${count}. ${PIECE_DESC[type]}"
+           aria-disabled="${disabled}" tabindex="0">
+        <div class="piece-hex">
+          ${imageMarkup}
+          <span class="piece-emoji-fallback ${glyph.kind === 'letter' ? 'letter-glyph' : ''}" aria-hidden="true">${glyph.text}</span>
+        </div>
         <span class="piece-count">x${count}</span>
       </div>`;
     }).join('');
@@ -471,6 +567,26 @@ function renderTray() {
     el.addEventListener('keydown', e  => {
       if (e.key === 'Enter' || e.key === ' ') selectTrayPiece(el.dataset.type);
     });
+  });
+
+  container.querySelectorAll('.piece-art').forEach(image => {
+    const showImage = () => image.classList.add('loaded');
+    if (image.complete && image.naturalWidth) showImage();
+    else {
+      image.addEventListener('load', showImage, { once: true });
+      image.addEventListener('error', () => image.classList.add('failed'), { once: true });
+    }
+  });
+
+  container.querySelectorAll('.piece-slot').forEach(slot => {
+    const showForSlot = () => {
+      const rect = slot.getBoundingClientRect();
+      showPieceTooltip(slot.dataset.type, rect.left + rect.width / 2, rect.top, true);
+    };
+    slot.addEventListener('pointerenter', showForSlot);
+    slot.addEventListener('pointerleave', hidePieceTooltip);
+    slot.addEventListener('focus', showForSlot);
+    slot.addEventListener('blur', hidePieceTooltip);
   });
 }
 

@@ -55,9 +55,56 @@
           <p id="online-status"></p>
           <button id="btn-cancel-online" style="display:none">CANCEL</button>
         </div>
+        <button id="btn-rules" type="button">HOW TO PLAY</button>
       </section>
       <p id="menu-footnote">NO BOARD. NO CAPTURES. JUST STRATEGY.</p>
     </main>
+  </div>
+
+  <!-- RULES DIALOG -->
+  <div id="rules-overlay" aria-hidden="true">
+    <section id="rules-dialog" role="dialog" aria-modal="true" aria-labelledby="rules-title">
+      <header id="rules-header">
+        <div>
+          <p class="rules-kicker">FIELD MANUAL</p>
+          <h2 id="rules-title">HOW TO PLAY</h2>
+        </div>
+        <button id="btn-close-rules" type="button" aria-label="Close rules">✕</button>
+      </header>
+
+      <div id="rules-content">
+        <section>
+          <h3>OBJECTIVE</h3>
+          <p>Completely surround your opponent’s Queen Bee. The six surrounding pieces can belong to either player.</p>
+        </section>
+        <section>
+          <h3>YOUR TURN</h3>
+          <p>Place one new piece or move one piece already in the hive. You cannot move pieces until your Queen has been placed.</p>
+        </section>
+        <section>
+          <h3>PLACING PIECES</h3>
+          <p>Your first piece touches the opponent’s first piece. After that, a newly placed piece must touch your color and cannot touch the opponent’s color. Place your Queen by your fourth turn. The optional tournament opening prevents either player from leading with the Queen.</p>
+        </section>
+        <section>
+          <h3>THE HIVE</h3>
+          <p>Every piece must remain connected as one hive. Sliding pieces cannot squeeze through a gap blocked on both sides.</p>
+        </section>
+
+        <section class="rules-piece-guide">
+          <h3>PIECE GUIDE</h3>
+          <dl>
+            <div><dt>QUEEN</dt><dd>Slides one space.</dd></div>
+            <div><dt>BEETLE</dt><dd>Moves one space and can climb onto the hive.</dd></div>
+            <div><dt>GRASSHOPPER</dt><dd>Jumps in a straight line over one or more pieces.</dd></div>
+            <div><dt>ANT</dt><dd>Slides any distance around the hive.</dd></div>
+            <div><dt>SPIDER</dt><dd>Slides exactly three spaces.</dd></div>
+            <div><dt>MOSQUITO</dt><dd>Copies the movement of an adjacent piece.</dd></div>
+            <div><dt>LADYBUG</dt><dd>Moves two spaces over the hive, then one space down.</dd></div>
+            <div><dt>PILLBUG</dt><dd>Slides one space or relocates an adjacent piece.</dd></div>
+          </dl>
+        </section>
+      </div>
+    </section>
   </div>
 
   <!-- GAME UI -->
@@ -70,6 +117,10 @@
   </header>
 
   <div id="piece-desc" aria-live="polite"></div>
+  <div id="piece-tooltip" role="tooltip" aria-hidden="true">
+    <strong id="piece-tooltip-name"></strong>
+    <span id="piece-tooltip-copy"></span>
+  </div>
 
   <canvas id="board" aria-label="Hive game board"></canvas>
   <canvas id="emoji-layer" aria-hidden="true"></canvas>

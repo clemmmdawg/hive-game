@@ -32,6 +32,8 @@ Run with `npm start` (port 3000), `npm start -- 3001`, or `npm start -- --port 3
 - Responsive refined-neon UI with reduced-motion and focus-visible support
 - Resign/quit button in HUD with confirmation overlay
 - Piece description bar in HUD (slides in on selection)
+- Hover/focus/tap piece tooltips for tray and board pieces
+- Accessible How to Play dialog on the main menu
 - CRT scanline + vignette overlay
 - Twinkling starfield background
 - Automated rule, validator, and room lifecycle regression tests
@@ -73,8 +75,8 @@ Run with `npm start` (port 3000), `npm start -- 3001`, or `npm start -- --port 3
 
 ### Canvas architecture
 Two stacked canvases share the same fixed inset:
-- `#board` — everything except emoji (hexes, glows, ghosts, stars). `touch-action: none`
-- `#emoji-layer` — emoji only, `pointer-events: none`. Completely isolated 2D context to prevent animated `fillStyle` alpha from the board canvas bleeding into emoji rendering (a real browser bug we fixed)
+- `#board` — everything except piece glyphs (hexes, glows, ghosts, stars). `touch-action: none`
+- `#emoji-layer` — piece emoji or opt-in PNG art, `pointer-events: none`. Completely isolated 2D context to prevent animated canvas state from bleeding into glyph rendering.
 
 A third canvas `#confetti-layer` is `display:none` except during the win animation.
 
@@ -159,7 +161,7 @@ board.resize(w, h);     // call on window resize
 board.draw(t);          // call every RAF frame with DOMHighResTimeStamp
 
 // Written by app.js each frame/action:
-board.pieces        // Map<hexKey, Array<{player, type, emoji}>>  — full stacks
+board.pieces        // Map<hexKey, Array<{player, type, emoji, text, kind, image?}>> — full stacks
 board.ghosts        // Set<hexKey>  — green placement/move highlights
 board.throwTargets  // Set<hexKey>  — amber pillbug-throw highlights
 board.selectedHex   // string|null  — white pulsing selection ring
@@ -286,7 +288,7 @@ Room code and player token are stored in `localStorage`. If the socket drops, `R
 - [ ] AI opponent — minimax or MCTS; start with random-legal-move bot for testing
 
 ### Polish
-- [ ] Custom SVG/PNG piece icons (emoji are placeholders)
+- [x] Optional PNG piece icons via `?pieceArt=png`; emoji remain the default
 - [ ] Sound effects (place, move, win)
 - [ ] Animated piece placement (scale-in pop)
 - [ ] Board coordinate hints (toggle)
