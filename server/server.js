@@ -39,7 +39,8 @@ import {
   touchActivity,
 } from './rooms.js';
 
-import { validateAction } from './validator.js';
+import { validateAction, resolveResign } from './validator.js';
+import { resolveStaticPath } from './static.js';
 
 const DEFAULT_SETTINGS = Object.freeze({
   expansions: { mosquito: false, ladybug: false, pillbug: false },
@@ -83,22 +84,17 @@ const MIME = {
 // ── HTTP static server ───────────────────────────────────────────────────────
 
 const httpServer = createServer((req, res) => {
-  // Strip query strings and anchors
-  let urlPath = req.url.split('?')[0].split('#')[0];
-  if (urlPath === '/') urlPath = '/index.html';
-
-  // Prevent path traversal
-  const filePath = join(ROOT, urlPath);
-  if (!filePath.startsWith(ROOT)) {
-    res.writeHead(403);
-    res.end('Forbidden');
+  const filePath = resolveStaticPath(ROOT, req.url);
+  if (!filePath) {
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Not found');
     return;
   }
 
   try {
     const data = readFileSync(filePath);
     const mime = MIME[extname(filePath)] ?? 'application/octet-stream';
-    res.writeHead(200, { 'Content-Type': mime });
+    res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'no-cache' });
     res.end(data);
   } catch {
     res.writeHead(404, { 'Content-Type': 'text/plain' });
@@ -250,10 +246,12 @@ function handleMessage(socket, msg) {
     // ── Resign ─────────────────────────────────────────────────────────────
     case 'RESIGN': {
       const room = getRoom(socket._hiveRoom);
-      if (!room?.gameState) { socket.send(err('NO_ACTIVE_GAME')); return; }
+      const resign = resolveResign(room?.gameState ?? null, socket._hivePlayer);
+      if (!resign.valid) { socket.send(err(resign.reason)); return; }
 
-      const winner = socket._hivePlayer === 1 ? 2 : 1;
+      const winner = resign.winner;
       room.gameState = { ...room.gameState, winner };
+      touchActivity(room);
 
       broadcast(room, { type: 'GAME_OVER', winner, reason: 'RESIGN' });
       console.log(`[server] Room ${room.code} — player ${socket._hivePlayer} resigned`);

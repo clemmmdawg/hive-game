@@ -67,3 +67,16 @@ export function validateAction(state, action, playerNum) {
       return { valid: false, reason: 'UNKNOWN_ACTION_TYPE' };
   }
 }
+
+/**
+ * Decide the outcome of a resignation.
+ *
+ * @param {object|null} state - Live GameState, or null before the game starts
+ * @param {number} playerNum  - The resigning player (1 or 2)
+ * @returns {{ valid: boolean, winner?: number, reason?: string }}
+ */
+export function resolveResign(state, playerNum) {
+  if (!state) return { valid: false, reason: 'NO_ACTIVE_GAME' };
+  if (state.winner) return { valid: false, reason: 'GAME_OVER' };
+  return { valid: true, winner: playerNum === 1 ? 2 : 1 };
+}
