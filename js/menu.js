@@ -1,7 +1,9 @@
-// menu.js — Main menu, settings panel, resign confirm
-// Exports: initMenu({ onLocalStart, onOnlineStart }), showMenu(), showResignConfirm(onConfirm)
+// menu.js — Main menu, settings panel, rules dialog, confirm dialog
+// Exports: initMenu(callbacks), showMenu(opts), hideMenu(), leaveOnlineSession(),
+//          showConfirm(opts, onConfirm), showRules(), isOverlayOpen()
 
 import * as net from './net.js';
+import { spriteSVG } from './sprites.js';
 
 // ── Default settings ────────────────────────────────────
 
@@ -12,48 +14,70 @@ const DEFAULT_SETTINGS = {
   clock:          { enabled: false },
 };
 
+const SETTINGS_KEY = 'hiveSettings';
+const SESSION_KEY  = 'hiveSession';
+const CODE_CHARS   = /[^BCDFGHJKLMNPQRSTVWXYZ2-9]/g;
+
 let _settings      = deepClone(DEFAULT_SETTINGS);
-let _onLocalStart  = null;
-let _onOnlineStart = null;
-let _onNetReady    = null; // called just before handing off to the online game
+let _callbacks     = {};
+let _joinCode      = '';
 
 // Room state (for HOST/JOIN flow)
-let _roomCode  = null; // code we're hosting/joining
-let _myPlayer  = null; // 1 or 2
-let _playerToken = null;
+let _roomCode      = null; // code we're hosting/joining
+let _myPlayer      = null; // 1 or 2
+let _playerToken   = null;
+let _onlinePending = false; // true from CREATE/JOIN until the game starts or is cancelled
 let _rulesPreviousFocus = null;
+let _inertedForRules = [];
 
 function deepClone(obj) { return JSON.parse(JSON.stringify(obj)); }
+const $ = id => document.getElementById(id);
+
+function storageGet(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+function storageSet(key, value) {
+  try {
+    if (value === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, value);
+  } catch { /* private mode / blocked storage: settings just won't persist */ }
+}
 
 // ── Public API ──────────────────────────────────────────
 
 /**
  * Wire up the menu and render it.
- * @param {{ onLocalStart: Function, onOnlineStart: Function, onNetReady: Function }} callbacks
+ * @param {{
+ *   onLocalStart: Function, onOnlineStart: Function, onNetReady: Function,
+ *   onContinueLocal?: Function, getLocalSaveSummary?: () => (string|null)
+ * }} callbacks
  */
-export function initMenu({ onLocalStart, onOnlineStart, onNetReady }) {
-  _onLocalStart  = onLocalStart;
-  _onOnlineStart = onOnlineStart;
-  _onNetReady    = onNetReady;
-  _settings      = deepClone(DEFAULT_SETTINGS);
+export function initMenu(callbacks) {
+  _callbacks = callbacks;
   _bindMenu();
+  _applyRoomLink();
   showMenu();
   _tryResumeSavedSession();
 }
 
-/** Fade the menu in and reset to the initial state. */
-export function showMenu() {
-  _settings  = deepClone(DEFAULT_SETTINGS);
-  _roomCode  = null;
-  _myPlayer  = null;
+/** Fade the menu in and reset online state. `notice` shows an inline message. */
+export function showMenu({ notice } = {}) {
+  _settings    = { ...deepClone(DEFAULT_SETTINGS), ..._loadSavedSettings(), mode: _settings.mode };
+  _roomCode    = null;
+  _myPlayer    = null;
   _playerToken = null;
-  _hideOnlinePanel();
+  _onlinePending = false;
+  _resetOnlinePanel();
+  if (notice) _showError(notice);
 
-  const el = document.getElementById('menu-screen');
+  const el = $('menu-screen');
   el.setAttribute('aria-hidden', 'false');
   el.classList.add('active');
+  el.inert = false;
+  el.scrollTop = 0;
   _renderSettings();
   _syncModeButtons();
+  _renderContinue();
 }
 
 /** Leave any online session and clear reconnect credentials. */
@@ -62,28 +86,40 @@ export function leaveOnlineSession() {
   _roomCode = null;
   _myPlayer = null;
   _playerToken = null;
-  localStorage.removeItem('hiveSession');
+  _onlinePending = false;
+  storageSet(SESSION_KEY, null);
 }
 
 /** Fade the menu out. */
 export function hideMenu() {
-  const el = document.getElementById('menu-screen');
+  const el = $('menu-screen');
   el.classList.remove('active');
   el.setAttribute('aria-hidden', 'true');
+  el.inert = true;
+}
+
+/** True while the rules or confirm dialog is open (app uses this to route keys). */
+export function isOverlayOpen() {
+  return $('rules-overlay').classList.contains('active') || $('resign-confirm').classList.contains('active');
 }
 
 /**
- * Show the resign confirmation overlay.
- * @param {() => void} onConfirm  called if player confirms resign
+ * Show the confirmation dialog.
+ * @param {{ title: string, body: string, confirmLabel: string, cancelLabel?: string }} opts
+ * @param {() => void} onConfirm  called if the player confirms
  */
-export function showResignConfirm(onConfirm) {
-  const el = document.getElementById('resign-confirm');
+export function showConfirm({ title, body, confirmLabel, cancelLabel = 'KEEP PLAYING' }, onConfirm) {
+  const el  = $('resign-confirm');
+  const yes = $('btn-resign-yes');
+  const no  = $('btn-resign-no');
+  const previousFocus = document.activeElement;
+
+  $('resign-question').textContent = title;
+  $('resign-sub').textContent      = body;
+  yes.textContent = confirmLabel;
+  no.textContent  = cancelLabel;
   el.classList.add('active');
   el.setAttribute('aria-hidden', 'false');
-
-  const yes = document.getElementById('btn-resign-yes');
-  const no  = document.getElementById('btn-resign-no');
-  const previousFocus = document.activeElement;
 
   function cleanup() {
     el.classList.remove('active');
@@ -91,16 +127,18 @@ export function showResignConfirm(onConfirm) {
     yes.removeEventListener('click', handleYes);
     no.removeEventListener('click',  handleNo);
     el.removeEventListener('keydown', handleKeydown);
+    el.removeEventListener('click', handleBackdrop);
     previousFocus?.focus?.();
   }
 
   function handleYes() { cleanup(); onConfirm(); }
   function handleNo()  { cleanup(); }
+  function handleBackdrop(event) { if (event.target === el) handleNo(); }
   function handleKeydown(event) {
-    if (event.key === 'Escape') handleNo();
+    if (event.key === 'Escape') { event.stopPropagation(); handleNo(); }
     if (event.key === 'Tab') {
-      const target = document.activeElement === yes && event.shiftKey ? no
-        : document.activeElement === no && !event.shiftKey ? yes
+      const target = document.activeElement === yes && !event.shiftKey ? no
+        : document.activeElement === no && event.shiftKey ? yes
         : null;
       if (target) { event.preventDefault(); target.focus(); }
     }
@@ -109,54 +147,65 @@ export function showResignConfirm(onConfirm) {
   yes.addEventListener('click', handleYes, { once: true });
   no.addEventListener('click',  handleNo,  { once: true });
   el.addEventListener('keydown', handleKeydown);
+  el.addEventListener('click', handleBackdrop);
   no.focus();
+}
+
+/** Open the How to Play dialog (from the menu or in-game). */
+export function showRules() {
+  const overlay = $('rules-overlay');
+  if (overlay.classList.contains('active')) return;
+  _rulesPreviousFocus = document.activeElement;
+  overlay.classList.add('active');
+  overlay.setAttribute('aria-hidden', 'false');
+  _inertedForRules = [...document.body.children].filter(el => el !== overlay && !el.inert);
+  for (const el of _inertedForRules) el.inert = true;
+  document.addEventListener('keydown', _handleRulesKeydown, true);
+  $('btn-close-rules').focus();
 }
 
 // ── Internal ────────────────────────────────────────────
 
 function _bindMenu() {
-  // Mode buttons
   document.querySelectorAll('.mode-btn[data-mode]').forEach(btn => {
     btn.addEventListener('click', () => {
+      if (_onlinePending) leaveOnlineSession(); // switching mode abandons any open room
+      _clearError();
       _settings.mode = btn.dataset.mode;
+      _resetOnlinePanel();
       _syncModeButtons();
       _renderSettings();
-      _hideOnlinePanel();
+      if (_settings.mode === 'JOIN') $('join-code-input')?.focus();
     });
   });
 
-  // Start / Create / Join button
-  document.getElementById('btn-start').addEventListener('click', _handleStart);
-  document.getElementById('btn-rules').addEventListener('click', _showRules);
-  document.getElementById('btn-close-rules').addEventListener('click', _hideRules);
-  document.getElementById('rules-overlay').addEventListener('click', event => {
+  $('btn-start').addEventListener('click', _handleStart);
+  $('btn-continue').addEventListener('click', () => {
+    hideMenu();
+    _callbacks.onContinueLocal?.();
+  });
+  $('btn-rules').addEventListener('click', showRules);
+  $('btn-close-rules').addEventListener('click', _hideRules);
+  $('rules-overlay').addEventListener('click', event => {
     if (event.target.id === 'rules-overlay') _hideRules();
   });
-  document.getElementById('btn-cancel-online').addEventListener('click', () => {
+  $('btn-cancel-online').addEventListener('click', () => {
     leaveOnlineSession();
-    _hideOnlinePanel();
+    _resetOnlinePanel();
     _syncModeButtons();
   });
-}
-
-function _showRules() {
-  const overlay = document.getElementById('rules-overlay');
-  const menu = document.getElementById('menu-screen');
-  _rulesPreviousFocus = document.activeElement;
-  overlay.classList.add('active');
-  overlay.setAttribute('aria-hidden', 'false');
-  menu.inert = true;
-  document.addEventListener('keydown', _handleRulesKeydown);
-  document.getElementById('btn-close-rules').focus();
+  $('btn-copy-code').addEventListener('click', () => _copy(_roomCode, $('btn-copy-code'), 'COPY CODE'));
+  $('btn-share-link').addEventListener('click', _shareLink);
 }
 
 function _hideRules() {
-  const overlay = document.getElementById('rules-overlay');
+  const overlay = $('rules-overlay');
   if (!overlay.classList.contains('active')) return;
   overlay.classList.remove('active');
   overlay.setAttribute('aria-hidden', 'true');
-  document.getElementById('menu-screen').inert = false;
-  document.removeEventListener('keydown', _handleRulesKeydown);
+  for (const el of _inertedForRules) el.inert = false;
+  _inertedForRules = [];
+  document.removeEventListener('keydown', _handleRulesKeydown, true);
   _rulesPreviousFocus?.focus?.();
   _rulesPreviousFocus = null;
 }
@@ -164,40 +213,33 @@ function _hideRules() {
 function _handleRulesKeydown(event) {
   if (event.key === 'Escape') {
     event.preventDefault();
+    event.stopPropagation();
     _hideRules();
   } else if (event.key === 'Tab') {
-    // The close button is the dialog's only interactive control.
+    // Cycle between the close button and the scrollable content.
     event.preventDefault();
-    document.getElementById('btn-close-rules').focus();
+    const close = $('btn-close-rules'), content = $('rules-content');
+    (document.activeElement === close ? content : close).focus();
   }
 }
 
 function _handleStart() {
+  _clearError();
   const mode = _settings.mode;
-
   if (mode === 'LOCAL') {
     hideMenu();
-    _onLocalStart(deepClone(_settings));
-    return;
-  }
-
-  if (mode === 'HOST') {
+    _callbacks.onLocalStart(deepClone(_settings));
+  } else if (mode === 'HOST') {
     _startHostFlow();
-    return;
-  }
-
-  if (mode === 'JOIN') {
+  } else if (mode === 'JOIN') {
     _startJoinFlow();
-    return;
   }
 }
 
 // ── HOST flow ───────────────────────────────────────────
 
 function _startHostFlow() {
-  _setOnlineStatus('Connecting…');
-  _showOnlinePanel();
-  _showCancelBtn();
+  _beginOnline('CONNECTING…');
 
   net.on('_connected', () => {
     if (_roomCode && _playerToken) {
@@ -212,8 +254,7 @@ function _startHostFlow() {
     _myPlayer = player;
     _playerToken = token;
     _saveSession();
-    _setOnlineStatus(`Room code: <span class="room-code">${code}</span><br>Waiting for opponent…`);
-    _showCancelBtn();
+    _showRoom(code);
   });
 
   _attachOnlineGameHandlers();
@@ -223,27 +264,19 @@ function _startHostFlow() {
 // ── JOIN flow ───────────────────────────────────────────
 
 function _startJoinFlow() {
-  const codeInput = document.getElementById('join-code-input');
-  const code      = (codeInput?.value ?? '').toUpperCase().trim();
-
+  const code = _joinCode.toUpperCase().trim();
   if (code.length !== 4) {
-    _setOnlineStatus('Enter a 4-letter room code.', true);
-    _showOnlinePanel();
+    _showError('Enter the 4-character room code from your host.');
+    $('join-code-input')?.focus();
     return;
   }
 
   _roomCode = code;
-  _setOnlineStatus('Connecting…');
-  _showOnlinePanel();
-  _showCancelBtn();
+  _beginOnline(`JOINING ROOM ${code}…`);
 
   net.on('_connected', () => {
     if (_playerToken) net.send('RESUME_ROOM', { code: _roomCode, token: _playerToken });
     else net.send('JOIN_ROOM', { code: _roomCode });
-  });
-
-  net.on('ROOM_NOT_FOUND', () => {
-    _setOnlineStatus('Room not found. Check the code and try again.', true);
   });
 
   _attachOnlineGameHandlers();
@@ -260,79 +293,130 @@ function _attachOnlineGameHandlers() {
   });
 
   net.on('GAME_START', ({ gameState, settings }) => {
+    _onlinePending = false;
     // Wire up in-game net handlers before handing off
-    _onNetReady();
+    _callbacks.onNetReady();
     hideMenu();
-    _onOnlineStart(settings, _myPlayer, gameState);
+    _callbacks.onOnlineStart(settings, _myPlayer, gameState);
   });
 
   net.on('_disconnected', () => {
-    if (_roomCode) {
-      _setOnlineStatus('Disconnected. Reconnecting…');
-    }
+    if (!_onlinePending) return;
+    _setOnlineStatus(_roomCode
+      ? 'CONNECTION LOST — RECONNECTING…'
+      : "CAN'T REACH THE SERVER — RETRYING…");
   });
+
+  net.on('WAITING_FOR_OPPONENT', ({ code }) => _showRoom(code));
 
   net.on('ROOM_RESUMED', ({ player, token, gameState, settings }) => {
     _myPlayer = player;
     _playerToken = token;
     _saveSession();
     if (gameState) {
-      _onNetReady();
+      _onlinePending = false;
+      _callbacks.onNetReady();
       hideMenu();
-      _onOnlineStart(settings, player, gameState);
+      _callbacks.onOnlineStart(settings, player, gameState);
     } else {
-      _setOnlineStatus(`Room code: <span class="room-code">${_roomCode}</span><br>Waiting for opponent…`);
-      _showCancelBtn();
+      _showRoom(_roomCode);
     }
   });
 
   net.on('ERROR', ({ reason }) => {
-    _setOnlineStatus(_friendlyError(reason), true);
+    leaveOnlineSession();
+    _resetOnlinePanel();
+    _syncModeButtons();
+    _showError(_friendlyError(reason));
   });
 }
 
 // ── Online panel helpers ────────────────────────────────
 
-function _showOnlinePanel() {
-  const panel = document.getElementById('online-panel');
-  if (panel) panel.style.display = 'flex';
-
-  const startBtn = document.getElementById('btn-start');
-  startBtn.style.display = 'none';
+function _beginOnline(status) {
+  _onlinePending = true;
+  _clearError();
+  $('online-panel').hidden = false;
+  $('room-share').hidden   = true;
+  $('btn-start').hidden    = true;
+  $('settings-panel').classList.add('locked');
+  $('settings-panel').inert = true;
+  _setOnlineStatus(status);
 }
 
-function _hideOnlinePanel() {
-  const panel = document.getElementById('online-panel');
-  if (panel) {
-    panel.style.display = 'none';
-    _setOnlineStatus('');
+function _resetOnlinePanel() {
+  $('online-panel').hidden = true;
+  $('room-share').hidden   = true;
+  $('btn-start').hidden    = false;
+  $('settings-panel').classList.remove('locked');
+  $('settings-panel').inert = false;
+  _setOnlineStatus('');
+}
+
+function _showRoom(code) {
+  if (!code) return;
+  _roomCode = code;
+  _setOnlineStatus('');
+  $('room-code').textContent = code;
+  $('room-share').hidden = false;
+  $('btn-share-link').textContent = navigator.share ? 'SHARE LINK' : 'COPY LINK';
+  $('room-share').scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
+
+function _setOnlineStatus(text) {
+  $('online-status').textContent = text;
+}
+
+function _showError(text) {
+  const el = $('menu-error');
+  el.textContent = text;
+  el.hidden = false;
+}
+
+function _clearError() {
+  $('menu-error').hidden = true;
+  $('menu-error').textContent = '';
+}
+
+function _roomLink() {
+  const url = new URL(location.href);
+  url.search = '';
+  url.hash = '';
+  url.searchParams.set('room', _roomCode);
+  return url.toString();
+}
+
+async function _shareLink() {
+  const link = _roomLink();
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: 'Play Hive with me', text: `Join my Hive game — room ${_roomCode}`, url: link });
+      return;
+    } catch (err) {
+      if (err?.name === 'AbortError') return; // user dismissed the share sheet
+    }
   }
-
-  const startBtn = document.getElementById('btn-start');
-  startBtn.style.display = '';
+  _copy(link, $('btn-share-link'), 'COPY LINK');
 }
 
-let _statusDismissTimer = null;
-
-function _setOnlineStatus(html, autoDismiss = false) {
-  const el = document.getElementById('online-status');
-  if (el) el.innerHTML = html;
-
-  if (_statusDismissTimer) { clearTimeout(_statusDismissTimer); _statusDismissTimer = null; }
-
-  if (autoDismiss) {
-    _statusDismissTimer = setTimeout(() => {
-      _statusDismissTimer = null;
-      leaveOnlineSession();
-      _hideOnlinePanel();
-      _syncModeButtons();
-    }, 3000);
+async function _copy(text, button, label) {
+  let ok = false;
+  try {
+    await navigator.clipboard.writeText(text);
+    ok = true;
+  } catch {
+    // Insecure origins (plain http on a LAN IP) have no clipboard API.
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', '');
+    area.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+    document.body.append(area);
+    area.select();
+    try { ok = document.execCommand('copy'); } catch { ok = false; }
+    area.remove();
   }
-}
-
-function _showCancelBtn() {
-  const btn = document.getElementById('btn-cancel-online');
-  if (btn) btn.style.display = '';
+  button.textContent = ok ? 'COPIED ✓' : 'COPY FAILED';
+  setTimeout(() => { button.textContent = label; }, 1600);
 }
 
 // ── Settings sync ───────────────────────────────────────
@@ -344,47 +428,59 @@ function _syncModeButtons() {
     btn.setAttribute('aria-pressed', String(selected));
   });
 
-  const startBtn = document.getElementById('btn-start');
-  const mode     = _settings.mode;
-
-  if (mode === 'LOCAL') {
-    startBtn.textContent = 'START GAME';
-    startBtn.disabled    = false;
-    startBtn.classList.add('ready');
-  } else if (mode === 'HOST') {
-    startBtn.textContent = 'CREATE ROOM';
-    startBtn.disabled    = false;
-    startBtn.classList.add('ready');
-  } else if (mode === 'JOIN') {
-    startBtn.textContent = 'JOIN ROOM';
-    startBtn.disabled    = false;
-    startBtn.classList.add('ready');
-  }
+  const labels = { LOCAL: 'START GAME', HOST: 'CREATE ROOM', JOIN: 'JOIN ROOM' };
+  $('btn-start').textContent = labels[_settings.mode];
 }
 
 function _renderSettings() {
-  const panel = document.getElementById('settings-panel');
-  panel.innerHTML = _buildSettingsHTML();
+  $('settings-panel').innerHTML = _buildSettingsHTML();
   _bindSettingsEvents();
+}
 
+function _renderContinue() {
+  const summary = _callbacks.getLocalSaveSummary?.();
+  $('btn-continue').hidden = !summary;
+  $('continue-sub').textContent = summary ?? '';
+}
+
+function _loadSavedSettings() {
+  try {
+    const saved = JSON.parse(storageGet(SETTINGS_KEY));
+    if (!saved) return {};
+    return {
+      expansions: {
+        mosquito: !!saved.expansions?.mosquito,
+        ladybug:  !!saved.expansions?.ladybug,
+        pillbug:  !!saved.expansions?.pillbug,
+      },
+      tournamentRule: !!saved.tournamentRule,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function _persistSettings() {
+  storageSet(SETTINGS_KEY, JSON.stringify({
+    expansions: _settings.expansions,
+    tournamentRule: _settings.tournamentRule,
+  }));
 }
 
 function _saveSession() {
   if (!_roomCode || !_playerToken) return;
-  localStorage.setItem('hiveSession', JSON.stringify({ code: _roomCode, token: _playerToken, player: _myPlayer }));
+  storageSet(SESSION_KEY, JSON.stringify({ code: _roomCode, token: _playerToken, player: _myPlayer }));
 }
 
 function _tryResumeSavedSession() {
   let saved;
-  try { saved = JSON.parse(localStorage.getItem('hiveSession')); } catch { return; }
+  try { saved = JSON.parse(storageGet(SESSION_KEY)); } catch { return; }
   if (!saved?.code || !saved?.token) return;
 
-  _roomCode = String(saved.code).toUpperCase();
+  _roomCode = String(saved.code).toUpperCase().replace(CODE_CHARS, '').slice(0, 4);
   _playerToken = String(saved.token);
   _myPlayer = Number(saved.player) || null;
-  _setOnlineStatus('Reconnecting to your game…');
-  _showOnlinePanel();
-  _showCancelBtn();
+  _beginOnline('RECONNECTING TO YOUR GAME…');
   _attachOnlineGameHandlers();
   net.on('_connected', () => {
     net.send('RESUME_ROOM', { code: _roomCode, token: _playerToken });
@@ -392,13 +488,25 @@ function _tryResumeSavedSession() {
   net.connect();
 }
 
+/** A ?room=CODE invite link opens straight into JOIN with the code filled in. */
+function _applyRoomLink() {
+  const params = new URLSearchParams(location.search);
+  const code = (params.get('room') ?? '').toUpperCase().replace(CODE_CHARS, '').slice(0, 4);
+  if (!code) return;
+  _settings.mode = 'JOIN';
+  _joinCode = code;
+  params.delete('room');
+  const query = params.toString();
+  history.replaceState(null, '', `${location.pathname}${query ? `?${query}` : ''}${location.hash}`);
+}
+
 function _friendlyError(reason) {
   const messages = {
-    ROOM_NOT_FOUND: 'Room not found. Check the code and try again.',
-    ROOM_FULL: 'That room already has two players.',
-    INVALID_RESUME_TOKEN: 'This saved seat is no longer valid.',
-    SEAT_OCCUPIED: 'This player seat is already connected.',
-    NO_ACTIVE_GAME: 'That game is no longer active.',
+    ROOM_NOT_FOUND:       'Room not found. Check the code and try again.',
+    ROOM_FULL:            'That room already has two players.',
+    INVALID_RESUME_TOKEN: 'Your saved seat is no longer valid.',
+    SEAT_OCCUPIED:        'This seat is already connected in another tab.',
+    NO_ACTIVE_GAME:       'That game is no longer active.',
   };
   return messages[reason] ?? 'Unable to connect. Please try again.';
 }
@@ -407,35 +515,33 @@ function _buildSettingsHTML() {
   const s    = _settings;
   const mode = s.mode;
 
-  const joinInput = mode === 'JOIN'
-    ? `<div class="settings-group">
-         <div class="settings-label">ROOM CODE</div>
-         <input id="join-code-input" class="room-code-input"
-                type="text" maxlength="4" placeholder="ABCD"
-                autocomplete="off" spellcheck="false"
-                style="text-transform:uppercase">
-       </div>`
-    : '';
+  if (mode === 'JOIN') {
+    return `
+      <div class="settings-group">
+        <label class="settings-label" for="join-code-input">ROOM CODE</label>
+        <input id="join-code-input" class="room-code-input"
+               type="text" maxlength="4" placeholder="ABCD" inputmode="text"
+               autocomplete="off" autocapitalize="characters" spellcheck="false"
+               enterkeyhint="go" value="${_joinCode}">
+        <p class="settings-hint">Ask the host for their 4-character code. The host picks the rules.</p>
+      </div>`;
+  }
 
-  const gameOptions = mode !== 'JOIN' ? `
+  return `
     <div class="settings-group">
       <div class="settings-label">EXPANSIONS</div>
-      <div class="settings-row">
-        ${_toggle('mosquito',  '🦟', 'MOSQUITO',  s.expansions.mosquito)}
-        ${_toggle('ladybug',   '🐞', 'LADYBUG',   s.expansions.ladybug)}
-        ${_toggle('pillbug',   '🐛', 'PILLBUG',   s.expansions.pillbug)}
+      <div class="settings-row stacked">
+        ${_toggle('mosquito',  'MOSQUITO', 'MOSQUITO',  s.expansions.mosquito)}
+        ${_toggle('ladybug',   'LADYBUG',  'LADYBUG',   s.expansions.ladybug)}
+        ${_toggle('pillbug',   'PILLBUG',  'PILLBUG',   s.expansions.pillbug)}
       </div>
     </div>
     <div class="settings-group">
       <div class="settings-label">RULES</div>
       <div class="settings-row">
-        ${_toggle('tournament', '👑', 'TOURNAMENT OPENING', s.tournamentRule)}
+        ${_toggle('tournament', 'CROWN', 'TOURNAMENT OPENING', s.tournamentRule)}
       </div>
-    </div>` : '';
-
-  return `
-    ${joinInput}
-    ${gameOptions}`;
+    </div>`;
 }
 
 function _buildGameSettings() {
@@ -446,13 +552,13 @@ function _buildGameSettings() {
   };
 }
 
-function _toggle(id, emoji, label, active) {
+function _toggle(id, sprite, label, active) {
   return `
-    <button class="setting-toggle${active ? ' on' : ''}" data-setting="${id}"
+    <button class="setting-toggle${active ? ' on' : ''}" data-setting="${id}" type="button"
             aria-pressed="${active}" aria-label="${label}">
-      <span class="toggle-emoji">${emoji}</span>
+      <span class="toggle-emoji" aria-hidden="true">${spriteSVG(sprite)}</span>
       <span class="toggle-label">${label}</span>
-      <span class="toggle-pill">${active ? 'ON' : 'OFF'}</span>
+      <span class="toggle-pill" aria-hidden="true">${active ? 'ON' : 'OFF'}</span>
     </button>`;
 }
 
@@ -471,16 +577,19 @@ function _bindSettingsEvents() {
       btn.classList.toggle('on', val);
       btn.setAttribute('aria-pressed', val);
       btn.querySelector('.toggle-pill').textContent = val ? 'ON' : 'OFF';
+      _persistSettings();
     });
   });
 
-  // Auto-uppercase for join code input
-  const input = document.getElementById('join-code-input');
+  const input = $('join-code-input');
   if (input) {
     input.addEventListener('input', () => {
-      const pos = input.selectionStart;
-      input.value = input.value.toUpperCase().replace(/[^BCDFGHJKLMNPQRSTVWXYZ2-9]/g, '');
-      input.setSelectionRange(pos, pos);
+      input.value = input.value.toUpperCase().replace(CODE_CHARS, '').slice(0, 4);
+      _joinCode = input.value;
+      _clearError();
+    });
+    input.addEventListener('keydown', event => {
+      if (event.key === 'Enter') { event.preventDefault(); _handleStart(); }
     });
   }
 }

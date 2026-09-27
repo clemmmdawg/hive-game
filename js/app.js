@@ -1,13 +1,16 @@
 // app.js — Game state machine + UI
-import { hexKey, parseKey } from './hex.js';
+import { hexKey } from './hex.js';
 import { Board } from './board.js';
 import {
   PieceType, ActionType,
   createGame, applyAction,
-  getLegalPlacements, getLegalMoves, getLegalThrows,
+  getLegalPlacements, getLegalMoves, getLegalThrows, getMoveBlocker,
   getAllLegalActions, deserializeState,
 } from './game.js';
-import { initMenu, showMenu, showResignConfirm, leaveOnlineSession } from './menu.js';
+import { initMenu, showMenu, showConfirm, showRules, leaveOnlineSession, isOverlayOpen } from './menu.js';
+import { statusText, describeLastMove } from './hints.js';
+import { encodeLocalSave, decodeLocalSave, MAX_UNDO } from './local-save.js';
+import { spriteSVG, drawSprite } from './sprites.js';
 import * as net from './net.js';
 
 // ── Piece display definitions ──────────────────────────
@@ -27,16 +30,7 @@ const startupFlags = new URLSearchParams(window.location.search);
 const USE_PIECE_ART = ['png', '1', 'true'].includes(
   (startupFlags.get('pieceArt') ?? startupFlags.get('piece-art') ?? '').toLowerCase()
 );
-const EDGE_USES_BEETLE_FALLBACK = /Edg\//.test(navigator.userAgent);
-
-function pieceGlyph(type) {
-  if (type === PieceType.BEETLE && EDGE_USES_BEETLE_FALLBACK) {
-    return { text: 'B', kind: 'letter' };
-  }
-  return { text: PIECE_UI[type]?.emoji ?? '?', kind: 'emoji' };
-}
-
-// PNGs are opt-in progressive enhancement; emojis remain the default.
+// PNGs are opt-in progressive enhancement; SVG sprites (js/sprites.js) are the default.
 const PIECE_IMAGES = new Map();
 if (USE_PIECE_ART) {
   for (const [type, ui] of Object.entries(PIECE_UI)) {
@@ -80,19 +74,90 @@ const PIECE_NAMES = {
   SPIDER: 'SPIDER', MOSQUITO: 'MOSQUITO', LADYBUG: 'LADYBUG', PILLBUG: 'PILLBUG',
 };
 
+const $ = id => document.getElementById(id);
+const other = player => (player === 1 ? 2 : 1);
+const LOCAL_SAVE_KEY = 'hiveLocalGame';
+const HINT_SEEN_KEY  = 'hiveBoardHintSeen';
+
+function storageGet(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+function storageSet(key, value) {
+  try {
+    if (value === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, value);
+  } catch { /* storage unavailable: autosave is best-effort */ }
+}
+
 // ── Canvas setup ───────────────────────────────────────
 
-const canvas      = document.getElementById('board');
-const emojiCanvas = document.getElementById('emoji-layer');
+const canvas      = $('board');
+const emojiCanvas = $('emoji-layer');
 const board       = new Board(canvas, emojiCanvas);
-const pieceTooltip = document.getElementById('piece-tooltip');
+
+function updateInsets() {
+  board.insets = gameState
+    ? { top: $('hud').offsetHeight, bottom: $('tray').offsetHeight }
+    : { top: 0, bottom: 0 };
+}
+
+board.resize(window.innerWidth, window.innerHeight);
+window.addEventListener('resize', () => {
+  board.resize(window.innerWidth, window.innerHeight);
+  updateInsets();
+});
+
+(function loop(t) { board.draw(t); requestAnimationFrame(loop); })(0);
+
+// ── Game state ─────────────────────────────────────────
+
+let gameState    = null;
+let gameSettings = null;   // saved so "rematch" can reuse them
+let gameMode     = 'LOCAL'; // 'LOCAL' | 'ONLINE'
+let myPlayer     = 1;       // 1 or 2 — only meaningful in ONLINE mode
+let history      = [];      // LOCAL only: states before each action, for undo
+let winPresented = false;
+let winReason    = null;    // null | 'RESIGN' | 'STALEMATE'
+let passTimer    = null;    // pending automatic pass in LOCAL mode
+let winTimer     = null;
+let connectionNotice = null; // shown in place of the status line while offline
+let opponentAway = false;
+
+const uiState = {
+  phase:           'IDLE',
+  trayPick:        null,
+  boardPick:       null,
+  throwPillbugHex: null,
+};
+
+// ── Tooltip / stack inspector ──────────────────────────
+
+const pieceTooltip = $('piece-tooltip');
 let pieceTooltipTimer = null;
 
-function showPieceTooltip(type, x, y, preferAbove = false) {
+/**
+ * @param {{type:string, owner?:1|2, stack?:Array<{player,type}>}} info
+ */
+function showPieceTooltip({ type, owner, stack }, x, y, preferAbove = false) {
   if (!PIECE_DESC[type]) return;
   if (pieceTooltipTimer) { clearTimeout(pieceTooltipTimer); pieceTooltipTimer = null; }
-  document.getElementById('piece-tooltip-name').textContent = PIECE_NAMES[type] ?? type;
-  document.getElementById('piece-tooltip-copy').textContent = PIECE_DESC[type];
+  $('piece-tooltip-name').innerHTML = `${spriteSVG(type)}<span>${PIECE_NAMES[type] ?? type}</span>`;
+  $('piece-tooltip-copy').textContent = PIECE_DESC[type];
+  pieceTooltip.classList.toggle('owner-p1', owner === 1);
+
+  const list = $('piece-tooltip-stack');
+  list.replaceChildren();
+  list.hidden = !stack || stack.length < 2;
+  if (!list.hidden) {
+    for (const piece of [...stack].reverse()) {
+      const li = document.createElement('li');
+      li.className = `p${piece.player}`;
+      li.innerHTML = `<span class="stack-owner"></span>${spriteSVG(piece.type)}<span></span>`;
+      li.lastElementChild.textContent = `P${piece.player} ${PIECE_NAMES[piece.type] ?? piece.type}`;
+      list.append(li);
+    }
+  }
+
   pieceTooltip.setAttribute('aria-hidden', 'false');
   pieceTooltip.classList.add('visible');
   pieceTooltip.style.left = '0px';
@@ -114,70 +179,113 @@ function hidePieceTooltip() {
   pieceTooltip.setAttribute('aria-hidden', 'true');
 }
 
-function showBriefPieceTooltip(type, x, y) {
-  showPieceTooltip(type, x, y);
-  pieceTooltipTimer = setTimeout(hidePieceTooltip, 2400);
+function showStackTooltip(key, x, y, brief = false) {
+  const stack = gameState?.board.get(key);
+  if (!stack) { hidePieceTooltip(); return; }
+  const top = stack[stack.length - 1];
+  showPieceTooltip({ type: top.type, owner: top.player, stack }, x, y);
+  if (brief) pieceTooltipTimer = setTimeout(hidePieceTooltip, stack.length > 1 ? 3600 : 2400);
 }
 
-function setupCanvas() {
-  canvas.width  = window.innerWidth;
-  canvas.height = window.innerHeight;
-  board.init();
+// ── Toast + turn banner ────────────────────────────────
+
+let toastTimer = null;
+/** @param {number} ms 0 keeps the toast up until replaced or cleared */
+function toast(text, kind = '', ms = 2200) {
+  const el = $('toast');
+  if (toastTimer) clearTimeout(toastTimer);
+  el.textContent = text;
+  el.className = `visible ${kind}`;
+  toastTimer = ms ? setTimeout(clearToast, ms) : null;
 }
-window.addEventListener('resize', () => board.resize(window.innerWidth, window.innerHeight));
-setupCanvas();
+function clearToast() {
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = null;
+  $('toast').className = '';
+}
 
-(function loop(t) { board.draw(t); requestAnimationFrame(loop); })(0);
-
-// ── Game state ─────────────────────────────────────────
-
-let gameState    = null;
-let gameSettings = null;   // saved so "play again" can reuse them
-let gameMode     = 'LOCAL'; // 'LOCAL' | 'ONLINE'
-let myPlayer     = 1;       // 1 or 2 — only meaningful in ONLINE mode
-let winPresented = false;
-
-const uiState = {
-  phase:           'IDLE',
-  trayPick:        null,
-  boardPick:       null,
-  throwPillbugHex: null,
-};
+let bannerTimer = null;
+function showBanner(text, color, sprite = PieceType.QUEEN, ms = 1400) {
+  const el = $('turn-banner');
+  if (bannerTimer) clearTimeout(bannerTimer);
+  $('banner-text').textContent = text;
+  $('banner-emoji').innerHTML  = spriteSVG(sprite);
+  el.className = `${color} visible`;
+  bannerTimer = setTimeout(() => el.classList.remove('visible'), ms);
+}
+function hideBanner() {
+  if (bannerTimer) clearTimeout(bannerTimer);
+  $('turn-banner').classList.remove('visible');
+}
 
 // ── Game screen visibility ─────────────────────────────
 
 function showGame() {
-  document.getElementById('hud').classList.add('game-visible');
-  document.getElementById('tray').classList.add('game-visible');
+  for (const id of ['hud', 'tray', 'btn-recenter']) $(id).classList.add('game-visible');
+  updateInsets();
+  board.recenter(false);
+  showBoardHintOnce();
 }
 
 function hideGame() {
   hidePieceTooltip();
-  document.getElementById('hud').classList.remove('game-visible');
-  document.getElementById('tray').classList.remove('game-visible');
-  // Hide win screen too
-  const ws = document.getElementById('win-screen');
-  ws.classList.remove('active');
-  ws.setAttribute('aria-hidden', 'true');
+  closeGameMenu();
+  hideBanner();
+  clearToast();
+  for (const id of ['hud', 'tray', 'btn-recenter']) $(id).classList.remove('game-visible');
+  $('board-hint').classList.remove('visible');
+  hideWinScreen();
+}
+
+function cancelTimers() {
+  if (passTimer) clearTimeout(passTimer);
+  if (winTimer) clearTimeout(winTimer);
+  passTimer = winTimer = null;
+}
+
+function resetBoardView() {
+  board.pieces.clear();
+  board.ghosts       = new Set();
+  board.throwTargets = new Set();
+  board.selectedHex  = null;
+  board.lastMove     = null;
+}
+
+/** Tear down the current game and return to the main menu. */
+function exitToMenu({ notice } = {}) {
+  cancelTimers();
+  hideGame();
+  resetBoardView();
+  if (gameMode === 'ONLINE') leaveOnlineSession();
+  gameState = null;
+  history = [];
+  connectionNotice = null;
+  opponentAway = false;
+  updateInsets();
+  board.recenter(false);
+  showMenu({ notice });
 }
 
 // ── Start / restart game ───────────────────────────────
 
-function startGame(settings) {
+/**
+ * Start (or resume) a pass-and-play game.
+ * @param {object} settings
+ * @param {{state?: object, history?: object[]}} [restore] saved game to continue
+ */
+function startGame(settings, restore = null) {
+  cancelTimers();
   gameMode     = 'LOCAL';
   gameSettings = settings;
-  winPresented = false;
-
-  gameState = createGame({
+  history      = restore?.history ?? [];
+  gameState    = restore?.state ?? createGame({
     expansions:     settings.expansions,
     tournamentRule: settings.tournamentRule,
     clock:          settings.clock,
   });
-
-  clearSelection();
-  syncBoardRenderer();
-  syncUI();
-  showGame();
+  beginGameSession(restore ? describeLastMove(history.at(-1) ?? null, gameState) : null);
+  saveLocal();
+  announceTurn();
 }
 
 /**
@@ -187,16 +295,58 @@ function startGame(settings) {
  * @param {object} serializedState - JSON-safe state from serializeState()
  */
 export function startOnlineGame(settings, playerNum, serializedState) {
+  cancelTimers();
   gameMode     = 'ONLINE';
   myPlayer     = playerNum;
   gameSettings = settings;
-  winPresented = false;
+  history      = [];
   gameState    = deserializeState(serializedState);
+  connectionNotice = null;
+  opponentAway = false;
+  beginGameSession(describeLastMove(null, gameState));
+  if (gameState.winner) {
+    winTimer = setTimeout(showWinScreen, 300);
+  } else {
+    showBanner(`YOU ARE PLAYER ${myPlayer}`, `p${myPlayer}`, PieceType.QUEEN, 1800);
+  }
+}
 
-  clearSelection();
+function beginGameSession(lastMove) {
+  winPresented = false;
+  winReason    = null;
+  hideWinScreen();
+  clearSelection(false);
+  board.lastMove = lastMove;
   syncBoardRenderer();
-  syncUI();
   showGame();
+  syncUI();
+}
+
+// ── Local persistence ──────────────────────────────────
+
+function saveLocal() {
+  if (gameMode !== 'LOCAL' || !gameState) return;
+  if (gameState.winner) { storageSet(LOCAL_SAVE_KEY, null); return; }
+  storageSet(LOCAL_SAVE_KEY, encodeLocalSave({ settings: gameSettings, state: gameState, history }));
+}
+
+function loadLocalSave() {
+  return decodeLocalSave(storageGet(LOCAL_SAVE_KEY));
+}
+
+function localSaveSummary() {
+  const saved = loadLocalSave();
+  if (!saved) return null;
+  const round = Math.ceil(saved.state.turnNumber / 2);
+  const exps  = Object.entries(saved.state.settings.expansions ?? {}).filter(([, on]) => on)
+    .map(([name]) => name.toUpperCase());
+  return `ROUND ${round} · PLAYER ${saved.state.turn} TO MOVE${exps.length ? ` · +${exps.join(' +')}` : ''}`;
+}
+
+function continueLocal() {
+  const saved = loadLocalSave();
+  if (!saved) { showMenu({ notice: 'That saved game could not be loaded.' }); return; }
+  startGame(saved.settings, saved);
 }
 
 // ── Sync renderer from game state ──────────────────────
@@ -206,7 +356,6 @@ function syncBoardRenderer() {
   if (!gameState) return;
   for (const [key, stack] of gameState.board.entries()) {
     board.pieces.set(key, stack.map(p => ({
-      ...pieceGlyph(p.type),
       player: p.player,
       type:   p.type,
       emoji:  PIECE_UI[p.type]?.emoji ?? '?',
@@ -248,7 +397,7 @@ function updateGhosts() {
 
 // ── Transitions ────────────────────────────────────────
 
-function clearSelection() {
+function clearSelection(sync = true) {
   uiState.phase           = 'IDLE';
   uiState.trayPick        = null;
   uiState.boardPick       = null;
@@ -256,7 +405,7 @@ function clearSelection() {
   board.selectedHex       = null;
   board.ghosts            = new Set();
   board.throwTargets      = new Set();
-  if (gameState) syncUI();
+  if (sync && gameState) syncUI();
 }
 
 function selectTrayPiece(type) {
@@ -271,9 +420,11 @@ function selectTrayPiece(type) {
 }
 
 function selectBoardPiece(key) {
+  hidePieceTooltip();
   uiState.phase     = 'BOARD';
   uiState.boardPick = key;
   uiState.trayPick  = null;
+  uiState.throwPillbugHex = null;
   board.selectedHex = key;
   updateGhosts();
   syncUI();
@@ -285,102 +436,157 @@ function selectThrowPiece(fromKey, pillbugKey) {
   uiState.boardPick       = fromKey;
   uiState.trayPick        = null;
   uiState.throwPillbugHex = pillbugKey;
-  board.selectedHex       = null;   // don't highlight the thrown piece as "selected"
+  board.selectedHex       = pillbugKey;   // keep the thrower highlighted
   updateGhosts();
   syncUI();
 }
 
-function doPlace(toKey) {
+/** Route an action to the server (ONLINE) or apply it locally. */
+function act(action) {
   if (gameMode === 'ONLINE') {
-    net.send('PLACE_PIECE', { pieceType: uiState.trayPick.type, to: toKey });
+    if (!net.isConnected()) {
+      toast('NOT CONNECTED — RECONNECTING…', 'warn');
+      return;
+    }
+    const messages = {
+      [ActionType.PLACE]: ['PLACE_PIECE', { pieceType: action.pieceType, to: action.to }],
+      [ActionType.MOVE]:  ['MOVE_PIECE',  { from: action.from, to: action.to }],
+      [ActionType.THROW]: ['THROW_PIECE', { pillbugHex: action.pillbugHex, from: action.from, to: action.to }],
+      [ActionType.PASS]:  ['PASS_TURN',   {}],
+    };
+    net.send(...messages[action.type]);
     clearSelection();
     return;
   }
-  gameState = applyAction(gameState, {
-    type:      ActionType.PLACE,
-    pieceType: uiState.trayPick.type,
-    to:        toKey,
-  });
-  clearSelection();
-  syncBoardRenderer();
-  afterAction();
+
+  const prev = gameState;
+  history.push(prev);
+  if (history.length > MAX_UNDO) history.shift();
+  gameState = applyAction(prev, action);
+  onStateChanged(prev);
+}
+
+function doPlace(toKey) {
+  act({ type: ActionType.PLACE, pieceType: uiState.trayPick.type, to: toKey });
 }
 
 function doMove(toKey) {
-  if (gameMode === 'ONLINE') {
-    net.send('MOVE_PIECE', { from: uiState.boardPick, to: toKey });
-    clearSelection();
-    return;
-  }
-  gameState = applyAction(gameState, {
-    type: ActionType.MOVE,
-    from: uiState.boardPick,
-    to:   toKey,
-  });
-  clearSelection();
-  syncBoardRenderer();
-  afterAction();
+  act({ type: ActionType.MOVE, from: uiState.boardPick, to: toKey });
 }
 
 function doThrow(toKey) {
-  if (gameMode === 'ONLINE') {
-    net.send('THROW_PIECE', {
-      pillbugHex: uiState.throwPillbugHex,
-      from: uiState.boardPick,
-      to:   toKey,
-    });
-    clearSelection();
-    return;
-  }
-  gameState = applyAction(gameState, {
-    type:       ActionType.THROW,
-    pillbugHex: uiState.throwPillbugHex,
-    from:       uiState.boardPick,
-    to:         toKey,
-  });
-  clearSelection();
-  syncBoardRenderer();
-  afterAction();
+  act({ type: ActionType.THROW, pillbugHex: uiState.throwPillbugHex, from: uiState.boardPick, to: toKey });
 }
 
 // ── Post-action ────────────────────────────────────────
 
-function afterAction() {
+/** Common path after gameState changes (local action or server snapshot). */
+function onStateChanged(prev, { animate = true } = {}) {
+  clearSelection(false);
+  const lastMove = describeLastMove(prev, gameState);
+  if (lastMove) board.lastMove = lastMove;
+  syncBoardRenderer();
+  if (lastMove && animate) board.markArrival(lastMove.to);
+  board.ensureHiveVisible();
+  syncUI();
+  saveLocal();
+
   if (gameState.winner) {
-    setTimeout(showWinScreen, 420);
-  } else {
-    setTimeout(showInterstitial, 480);
+    hideBanner();
+    winTimer = setTimeout(showWinScreen, 700);
+    return;
   }
+  announceTurn();
+}
+
+/** Tell players whose turn it is; in LOCAL mode, auto-pass a stuck player. */
+function announceTurn() {
+  if (!gameState || gameState.winner) return;
+  const turn = gameState.turn;
+
+  if (gameMode === 'ONLINE') {
+    if (turn === myPlayer) {
+      const mustPass = getAllLegalActions(gameState).mustPass;
+      showBanner(mustPass ? 'NO MOVES — TAP PASS' : 'YOUR TURN', mustPass ? 'gold' : `p${turn}`);
+    }
+    return;
+  }
+
+  if (getAllLegalActions(gameState).mustPass) {
+    showBanner(`P${turn} HAS NO MOVES — PASSING`, 'gold', PieceType.QUEEN, 1600);
+    const stuck = gameState;
+    passTimer = setTimeout(() => {
+      passTimer = null;
+      if (gameState !== stuck) return; // undone or quit meanwhile
+      gameState = applyAction(stuck, { type: ActionType.PASS });
+      if (getAllLegalActions(gameState).mustPass) {
+        // Neither side can act: the game can never progress.
+        gameState = { ...gameState, winner: 'DRAW' };
+        winReason = 'STALEMATE';
+      }
+      onStateChanged(stuck, { animate: false });
+    }, 1700);
+    return;
+  }
+
+  showBanner(`PLAYER ${turn}'S TURN`, `p${turn}`, PieceType.QUEEN, 1100);
+}
+
+function undo() {
+  if (gameMode !== 'LOCAL' || !history.length || !gameState) return;
+  cancelTimers();
+  const restored = history.pop();
+  gameState    = restored;
+  winPresented = false;
+  winReason    = null;
+  hideWinScreen();
+  hideBanner();
+  clearSelection(false);
+  board.lastMove = describeLastMove(history.at(-1) ?? null, restored);
+  if (!history.length && !restored.lastMovedHex) board.lastMove = null;
+  syncBoardRenderer();
+  syncUI();
+  saveLocal();
+  toast(`UNDONE · PLAYER ${restored.turn} TO MOVE`, '', 1400);
 }
 
 // ── Confetti ───────────────────────────────────────────
 
-// Pre-render each bug emoji once to a small offscreen canvas.
-// drawImage() is a fast GPU blit; fillText() with emoji re-rasterizes every frame.
-const BUGS         = ['🐝','🪲','🦗','🐜','🕷️','🦟','🐞','🐛'];
+// Pre-render each bug sprite once (in both player colours) to a small offscreen
+// canvas. drawImage() is a fast GPU blit; re-drawing paths every frame is not.
 const SPRITE_SIZE  = 36;
-const bugSprites   = BUGS.map(emoji => {
+const CONFETTI_INK = [
+  { ink: '#ffd3e4', fill: '#2b0c1e', glow: '#ff2d78' },
+  { ink: '#d2fdff', fill: '#06262c', glow: '#00f5ff' },
+];
+const bugSprites   = TRAY_ORDER.flatMap(type => CONFETTI_INK.map(colors => {
   const oc  = document.createElement('canvas');
-  oc.width  = SPRITE_SIZE;
-  oc.height = SPRITE_SIZE;
+  oc.width  = SPRITE_SIZE * 2;
+  oc.height = SPRITE_SIZE * 2;
   const octx = oc.getContext('2d');
-  octx.font         = `${SPRITE_SIZE - 4}px serif`;
-  octx.textAlign    = 'center';
-  octx.textBaseline = 'middle';
-  octx.fillText(emoji, SPRITE_SIZE / 2, SPRITE_SIZE / 2);
+  if (!drawSprite(octx, type, SPRITE_SIZE, SPRITE_SIZE, SPRITE_SIZE * 2, colors)) {
+    octx.font         = `${SPRITE_SIZE * 2 - 8}px serif`;
+    octx.textAlign    = 'center';
+    octx.textBaseline = 'middle';
+    octx.fillText(PIECE_UI[type].emoji, SPRITE_SIZE, SPRITE_SIZE);
+  }
   return oc;
-});
+}));
 
 let confettiRaf = null; // handle so we can cancel a running loop
 
-function launchConfetti() {
-  // Cancel any still-running confetti loop
-  if (confettiRaf !== null) {
-    cancelAnimationFrame(confettiRaf);
-    confettiRaf = null;
-  }
+function stopConfetti() {
+  if (confettiRaf !== null) cancelAnimationFrame(confettiRaf);
+  confettiRaf = null;
+  const cv = $('confetti-layer');
+  cv.style.display = 'none';
+}
 
-  const cv  = document.getElementById('confetti-layer');
+function launchConfetti() {
+  stopConfetti();
+  if (board.reducedMotion) return;
+
+  const cv  = $('confetti-layer');
   const ctx = cv.getContext('2d');
   cv.width  = window.innerWidth;
   cv.height = window.innerHeight;
@@ -388,7 +594,7 @@ function launchConfetti() {
 
   // No respawn: particles start above the screen and fall through once.
   // Stagger start Y so they don't all arrive at once.
-  const pts = Array.from({ length: 52 }, (_, i) => ({
+  const pts = Array.from({ length: 52 }, () => ({
     x:      Math.random() * cv.width,
     y:      -SPRITE_SIZE - Math.random() * cv.height * 0.9,
     vx:     (Math.random() - 0.5) * 2.2,
@@ -406,9 +612,8 @@ function launchConfetti() {
     const elapsed = now - start;
 
     if (elapsed > DUR) {
-      cv.style.display = 'none';
       ctx.clearRect(0, 0, cv.width, cv.height);
-      confettiRaf = null;
+      stopConfetti();
       return;
     }
 
@@ -429,7 +634,6 @@ function launchConfetti() {
       ctx.save();
       ctx.translate(p.x, p.y);
       ctx.rotate(p.rot);
-      // drawImage is a single GPU blit — no glyph rasterization
       ctx.drawImage(p.sprite, -sz / 2, -sz / 2, sz, sz);
       ctx.restore();
     }
@@ -443,99 +647,153 @@ function launchConfetti() {
 
 // ── Win screen ─────────────────────────────────────────
 
-function showWinScreen() {
-  const screen   = document.getElementById('win-screen');
-  if (winPresented || !gameState?.winner) return;
-  winPresented = true;
-  const headline = document.getElementById('win-headline');
-  const winner   = gameState.winner;
+function winCopy() {
+  const winner = gameState.winner;
+  const rounds = Math.max(1, Math.ceil((gameState.turnNumber - 1) / 2));
+  const online = gameMode === 'ONLINE';
+  const name   = p => (online ? (p === myPlayer ? 'YOU' : 'OPPONENT') : `PLAYER ${p}`);
 
   if (winner === 'DRAW') {
-    headline.textContent = "IT'S A DRAW!";
-    headline.className   = 'draw';
-  } else {
-    headline.textContent = `PLAYER ${winner} WINS!`;
-    headline.className   = `p${winner}`;
+    return {
+      headline: "IT'S A DRAW",
+      reason: winReason === 'STALEMATE'
+        ? 'Neither player has a legal move left.'
+        : 'Both queens were surrounded on the same move.',
+      emblem: PieceType.QUEEN,
+    };
   }
+
+  const loser = other(winner);
+  const headline = online ? (winner === myPlayer ? 'YOU WIN!' : 'YOU LOSE') : `PLAYER ${winner} WINS!`;
+  if (winReason === 'RESIGN') {
+    return {
+      headline,
+      reason: online && loser === myPlayer ? 'You resigned the game.' : `${online ? 'Your opponent' : `Player ${loser}`} resigned.`,
+      emblem: PieceType.QUEEN,
+    };
+  }
+  const whose = online ? (loser === myPlayer ? 'Your' : "Your opponent's") : `${name(loser)[0]}${name(loser).slice(1).toLowerCase()}'s`;
+  return { headline, reason: `${whose} queen was surrounded after ${rounds} round${rounds === 1 ? '' : 's'}.`, emblem: PieceType.QUEEN };
+}
+
+function showWinScreen() {
+  winTimer = null;
+  if (winPresented || !gameState?.winner) return;
+  winPresented = true;
+  closeGameMenu();
+  hidePieceTooltip();
+  const screen = $('win-screen');
+  const winner = gameState.winner;
+  const copy   = winCopy();
+
+  screen.className = winner === 'DRAW' ? 'draw' : `p${winner}`;
+  $('win-headline').textContent = copy.headline;
+  $('win-reason').textContent   = copy.reason;
+  $('win-emblem').innerHTML     = spriteSVG(copy.emblem);
+  $('btn-rematch').hidden       = gameMode !== 'LOCAL';
 
   screen.setAttribute('aria-hidden', 'false');
   screen.classList.add('active');
-  document.getElementById('btn-to-menu').focus();
-  launchConfetti();
+  ($('btn-rematch').hidden ? $('btn-view-board') : $('btn-rematch')).focus();
+  const lost = gameMode === 'ONLINE' && winner !== myPlayer && winner !== 'DRAW';
+  if (!lost) launchConfetti();
+  syncUI();
 }
 
-document.getElementById('btn-to-menu').addEventListener('click', () => {
-  const screen = document.getElementById('win-screen');
+function hideWinScreen() {
+  const screen = $('win-screen');
   screen.classList.remove('active');
   screen.setAttribute('aria-hidden', 'true');
-  hideGame();
-  board.pieces.clear();
-  board.ghosts = new Set();
-  board.selectedHex = null;
-  if (gameMode === 'ONLINE') leaveOnlineSession();
-  gameState = null;
-  showMenu();
+  stopConfetti();
+}
+
+function rematch() {
+  if (gameMode !== 'LOCAL' || !gameSettings) return;
+  hideWinScreen();
+  startGame(gameSettings);
+}
+
+$('btn-rematch').addEventListener('click', rematch);
+$('btn-to-menu').addEventListener('click', () => exitToMenu());
+$('btn-view-board').addEventListener('click', () => {
+  hideWinScreen();
+  board.recenter(true);
+  toast('GAME OVER · ☰ FOR REMATCH OR MENU', '', 2600);
+  $('btn-menu').focus();
 });
 
 // ── Tap handler ────────────────────────────────────────
 
 board.onTap = (q, r, clientX, clientY) => {
   if (!gameState) return;
+  closeGameMenu();
   const key      = hexKey(q, r);
   const stack    = gameState.board.get(key);
   const topPiece = stack ? stack[stack.length - 1] : null;
   const turn     = gameState.turn;
+  const inspect  = () => (topPiece ? showStackTooltip(key, clientX, clientY, true) : hidePieceTooltip());
 
-  if (gameMode === 'ONLINE' && turn !== myPlayer) {
-    if (topPiece) showBriefPieceTooltip(topPiece.type, clientX, clientY);
+  if (gameState.winner || (gameMode === 'ONLINE' && turn !== myPlayer)) {
+    inspect();
     return;
   }
 
   if (uiState.phase === 'TRAY') {
     if (board.ghosts.has(key))          doPlace(key);
     else if (topPiece?.player === turn) selectBoardPiece(key);
-    else if (topPiece)                  showBriefPieceTooltip(topPiece.type, clientX, clientY);
+    else if (topPiece)                  inspect();
     else                                clearSelection();
     return;
   }
 
   if (uiState.phase === 'BOARD') {
-    if (board.ghosts.has(key))          doMove(key);
+    if (board.ghosts.has(key))            doMove(key);
     else if (board.throwTargets.has(key)) selectThrowPiece(key, uiState.boardPick);
-    else if (key === uiState.boardPick) clearSelection();
-    else if (topPiece?.player === turn) selectBoardPiece(key);
-    else if (topPiece)                  showBriefPieceTooltip(topPiece.type, clientX, clientY);
-    else                                clearSelection();
+    else if (key === uiState.boardPick)   clearSelection();
+    else if (topPiece?.player === turn)   selectBoardPiece(key);
+    else if (topPiece)                    inspect();
+    else                                  clearSelection();
     return;
   }
 
   if (uiState.phase === 'THROW') {
-    if (board.ghosts.has(key)) doThrow(key);
-    else if (topPiece)         showBriefPieceTooltip(topPiece.type, clientX, clientY);
-    else                       clearSelection();
+    if (board.ghosts.has(key))                  doThrow(key);
+    else if (key === uiState.throwPillbugHex)   selectBoardPiece(key); // back out of the throw
+    else if (topPiece?.player === turn)         selectBoardPiece(key);
+    else if (topPiece)                          inspect();
+    else                                        clearSelection();
     return;
   }
 
   if (topPiece?.player === turn) selectBoardPiece(key);
-  else if (topPiece) showBriefPieceTooltip(topPiece.type, clientX, clientY);
+  else inspect();
 };
 
 board.onHover = (q, r, clientX, clientY) => {
   if (q == null || !gameState) { hidePieceTooltip(); return; }
-  const stack = gameState.board.get(hexKey(q, r));
-  const topPiece = stack?.[stack.length - 1];
-  if (topPiece) showPieceTooltip(topPiece.type, clientX, clientY);
+  const key = hexKey(q, r);
+  if (gameState.board.has(key)) showStackTooltip(key, clientX, clientY);
   else hidePieceTooltip();
 };
 
+board.onViewChange = () => hideBoardHint();
+
 // ── Tray rendering ─────────────────────────────────────
 
-function renderTray() {
-  const container = document.getElementById('tray-pieces');
-  if (!gameState) { container.innerHTML = ''; return; }
-  const supply    = gameState.supply[gameState.turn];
-  const actions   = getAllLegalActions(gameState);
-  const playerCls = `p${gameState.turn}-piece`;
+/** Whose pieces the tray shows: your own online, the player to move locally. */
+function trayPlayer() {
+  return gameMode === 'ONLINE' ? myPlayer : gameState.turn;
+}
+
+function renderTray(actions) {
+  const container = $('tray-pieces');
+  if (!gameState) { container.replaceChildren(); return; }
+  const owner     = trayPlayer();
+  const supply    = gameState.supply[owner];
+  const myTurn    = owner === gameState.turn && !gameState.winner;
+  const forced    = myTurn && actions.placements.size === 1 && actions.placements.has(PieceType.QUEEN)
+    && !gameState.queenPlaced[owner] && supply[PieceType.QUEEN] > 0 && [...gameState.board.values()]
+      .flat().filter(p => p.player === owner).length === 3;
 
   container.innerHTML = TRAY_ORDER
     .filter(type => type in supply)
@@ -543,31 +801,26 @@ function renderTray() {
       const count    = supply[type] ?? 0;
       const ui       = PIECE_UI[type];
       const selected = uiState.trayPick?.type === type;
-      const hasSpots = (actions.placements.get(type) || []).length > 0;
-      const myTurn   = gameMode !== 'ONLINE' || gameState.turn === myPlayer;
-      const disabled = count === 0 || !hasSpots || !myTurn;
-      const glyph    = pieceGlyph(type);
+      const hasSpots = myTurn && (actions.placements.get(type) || []).length > 0;
+      const disabled = count === 0 || !hasSpots;
+      const classes  = [
+        'piece-slot', `p${owner}-piece`,
+        selected && 'selected', disabled && 'disabled', count === 0 && 'exhausted',
+        forced && type === PieceType.QUEEN && 'must',
+      ].filter(Boolean).join(' ');
       const imageMarkup = USE_PIECE_ART
         ? `<img class="piece-art" src="${ui.image}" alt="" aria-hidden="true">`
         : '';
-      return `<div class="piece-slot ${playerCls}${selected ? ' selected' : ''}${disabled ? ' disabled' : ''}"
-           data-type="${type}" role="button"
-           aria-label="${PIECE_NAMES[type] ?? ui.label} x${count}. ${PIECE_DESC[type]}"
-           aria-disabled="${disabled}" tabindex="0">
+      return `<div class="${classes}" data-type="${type}" role="button"
+           aria-label="${PIECE_NAMES[type] ?? ui.label}, ${count} left. ${PIECE_DESC[type]}"
+           aria-pressed="${selected}" aria-disabled="${disabled}" tabindex="${disabled ? -1 : 0}">
         <div class="piece-hex">
           ${imageMarkup}
-          <span class="piece-emoji-fallback ${glyph.kind === 'letter' ? 'letter-glyph' : ''}" aria-hidden="true">${glyph.text}</span>
+          ${spriteSVG(type)}
         </div>
-        <span class="piece-count">x${count}</span>
+        <span class="piece-count" aria-hidden="true">×${count}</span>
       </div>`;
     }).join('');
-
-  container.querySelectorAll('.piece-slot:not(.disabled)').forEach(el => {
-    el.addEventListener('click',   ()  => selectTrayPiece(el.dataset.type));
-    el.addEventListener('keydown', e  => {
-      if (e.key === 'Enter' || e.key === ' ') selectTrayPiece(el.dataset.type);
-    });
-  });
 
   container.querySelectorAll('.piece-art').forEach(image => {
     const showImage = () => image.classList.add('loaded');
@@ -578,166 +831,271 @@ function renderTray() {
     }
   });
 
-  container.querySelectorAll('.piece-slot').forEach(slot => {
-    const showForSlot = () => {
-      const rect = slot.getBoundingClientRect();
-      showPieceTooltip(slot.dataset.type, rect.left + rect.width / 2, rect.top, true);
-    };
-    slot.addEventListener('pointerenter', showForSlot);
-    slot.addEventListener('pointerleave', hidePieceTooltip);
-    slot.addEventListener('focus', showForSlot);
-    slot.addEventListener('blur', hidePieceTooltip);
-  });
+  renderReserve(other(owner));
 }
+
+function renderReserve(player) {
+  const label = $('reserve-label');
+  label.textContent = gameMode === 'ONLINE' ? 'OPPONENT HAS' : `P${player} HAS`;
+  label.className = `p${player}`;
+  const supply = gameState.supply[player];
+  $('reserve-pieces').className = `p${player}`;
+  $('reserve-pieces').innerHTML = TRAY_ORDER
+    .filter(type => type in supply)
+    .map(type => `<span class="reserve-item${supply[type] ? '' : ' empty'}" title="${PIECE_NAMES[type]}">`
+      + `${spriteSVG(type)}${supply[type]}</span>`)
+    .join('');
+  $('reserve-row').setAttribute('aria-label',
+    `${gameMode === 'ONLINE' ? 'Opponent' : `Player ${player}`} still holds: ` +
+    TRAY_ORDER.filter(type => supply[type]).map(type => `${supply[type]} ${PIECE_NAMES[type]}`).join(', '));
+}
+
+// Delegated tray input: survives re-renders without rebinding.
+const trayEl = $('tray-pieces');
+trayEl.addEventListener('click', event => {
+  const slot = event.target.closest('.piece-slot');
+  if (slot && !slot.classList.contains('disabled')) selectTrayPiece(slot.dataset.type);
+});
+trayEl.addEventListener('keydown', event => {
+  const slot = event.target.closest('.piece-slot');
+  if (!slot) return;
+  if ((event.key === 'Enter' || event.key === ' ') && !slot.classList.contains('disabled')) {
+    event.preventDefault();
+    selectTrayPiece(slot.dataset.type);
+    requestAnimationFrame(() => trayEl.querySelector(`[data-type="${slot.dataset.type}"]`)?.focus());
+  }
+});
+const showSlotTooltip = slot => {
+  const rect = slot.getBoundingClientRect();
+  showPieceTooltip({ type: slot.dataset.type, owner: gameState ? trayPlayer() : undefined },
+    rect.left + rect.width / 2, rect.top, true);
+};
+trayEl.addEventListener('pointerover', event => {
+  const slot = event.target.closest('.piece-slot');
+  if (slot && event.pointerType === 'mouse') showSlotTooltip(slot);
+});
+trayEl.addEventListener('pointerout', event => {
+  if (!event.relatedTarget?.closest?.('.piece-slot')) hidePieceTooltip();
+});
+trayEl.addEventListener('focusin', event => {
+  const slot = event.target.closest('.piece-slot');
+  if (slot) showSlotTooltip(slot);
+});
+trayEl.addEventListener('focusout', hidePieceTooltip);
 
 // ── HUD sync ───────────────────────────────────────────
 
-const STATUS = {
-  IDLE:  'SELECT A PIECE',
-  TRAY:  'TAP GREEN HEX TO PLACE',
-  BOARD: 'TAP GREEN HEX TO MOVE',
-  THROW: 'TAP DESTINATION TO THROW',
-};
+function selectedPieceType() {
+  if (uiState.trayPick) return uiState.trayPick.type;
+  const key = uiState.phase === 'THROW' ? uiState.throwPillbugHex : uiState.boardPick;
+  const stack = key ? gameState.board.get(key) : null;
+  return stack?.[stack.length - 1]?.type ?? null;
+}
+
+/** Owner of the piece described in the desc bar (tray piece → the mover). */
+function descOwner() {
+  const key = uiState.phase === 'THROW' ? uiState.throwPillbugHex : uiState.boardPick;
+  const stack = key ? gameState.board.get(key) : null;
+  return stack?.[stack.length - 1]?.player ?? gameState.turn;
+}
 
 function syncUI() {
   if (!gameState) return;
   const turn    = gameState.turn;
   const actions = getAllLegalActions(gameState);
+  const online  = gameMode === 'ONLINE';
+  const myTurn  = !online || turn === myPlayer;
+  const over    = !!gameState.winner;
 
-  const tag = document.getElementById('player-tag');
-  tag.textContent = `P${turn}`;
-  tag.className   = `p${turn}`;
+  // Turn chip + HUD accent
+  $('hud').className = `game-visible turn-p${over && gameState.winner !== 'DRAW' ? gameState.winner : turn}`;
+  const chip = $('turn-chip');
+  chip.className = `p${turn}${myTurn || over ? '' : ' waiting'}`;
+  $('chip-label').textContent = online ? (turn === myPlayer ? 'YOU' : 'OPP') : `P${turn}`;
+  $('chip-sub').textContent   = over ? 'FINAL' : `ROUND ${Math.ceil(gameState.turnNumber / 2)}`;
 
-  const status = document.getElementById('status-text');
-  const desc   = document.getElementById('piece-desc');
-
-  const myTurn = gameMode !== 'ONLINE' || turn === myPlayer;
-  const passBtn = document.getElementById('btn-pass');
-  passBtn.classList.toggle('hidden', !(gameMode === 'ONLINE' && myTurn && actions.mustPass));
-
-  if (!myTurn) {
-    status.textContent = `WAITING FOR PLAYER ${turn}`;
-    status.classList.remove('active');
-    desc.textContent = '';
-    desc.classList.remove('visible');
-  } else if (actions.mustPass) {
-    status.textContent = 'NO MOVES — TURN PASSES';
-    status.classList.add('active');
-    desc.textContent = '';
-    desc.classList.remove('visible');
+  // Status line
+  const blocker = uiState.phase === 'BOARD' ? getMoveBlocker(gameState, uiState.boardPick) : null;
+  const throwCount = board.throwTargets.size;
+  const type = selectedPieceType();
+  const status = $('status-text');
+  if (connectionNotice) {
+    status.textContent = connectionNotice;
+    status.className = 'alert';
   } else {
-    status.textContent = STATUS[uiState.phase];
-    status.classList.toggle('active', uiState.phase !== 'IDLE');
-
-    const selectedType = uiState.trayPick?.type
-      || (uiState.boardPick
-          ? gameState.board.get(uiState.boardPick)?.[gameState.board.get(uiState.boardPick)?.length - 1]?.type
-          : null);
-    if (selectedType && PIECE_DESC[selectedType]) {
-      desc.textContent = PIECE_DESC[selectedType];
-      desc.classList.add('visible');
-    } else {
-      desc.textContent = '';
-      desc.classList.remove('visible');
-    }
+    status.textContent = statusText({
+      state: gameState, phase: uiState.phase, mode: gameMode, myPlayer,
+      blocker, throwCount, pieceName: PIECE_NAMES[type] ?? 'PIECE',
+    });
+    const warn = (blocker && !throwCount) || (myTurn && actions.mustPass)
+      || (myTurn && !over && uiState.phase === 'IDLE' && /QUEEN NOW/.test(status.textContent));
+    status.className = warn ? 'warn' : (uiState.phase !== 'IDLE' || over) ? 'active' : '';
   }
 
-  document.getElementById('btn-cancel')
-    .classList.toggle('hidden', uiState.phase === 'IDLE');
+  // Description bar for the selected piece, with anything buried underneath it
+  const desc = $('piece-desc');
+  if (type && PIECE_DESC[type] && !over) {
+    desc.replaceChildren();
+    const name = document.createElement('span');
+    name.className = `desc-name p${descOwner()}`;
+    name.innerHTML = `${spriteSVG(type)}<span>${PIECE_NAMES[type]}</span>`;
+    desc.append(name, PIECE_DESC[type]);
+    const stack = uiState.boardPick && uiState.phase === 'BOARD' ? gameState.board.get(uiState.boardPick) : null;
+    if (stack?.length > 1) {
+      const buried = document.createElement('span');
+      buried.className = 'desc-stack';
+      buried.innerHTML = `· ON TOP OF ${stack.slice(0, -1).reverse()
+        .map(p => `<span class="p${p.player}">${spriteSVG(p.type)}</span>`).join('')}`;
+      desc.append(buried);
+    }
+    desc.classList.add('visible');
+  } else {
+    desc.textContent = '';
+    desc.classList.remove('visible');
+  }
 
-  renderTray();
+  // Contextual buttons
+  $('btn-pass').classList.toggle('hidden', !(online && myTurn && actions.mustPass && !over));
+  $('btn-undo').classList.toggle('hidden', !(gameMode === 'LOCAL' && history.length));
+  $('btn-cancel').classList.toggle('hidden', uiState.phase === 'IDLE');
+
+  // Game menu entries
+  document.querySelectorAll('#game-menu [data-local-only]').forEach(el => { el.hidden = online || over; });
+  document.querySelector('#game-menu [data-finished-only]').hidden = online || !over;
+  $('menu-quit-label').textContent = over ? 'MAIN MENU' : online ? 'RESIGN GAME' : 'QUIT TO MENU';
+
+  renderTray(actions);
+}
+
+// ── Game menu ──────────────────────────────────────────
+
+const gameMenu = $('game-menu');
+const menuItems = () => [...gameMenu.querySelectorAll('button:not([hidden])')];
+
+function openGameMenu() {
+  gameMenu.hidden = false;
+  $('btn-menu').setAttribute('aria-expanded', 'true');
+  hidePieceTooltip();
+  menuItems()[0]?.focus();
+}
+
+function closeGameMenu({ restoreFocus = false } = {}) {
+  if (gameMenu.hidden) return;
+  gameMenu.hidden = true;
+  $('btn-menu').setAttribute('aria-expanded', 'false');
+  if (restoreFocus) $('btn-menu').focus();
+}
+
+$('btn-menu').addEventListener('click', () => (gameMenu.hidden ? openGameMenu() : closeGameMenu()));
+
+gameMenu.addEventListener('keydown', event => {
+  const items = menuItems();
+  const i = items.indexOf(document.activeElement);
+  if (event.key === 'ArrowDown') { event.preventDefault(); items[(i + 1) % items.length].focus(); }
+  if (event.key === 'ArrowUp')   { event.preventDefault(); items[(i - 1 + items.length) % items.length].focus(); }
+  if (event.key === 'Tab') closeGameMenu();
+});
+
+document.addEventListener('pointerdown', event => {
+  if (!gameMenu.hidden && !gameMenu.contains(event.target) && event.target !== $('btn-menu')) closeGameMenu();
+});
+
+gameMenu.addEventListener('click', event => {
+  const action = event.target.closest('button')?.dataset.action;
+  if (!action) return;
+  closeGameMenu();
+  if (action === 'rules')    showRules();
+  if (action === 'recenter') board.recenter(true);
+  if (action === 'rematch')  rematch();
+  if (action === 'restart') {
+    showConfirm({
+      title: 'RESTART GAME?',
+      body: 'The current board will be cleared and a new game started with the same settings.',
+      confirmLabel: 'RESTART',
+    }, () => startGame(gameSettings));
+  }
+  if (action === 'quit') requestQuit();
+});
+
+function requestQuit() {
+  if (!gameState) return;
+  if (gameState.winner) { exitToMenu(); return; }
+
+  if (gameMode === 'LOCAL') {
+    showConfirm({
+      title: 'QUIT TO MENU?',
+      body: 'Your game is saved — pick it up any time with CONTINUE GAME.',
+      confirmLabel: 'QUIT',
+    }, () => exitToMenu());
+    return;
+  }
+
+  showConfirm({
+    title: 'RESIGN THIS GAME?',
+    body: 'Your opponent will be awarded the win.',
+    confirmLabel: 'RESIGN',
+  }, () => {
+    if (net.isConnected()) net.send('RESIGN'); // GAME_OVER comes back and shows the result
+    else exitToMenu();
+  });
 }
 
 // ── Buttons ────────────────────────────────────────────
 
-document.getElementById('btn-cancel').addEventListener('click', clearSelection);
-document.getElementById('btn-pass').addEventListener('click', () => {
+$('btn-cancel').addEventListener('click', () => clearSelection());
+$('btn-undo').addEventListener('click', undo);
+$('btn-recenter').addEventListener('click', () => { board.recenter(true); hideBoardHint(); });
+$('btn-pass').addEventListener('click', () => {
   if (gameMode !== 'ONLINE' || !gameState || gameState.turn !== myPlayer) return;
   if (!getAllLegalActions(gameState).mustPass) return;
-  document.getElementById('btn-pass').classList.add('hidden');
-  net.send('PASS_TURN');
+  act({ type: ActionType.PASS });
 });
 
-document.getElementById('btn-resign').addEventListener('click', () => {
-  showResignConfirm(() => {
-    if (gameMode === 'ONLINE') {
-      net.send('RESIGN');
-      leaveOnlineSession();
-    }
-    hideGame();
-    board.pieces.clear();
-    board.ghosts      = new Set();
-    board.selectedHex = null;
-    gameState         = null;
-    showMenu();
-  });
-});
+// ── Keyboard shortcuts ─────────────────────────────────
 
-// ── Interstitial ───────────────────────────────────────
+document.addEventListener('keydown', event => {
+  if (!gameState || isOverlayOpen() || $('win-screen').classList.contains('active')) return;
+  if (event.target.closest?.('input, textarea')) return;
+  const key = event.key;
 
-function showInterstitial() {
-  const turn     = gameState.turn;
-  const actions  = getAllLegalActions(gameState);
-  const overlay  = document.getElementById('interstitial');
-  const ring     = document.getElementById('inter-ring');
-  const headline = document.getElementById('inter-headline');
-  const sub      = document.getElementById('inter-sub');
-  const supply   = gameState.supply[turn];
-  const available = TRAY_ORDER.filter(t => (supply[t] ?? 0) > 0);
-  const decoration = available.length
-    ? PIECE_UI[available[Math.floor(Math.random() * available.length)]].emoji
-    : '🐝';
-
-  ring.textContent = decoration;
-  ring.className   = `inter-hex-ring p${turn}`;
-
-  if (actions.mustPass) {
-    headline.textContent = `P${turn} — NO MOVES`;
-    sub.textContent      = 'TAP TO PASS';
-  } else {
-    headline.textContent = `PLAYER ${turn}'S TURN`;
-    sub.textContent      = 'TAP TO CONTINUE';
+  if (key === 'Escape') {
+    if (!gameMenu.hidden) closeGameMenu({ restoreFocus: true });
+    else if (uiState.phase !== 'IDLE') clearSelection();
+    else hidePieceTooltip();
+    return;
   }
-  headline.className = `p${turn}`;
+  if (event.altKey || (event.metaKey && key.toLowerCase() !== 'z')) return;
+  if (key.toLowerCase() === 'z' && gameMode === 'LOCAL') { event.preventDefault(); undo(); }
+  else if (key.toLowerCase() === 'c' && !event.ctrlKey) board.recenter(true);
+  else if (key === '+' || key === '=') board.zoomBy(1.2);
+  else if (key === '-' || key === '_') board.zoomBy(1 / 1.2);
+  else if (key === '?') showRules();
+});
 
-  overlay.setAttribute('aria-hidden', 'false');
-  overlay.classList.add('active');
-  overlay.tabIndex = 0;
-  overlay.focus();
+// ── Board hint ─────────────────────────────────────────
 
-  setTimeout(() => {
-    let handled = false;
-    const proceed = () => {
-      if (handled) return;
-      handled = true;
-      overlay.removeEventListener('click', proceed);
-      overlay.removeEventListener('keydown', onKeydown);
-      overlay.classList.remove('active');
-      overlay.setAttribute('aria-hidden', 'true');
-      overlay.tabIndex = -1;
-      if (actions.mustPass) {
-        if (gameMode === 'ONLINE') {
-          net.send('PASS_TURN');
-        } else {
-          gameState = applyAction(gameState, { type: ActionType.PASS });
-          setTimeout(showInterstitial, 120);
-        }
-      } else {
-        syncUI();
-      }
-    };
-    const onKeydown = event => {
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault();
-        proceed();
-      }
-    };
-    overlay.addEventListener('click', proceed, { once: true });
-    overlay.addEventListener('keydown', onKeydown);
-  }, 350);
+let hintTimer = null;
+function showBoardHintOnce() {
+  if (storageGet(HINT_SEEN_KEY)) return;
+  $('board-hint').classList.add('visible');
+  hintTimer = setTimeout(hideBoardHint, 7000);
+}
+function hideBoardHint() {
+  if (hintTimer) clearTimeout(hintTimer);
+  hintTimer = null;
+  if (!$('board-hint').classList.contains('visible')) return;
+  $('board-hint').classList.remove('visible');
+  storageSet(HINT_SEEN_KEY, '1');
 }
 
 // ── Net event handlers (ONLINE mode) ──────────────────────
+
+const FATAL_ERRORS = {
+  ROOM_NOT_FOUND:       'That room no longer exists.',
+  INVALID_RESUME_TOKEN: 'Your seat in that game is no longer valid.',
+  NO_ACTIVE_GAME:       'That game is no longer active.',
+  SEAT_OCCUPIED:        'This game is already open in another tab.',
+};
 
 /**
  * Called once by menu.js after a connection is established and the
@@ -746,84 +1104,79 @@ function showInterstitial() {
  */
 export function initNetHandlers() {
   net.on('_disconnected', () => {
-    const statusEl = document.getElementById('status-text');
-    if (statusEl) {
-      statusEl.textContent = 'RECONNECTING…';
-      statusEl.classList.add('active');
-    }
+    connectionNotice = 'CONNECTION LOST — RECONNECTING…';
+    syncUI();
   });
 
   // Authoritative game state after any action
   net.on('GAME_STATE', ({ gameState: snap }) => {
+    const prev = gameState;
     gameState = deserializeState(snap);
-    syncBoardRenderer();
-    if (gameState.winner) {
-      setTimeout(showWinScreen, 420);
-    } else if (gameMode === 'ONLINE' && gameState.turn === myPlayer) {
-      // It's now my turn — no interstitial needed in online mode
-      syncUI();
-    } else {
-      syncUI();
-    }
+    onStateChanged(prev);
   });
 
   net.on('ROOM_RESUMED', ({ player, gameState: snap }) => {
     myPlayer = player;
+    connectionNotice = null;
     if (snap) {
+      const prev = gameState;
       gameState = deserializeState(snap);
+      clearSelection(false);
+      const lastMove = describeLastMove(prev, gameState);
+      if (lastMove) board.lastMove = lastMove;
       syncBoardRenderer();
-      syncUI();
+      if (gameState.winner) winTimer = setTimeout(showWinScreen, 300);
     }
+    syncUI();
+    toast('RECONNECTED', 'good', 1400);
   });
 
-  // Server confirmed game over (e.g. resign)
-  net.on('GAME_OVER', ({ winner }) => {
-    if (gameState) gameState = { ...gameState, winner };
-    setTimeout(showWinScreen, 420);
+  // Server confirmed game over (win, or resign)
+  net.on('GAME_OVER', ({ winner, reason }) => {
+    if (!gameState) return;
+    gameState = { ...gameState, winner };
+    if (reason) winReason = reason;
+    clearSelection(false);
+    syncUI();
+    if (!winTimer && !winPresented) winTimer = setTimeout(showWinScreen, reason ? 200 : 700);
   });
 
   // Server rejected a move (shouldn't happen with correct client logic)
   net.on('INVALID_MOVE', ({ reason }) => {
     console.warn('[app] Server rejected move:', reason);
+    toast('THE SERVER REJECTED THAT MOVE', 'error');
     syncBoardRenderer();
     syncUI();
   });
 
-  // Opponent left
   net.on('OPPONENT_DISCONNECTED', () => {
-    const statusEl = document.getElementById('status-text');
-    if (statusEl) {
-      statusEl.textContent = 'OPPONENT DISCONNECTED';
-      statusEl.classList.add('active');
-    }
+    opponentAway = true;
+    if (!gameState?.winner) toast('OPPONENT DISCONNECTED — WAITING FOR THEM…', 'warn', 0);
   });
 
-  net.on('OPPONENT_RECONNECTED', () => syncUI());
+  net.on('OPPONENT_RECONNECTED', () => {
+    if (opponentAway) toast('OPPONENT RECONNECTED', 'good', 1600);
+    opponentAway = false;
+  });
 
   // Server closed the room (timeout, etc.)
-  net.on('ROOM_CLOSED', () => {
-    leaveOnlineSession();
-    hideGame();
-    board.pieces.clear();
-    board.ghosts      = new Set();
-    board.selectedHex = null;
-    gameState         = null;
-    showMenu();
+  net.on('ROOM_CLOSED', () => exitToMenu({ notice: 'The room was closed after a period of inactivity.' }));
+
+  net.on('ERROR', ({ reason }) => {
+    if (FATAL_ERRORS[reason]) exitToMenu({ notice: FATAL_ERRORS[reason] });
+    else toast(`SERVER ERROR: ${reason}`, 'error');
   });
 }
 
 // ── Boot ───────────────────────────────────────────────
 
-// HUD and tray start hidden; game-visible class reveals them
-document.getElementById('hud').style.display  = 'flex';
-document.getElementById('tray').style.display = 'flex';
+for (const slot of document.querySelectorAll('[data-sprite]')) slot.innerHTML = spriteSVG(slot.dataset.sprite);
 hideGame();
 
-initMenu({ onLocalStart: startGame, onOnlineStart: startOnlineGame, onNetReady: initNetHandlers });
-
-const boardHint = document.getElementById('board-hint');
-if (localStorage.getItem('hiveBoardHintSeen')) boardHint.classList.add('hidden');
-canvas.addEventListener('pointerdown', () => {
-  boardHint.classList.add('hidden');
-  localStorage.setItem('hiveBoardHintSeen', '1');
-}, { once: true });
+initMenu({
+  onLocalStart:        startGame,
+  onOnlineStart:       startOnlineGame,
+  onNetReady:          initNetHandlers,
+  onContinueLocal:     continueLocal,
+  getLocalSaveSummary: localSaveSummary,
+});
