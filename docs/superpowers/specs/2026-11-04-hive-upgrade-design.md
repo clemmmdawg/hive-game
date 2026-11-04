@@ -141,4 +141,44 @@ AI opponent, clock, spectator mode, persistent online rooms.
 
 ## Appendix A — Bug-hunt findings
 
-(Filled in from the bug-hunt report before Phase 0 starts.)
+Bug hunt: 40/40 existing tests pass; 1,500-game random fuzz (all expansions) found no
+hive-split / illegal-stack / negative-supply invariant violations. Repros were in a
+throwaway scratch dir; Phase 0 re-creates each as a regression test.
+
+**Fix in Phase 0 (confirmed):**
+1. **Server crash on malformed message** (high) — `server.js` message switch: payload
+   `null` → `msg.type` throws; `CREATE_ROOM {settings:null}` → `normalizeSettings`
+   throws (default param only covers `undefined`). Uncaught → process dies, all rooms
+   lost. Fix: reject non-object messages, coerce non-object settings to `{}`, wrap
+   handler in try/catch replying `ERROR`.
+2. **Ground slides can lose hive contact** (high, rules) — `canSlide` only enforces
+   the gate (both shared neighbours occupied ⇒ blocked); it never requires that at
+   least one shared neighbour is occupied for a ground→ground slide. Repro: piece at
+   `0,0`, others at `-1,1 -1,2 0,2 1,1` → queen/beetle/pillbug at `0,0` may move to
+   `1,0` (expected only `-1,0`, `0,1`); spider gets extra destination `2,1`. Affects
+   queen, ground beetle, ant, spider, pillbug, mosquito copies. Fix: ground→ground
+   steps (from height ≤ 1 after lift, to height 0) also need `h1>0 || h2>0`, computed
+   with the moving piece removed.
+3. **Half-open socket permanently loses seat** (medium) — `rooms.js` refuses
+   `RESUME_ROOM` with `SEAT_OCCUPIED` while the stale socket reads OPEN; app treats it
+   as fatal and deletes the token. Fix: a valid token replaces (terminates) the old
+   socket; add ws ping/pong heartbeat (30 s) to reap dead sockets.
+4. **Waiting room timeout 30 min not 10** (low) — host `joinRoom` → `touchActivity`
+   replaces the 10-min wait timer. Fix: keep wait timeout while `gameState` is null.
+5. **Stalemate draw status text wrong** (low) — `hints.js statusText` always says
+   "BOTH QUEENS SURROUNDED". Fix: take `winReason`.
+6. **Resign reason lost on resume** (low) — server keeps only `winner`; store
+   `room.endReason`, send in `ROOM_RESUMED` / `GAME_OVER`.
+7. **Stale close notifies opponent** (low, hardening) — only send
+   `OPPONENT_DISCONNECTED` if the closing socket is still the seat's socket.
+8. **Socket in two rooms** (low, hardening) — reject `CREATE_ROOM`/`JOIN_ROOM` from a
+   socket already seated in a room (`ALREADY_IN_ROOM`).
+
+**Investigate in Phase 0, fix only if confirmed against the official rules:**
+- Ladybug path ignores freedom-to-move at height (upper-level gate rule).
+- Pillbug may not throw a piece the opponent just *placed* (current behaviour) —
+  official rules: "a piece that was moved/placed by the opponent last turn" — keep,
+  add a test documenting it.
+
+**Deferred (noted, not fixed):** online mutual-no-move stalemate (rare); orphan room if
+the socket drops between CREATE_ROOM and ROOM_CREATED.
