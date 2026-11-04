@@ -1,6 +1,6 @@
 // menu.js — Main menu, settings panel, rules dialog, confirm dialog
 // Exports: initMenu(callbacks), showMenu(opts), hideMenu(), leaveOnlineSession(),
-//          showConfirm(opts, onConfirm), showRules(), isOverlayOpen()
+//          showConfirm(opts, onConfirm), showRules(), isOverlayOpen(), copyText(text)
 
 import * as net from './net.js';
 import { spriteSVG } from './sprites.js';
@@ -403,22 +403,30 @@ async function _shareLink() {
   _copy(link, $('btn-share-link'), 'COPY LINK');
 }
 
-async function _copy(text, button, label) {
-  let ok = false;
+/**
+ * Put `text` on the clipboard: the async Clipboard API, or a hidden textarea + execCommand where it is
+ * missing (insecure origins such as plain http on a LAN IP). Resolves true when the copy worked.
+ */
+export async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);
-    ok = true;
+    return true;
   } catch {
-    // Insecure origins (plain http on a LAN IP) have no clipboard API.
     const area = document.createElement('textarea');
     area.value = text;
     area.setAttribute('readonly', '');
     area.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
     document.body.append(area);
     area.select();
+    let ok;
     try { ok = document.execCommand('copy'); } catch { ok = false; }
     area.remove();
+    return ok;
   }
+}
+
+async function _copy(text, button, label) {
+  const ok = await copyText(text);
   button.textContent = ok ? 'COPIED ✓' : 'COPY FAILED';
   setTimeout(() => { button.textContent = label; }, 1600);
 }

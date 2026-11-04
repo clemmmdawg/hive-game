@@ -7,12 +7,13 @@ import {
   getLegalPlacements, getLegalMoves, getLegalThrows, getMoveBlocker,
   getAllLegalActions, deserializeState, getMovePath, queenPressure, neighbors,
 } from './game.js';
-import { initMenu, showMenu, showConfirm, showRules, leaveOnlineSession, isOverlayOpen } from './menu.js';
+import { initMenu, showMenu, showConfirm, showRules, leaveOnlineSession, isOverlayOpen, copyText } from './menu.js';
 import {
   statusText, describeLastMove, inferAction, winReasonFromServer, resumedWinReason, turnChipText,
   dangerText, newDangers,
 } from './hints.js';
 import { logEntry, undoLogEntry } from './notation.js';
+import { replayForGame, plyInfo, movesText } from './replay.js';
 import { encodeLocalSave, decodeLocalSave, MAX_UNDO } from './local-save.js';
 import { spriteSVG, drawSprite, SPECIES_COLOR, bodyFill } from './sprites.js';
 import * as net from './net.js';
@@ -101,9 +102,12 @@ const emojiCanvas = $('emoji-layer');
 const board       = new Board(canvas, emojiCanvas);
 
 function updateInsets() {
-  board.insets = gameState
-    ? { top: $('hud').offsetHeight, bottom: $('tray').offsetHeight }
-    : { top: 0, bottom: 0 };
+  // Reviewing: the replay bar stands in for the tray, and the hive stays clear of the exit pill.
+  const bar = $('replay-bar').offsetHeight;
+  document.documentElement.style.setProperty('--rb-h', `${bar}px`);
+  board.insets = !gameState ? { top: 0, bottom: 0 }
+    : review ? { top: Math.round($('review-pill').getBoundingClientRect().bottom), bottom: bar }
+    : { top: $('hud').offsetHeight, bottom: $('tray').offsetHeight };
 }
 
 board.resize(window.innerWidth, window.innerHeight);
@@ -139,6 +143,7 @@ let landingAlarm = null;   // …or raised by board.onLand when the piece that c
 let turnSoundTimer = null; // "your turn" chime, held back until the opponent's piece lands
 let connectionNotice = null; // shown in place of the status line while offline
 let opponentAway = false;
+let review = null;           // game review (move preview / replay) — see "Game review" below
 
 const uiState = {
   phase:           'IDLE',
@@ -278,6 +283,8 @@ function resetBoardView() {
 /** Tear down the current game and return to the main menu. */
 function exitToMenu({ notice, keepSaved = false } = {}) {
   cancelTimers();
+  endReview();
+  closeMovesSheet({ restoreFocus: false });
   hideGame();
   resetBoardView();
   if (gameMode === 'ONLINE') leaveOnlineSession({ keepSaved });
@@ -344,6 +351,8 @@ export function startOnlineGame(settings, playerNum, serializedState, endReason 
 }
 
 function beginGameSession(lastMove) {
+  endReview();
+  closeMovesSheet({ restoreFocus: false });
   board.finishAnimations({ clearFx: true });
   winPresented = false;
   winReason    = null;
@@ -384,10 +393,12 @@ function continueLocal() {
 
 // ── Sync renderer from game state ──────────────────────
 
+/** Show the live game — or, while reviewing, the position under review — on the board. */
 function syncBoardRenderer() {
   board.pieces.clear();
-  if (!gameState) return;
-  for (const [key, stack] of gameState.board.entries()) {
+  const shown = review?.replay.state ?? gameState;
+  if (!shown) return;
+  for (const [key, stack] of shown.board.entries()) {
     board.pieces.set(key, stack.map(p => ({
       player: p.player,
       type:   p.type,
@@ -538,6 +549,7 @@ function doThrow(toKey) {
  * one the arriving piece just pops in.
  */
 function onStateChanged(prev, { animate = true, move = null } = {}) {
+  leaveReviewForLive();
   clearSelection(false);
   const lastMove = describeLastMove(prev, gameState);
   if (lastMove) board.lastMove = lastMove;
@@ -630,6 +642,7 @@ function playMoveSound(kind, inFlight, { alarm = false } = {}) {
  * landing buzz steps aside rather than cutting the alarm's pattern short.
  */
 board.onLand = () => {
+  if (review) { sfx.play('place'); return; } // a replayed move: nothing live waits on it
   const alarms = [winTouchdown, landingAlarm].filter(Boolean);
   landingAlarm = null;
   sfx.play('place', { haptic: !alarms.length });
@@ -721,7 +734,7 @@ function playTurnChime(landingMs) {
 }
 
 function undo() {
-  if (gameMode !== 'LOCAL' || !history.length || !gameState) return;
+  if (gameMode !== 'LOCAL' || !history.length || !gameState || review) return;
   board.finishAnimations({ clearFx: true }); // no animation, and nothing left mid-air
   cancelTimers();
   const restored = history.pop();
@@ -875,33 +888,44 @@ function winCopy() {
 function showWinScreen({ calm = false } = {}) {
   winTimer = null;
   if (winPresented || !gameState?.winner) return;
-  // The player opened ☰ during the sequence: leave it be; the card follows when it closes.
-  if (!gameMenu.hidden) { winDeferred = { calm }; return; }
-  winPresented = true;
-  holdResult = false;
-  // A touchdown that never came (stalled frames, a snapped flight) must not fire over the card.
-  if (winFxTimer) clearTimeout(winFxTimer);
-  winFxTimer = winTouchdown = winDeferred = null;
+  // The player opened ☰ (or the move list) during the sequence: leave it be; the card follows when it closes.
+  if (!gameMenu.hidden || movesSheetOpen() || review) { winDeferred = { calm }; return; }
+  settleWinSequence();
   hidePieceTooltip();
-  const screen = $('win-screen');
-  const winner = gameState.winner;
-  const copy   = winCopy();
-
-  screen.className = winner === 'DRAW' ? 'draw' : `p${winner}`;
-  $('win-headline').textContent = copy.headline;
-  $('win-reason').textContent   = copy.reason;
-  $('win-emblem').innerHTML     = spriteSVG(copy.emblem); // on a .mini-tile in the winner's rim
-  $('btn-rematch').hidden       = gameMode !== 'LOCAL';
-
-  screen.setAttribute('aria-hidden', 'false');
-  screen.classList.add('active');
+  openWinCard();
   ($('btn-rematch').hidden ? $('btn-view-board') : $('btn-rematch')).focus();
+  const winner = gameState.winner;
   const lost = gameMode === 'ONLINE' && winner !== myPlayer && winner !== 'DRAW';
   if (!calm) {
     sfx.play(winner === 'DRAW' ? 'draw' : lost ? 'lose' : 'win');
     if (!lost) launchConfetti();
   }
   syncUI();
+}
+
+/** The result is shown (or skipped to): nothing from the win sequence may fire after this. */
+function settleWinSequence() {
+  winPresented = true;
+  holdResult = false;
+  // A touchdown that never came (stalled frames, a snapped flight) must not fire over the card.
+  if (winTimer) clearTimeout(winTimer);
+  if (winFxTimer) clearTimeout(winFxTimer);
+  winTimer = winFxTimer = winTouchdown = winDeferred = null;
+}
+
+/** Fill in and raise the result card (no sound, no confetti). */
+function openWinCard() {
+  const screen = $('win-screen');
+  const winner = gameState.winner;
+  const copy   = winCopy();
+  screen.className = winner === 'DRAW' ? 'draw' : `p${winner}`;
+  $('win-headline').textContent = copy.headline;
+  $('win-reason').textContent   = copy.reason;
+  $('win-emblem').innerHTML     = spriteSVG(copy.emblem); // on a .mini-tile in the winner's rim
+  $('btn-rematch').hidden       = gameMode !== 'LOCAL';
+  $('btn-replay').hidden        = !moveLog.length || !replayForGame(moveLog, gameState);
+  screen.setAttribute('aria-hidden', 'false');
+  screen.classList.add('active');
 }
 
 function hideWinScreen() {
@@ -919,6 +943,7 @@ function rematch() {
 }
 
 $('btn-rematch').addEventListener('click', rematch);
+$('btn-replay').addEventListener('click', () => { if (enterReview(0, { returnTo: 'card' })) startAutoplay(); });
 $('btn-to-menu').addEventListener('click', () => exitToMenu());
 $('btn-view-board').addEventListener('click', () => {
   hideWinScreen();
@@ -931,6 +956,7 @@ $('btn-view-board').addEventListener('click', () => {
 
 board.onTap = (q, r, clientX, clientY) => {
   if (!gameState) return;
+  if (review) { closeGameMenu(); hidePieceTooltip(); return; } // read-only: the board only pans and zooms
   closeGameMenu();
   const key      = hexKey(q, r);
   const stack    = gameState.board.get(key);
@@ -975,7 +1001,7 @@ board.onTap = (q, r, clientX, clientY) => {
 };
 
 board.onHover = (q, r, clientX, clientY) => {
-  if (q == null || !gameState) { hidePieceTooltip(); return; }
+  if (q == null || !gameState || review) { hidePieceTooltip(); return; }
   const key = hexKey(q, r);
   if (gameState.board.has(key)) showStackTooltip(key, clientX, clientY);
   else hidePieceTooltip();
@@ -1194,6 +1220,8 @@ function syncUI() {
   $('menu-quit-label').textContent = over ? 'MAIN MENU' : online ? 'RESIGN GAME' : 'QUIT TO MENU';
 
   renderTray(actions);
+  if (review) syncReviewUI();
+  if (movesSheetOpen()) renderMovesSheet();
 }
 
 // ── HUD queen meters ───────────────────────────────────
@@ -1215,8 +1243,8 @@ for (const p of [1, 2]) {
   </svg>`;
 }
 
-function renderQueenMeters() {
-  const meters = new Map(queenPips(gameState.board).map(m => [m.player, m]));
+function renderQueenMeters(state = gameState) {
+  const meters = new Map(queenPips(state.board).map(m => [m.player, m]));
   for (const player of [1, 2]) {
     const el = $(`qm-${player}`);
     const m  = meters.get(player);
@@ -1247,13 +1275,17 @@ function closeGameMenu({ restoreFocus = false } = {}) {
   gameMenu.hidden = true;
   $('btn-menu').setAttribute('aria-expanded', 'false');
   if (restoreFocus) $('btn-menu').focus();
-  if (winDeferred) {
-    // Shown a beat later, so a menu choice made in the same click (quit, rematch) cancels it first.
-    const opts = winDeferred;
-    winDeferred = null;
-    if (winTimer) clearTimeout(winTimer);
-    winTimer = setTimeout(() => showWinScreen(opts), 250);
-  }
+  flushDeferredWin();
+}
+
+/** Show a result card that was held back (☰ menu or move list open) now that nothing covers it. */
+function flushDeferredWin() {
+  if (!winDeferred || !gameMenu.hidden || movesSheetOpen() || review) return;
+  // Shown a beat later, so a menu choice made in the same click (quit, rematch) cancels it first.
+  const opts = winDeferred;
+  winDeferred = null;
+  if (winTimer) clearTimeout(winTimer);
+  winTimer = setTimeout(() => showWinScreen(opts), 250);
 }
 
 $('btn-menu').addEventListener('click', () => (gameMenu.hidden ? openGameMenu() : closeGameMenu()));
@@ -1267,7 +1299,8 @@ gameMenu.addEventListener('keydown', event => {
 });
 
 document.addEventListener('pointerdown', event => {
-  if (!gameMenu.hidden && !gameMenu.contains(event.target) && event.target !== $('btn-menu')) closeGameMenu();
+  // contains(): a tap on the ☰ icon lands on its SVG child, which must count as the button (it toggles).
+  if (!gameMenu.hidden && !gameMenu.contains(event.target) && !$('btn-menu').contains(event.target)) closeGameMenu();
 });
 
 gameMenu.addEventListener('click', event => {
@@ -1275,6 +1308,7 @@ gameMenu.addEventListener('click', event => {
   if (!action) return;
   if (action === 'sound') { toggleSound(); return; } // stays open so the new state is visible
   closeGameMenu();
+  if (action === 'moves')    openMovesSheet();
   if (action === 'rules')    showRules();
   if (action === 'recenter') board.recenter(true);
   if (action === 'rematch')  rematch();
@@ -1317,9 +1351,434 @@ $('btn-cancel').addEventListener('click', () => cancelSelection());
 $('btn-undo').addEventListener('click', undo);
 $('btn-recenter').addEventListener('click', () => { board.recenter(true); hideBoardHint(); });
 $('btn-pass').addEventListener('click', () => {
-  if (gameMode !== 'ONLINE' || !gameState || gameState.turn !== myPlayer) return;
+  if (gameMode !== 'ONLINE' || !gameState || gameState.turn !== myPlayer || review) return;
   if (!getAllLegalActions(gameState).mustPass) return;
   act({ type: ActionType.PASS });
+});
+
+// ── Game review: move list + replay ────────────────────
+//
+// One read-only mode serves both entries: tapping a move in the list mid-game (a preview, "BACK TO
+// GAME") and REPLAY on the result card (✕ / Esc returns to the card). The board shows a position
+// rebuilt from the move log (js/replay.js); the live gameState is never touched, nothing is saved or
+// sent, and leaving puts the live board back (selection cleared, cached layer re-rendered).
+// `review`: { replay, log, returnTo: 'game'|'board'|'card', liveLastMove, playing, playTimer }
+
+const AUTOPLAY_MS = 900;
+const movesSheet  = $('moves-sheet');
+let sheetInerted  = [];
+let sheetReturnFocus = null;
+
+const playerName = p => (gameMode === 'ONLINE' ? (p === myPlayer ? 'YOU' : 'OPPONENT') : `P${p}`);
+const escapeHTML = text => String(text).replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
+
+/** Notation with each piece id tinted in its owner's colour ('wA1' P1, 'bQ' P2). */
+function notationHTML(text) {
+  return escapeHTML(text).replace(/\b([wb])([QBGASMLP]\d?)/g, (_, side, rest) => `<b class="nid ${side === 'w' ? 'p1' : 'p2'}">${side}${rest}</b>`);
+}
+
+/**
+ * Enter the review at position `index` (0 = empty board, i = after the i-th move).
+ * @returns {boolean} false when this game's log cannot rebuild it (toast says so)
+ */
+function enterReview(index, { returnTo } = {}) {
+  if (!gameState) return false;
+  if (review) { seekReview(index); return true; }
+  const log = moveLog.slice();
+  const replay = replayForGame(log, gameState, { index });
+  if (!replay) { toast('HISTORY UNAVAILABLE FOR THIS GAME', 'warn'); return false; }
+  if (gameState.winner && !winPresented) {
+    // The win is still being revealed: skip to the result; leaving the review shows the card.
+    settleWinSequence();
+    hideBoardDim();
+    returnTo = 'card';
+  }
+  returnTo ??= $('win-screen').classList.contains('active') ? 'card' : gameState.winner ? 'board' : 'game';
+  if (passTimer) { clearTimeout(passTimer); passTimer = null; } // a forced pass waits for the live board
+  closeGameMenu();
+  closeMovesSheet({ restoreFocus: false });
+  hidePieceTooltip();
+  hideBanner();
+  hideBoardHint();
+  hideWinScreen();
+  board.finishAnimations({ clearFx: true });
+  clearSelection(false);
+
+  review = { replay, log, returnTo, liveLastMove: board.lastMove, playing: false, playTimer: null };
+  document.body.classList.add('reviewing');
+  $('replay-bar').hidden = false;
+  $('review-pill').hidden = false;
+  $('review-pill-label').textContent = returnTo === 'game' ? 'BACK TO GAME' : returnTo === 'card' ? 'CLOSE REPLAY' : 'BACK TO BOARD';
+  $('tray').inert = true;
+  updateInsets();
+  fitReviewCamera();
+  showReviewPosition(replay.index);
+  syncUI();
+  $('rb-play').focus();
+  return true;
+}
+
+/** Leave the review for wherever it was entered from (Esc, ✕ pill). */
+function exitReview() {
+  if (!review) return;
+  const { returnTo } = review;
+  endReview();
+  if (returnTo === 'card' && gameState?.winner) {
+    openWinCard();
+    $('btn-replay').focus();
+  } else {
+    $('btn-menu').focus();
+    // A forced pass held back by the preview runs now.
+    if (returnTo === 'game' && gameMode === 'LOCAL' && getAllLegalActions(gameState).mustPass) announceTurn();
+  }
+  flushDeferredWin();
+}
+
+/** Tear the review down and put the live board back. Safe to call when not reviewing. */
+function endReview() {
+  if (!review) return;
+  stopAutoplay();
+  const { liveLastMove } = review;
+  review = null;
+  document.body.classList.remove('reviewing');
+  $('replay-bar').hidden = true;
+  $('review-pill').hidden = true;
+  $('tray').inert = false;
+  board.finishAnimations({ clearFx: true });
+  clearSelection(false);
+  board.lastMove = liveLastMove;
+  syncBoardRenderer();
+  board.invalidate();
+  updateInsets();
+  if (gameState) {
+    board.recenter(true);
+    syncUI();
+  }
+}
+
+/** The live game changed (an opponent's move, a reconnect, a forced pass): back to it. */
+function leaveReviewForLive() {
+  if (!review) return;
+  closeMovesSheet({ restoreFocus: false });
+  endReview();
+  $('btn-menu').focus();
+  toast('BACK TO THE LIVE GAME', '', 1600);
+}
+
+/** Frame every hex the game ever used, so the camera holds still while the review steps. */
+function fitReviewCamera() {
+  board.pieces.clear();
+  for (const state of review.replay.states) for (const key of state.board.keys()) board.pieces.set(key, []);
+  board.recenter(true);
+  syncBoardRenderer(); // the frame is computed; now the real position
+}
+
+/**
+ * Show replay position `index`. One step forward flies the move along its getMovePath route (with
+ * its sounds); anything else (back, jumps, scrubbing) snaps.
+ */
+function showReviewPosition(index, { animate = false } = {}) {
+  const r = review.replay;
+  const from = r.index;
+  r.seek(index);
+  const prev = r.index > 0 ? r.states[r.index - 1] : null;
+  const forward = animate && prev && r.index === from + 1;
+  board.finishAnimations({ clearFx: !forward });
+  board.lastMove = prev ? describeLastMove(prev, r.state) : null;
+  syncBoardRenderer();
+  board.invalidate();
+  const to = board.lastMove?.to;
+  if (forward && to) {
+    const move = getMovePath(prev, review.log[r.index - 1].action);
+    if (move) board.animateMove({ ...move, toKey: to, player: board.lastMove.player });
+    else board.markArrival(to);
+    playMoveSound(move?.kind, board.hiddenTop.has(to));
+    board.reveal([to, ...(move?.path ?? [])], [], { anchor: to });
+  }
+  syncReviewUI();
+}
+
+/** A step, jump or scrub by the player: autoplay stops. */
+function seekReview(index, { animate = false } = {}) {
+  if (!review) return;
+  stopAutoplay();
+  showReviewPosition(index, { animate });
+}
+
+function startAutoplay() {
+  if (!review) return;
+  review.playing = true;
+  if (review.replay.atEnd) {
+    showReviewPosition(0); // from the top, like a video player
+    scheduleAutoplay();
+  } else {
+    autoplayStep();
+  }
+  syncPlayButton();
+}
+
+function autoplayStep() {
+  if (!review?.playing) return;
+  showReviewPosition(review.replay.index + 1, { animate: true });
+  if (review.replay.atEnd) stopAutoplay();
+  else scheduleAutoplay();
+}
+
+function scheduleAutoplay() {
+  if (review.playTimer) clearTimeout(review.playTimer);
+  review.playTimer = setTimeout(autoplayStep, AUTOPLAY_MS);
+}
+
+function stopAutoplay() {
+  if (!review) return;
+  if (review.playTimer) clearTimeout(review.playTimer);
+  review.playTimer = null;
+  review.playing = false;
+  syncPlayButton();
+}
+
+function toggleAutoplay() {
+  if (review?.playing) stopAutoplay();
+  else startAutoplay();
+}
+
+function syncPlayButton() {
+  const playing = !!review?.playing;
+  const btn = $('rb-play');
+  btn.classList.toggle('playing', playing);
+  btn.setAttribute('aria-label', playing ? 'Pause' : 'Play');
+}
+
+const VERB = { PLACE: 'PLACED', MOVE: 'MOVED', THROW: 'THREW' };
+
+/** Replay bar, HUD and exit pill for the position under review (syncUI calls this last). */
+function syncReviewUI() {
+  if (!review) return;
+  const r = review.replay;
+  const i = r.index, n = r.states.length - 1;
+  const entry = i ? review.log[i - 1] : null;
+  const info  = entry ? plyInfo(entry) : null;
+
+  // Replay bar
+  const bar = $('replay-bar');
+  bar.dataset.player = info ? String(info.player) : '';
+  $('rb-count').textContent = i ? `MOVE ${i} / ${n}` : `START · ${n} MOVE${n === 1 ? '' : 'S'}`;
+  $('rb-notation').innerHTML = info ? notationHTML(info.text) : 'EMPTY BOARD';
+  $('rb-tile').innerHTML = info?.type ? spriteSVG(info.type) : '';
+  $('rb-tile').classList.toggle('blank', !info?.type);
+  const slider = $('rb-slider');
+  slider.max = String(n);
+  slider.value = String(i);
+  slider.style.setProperty('--pct', `${n ? (i / n) * 100 : 0}%`);
+  slider.setAttribute('aria-valuetext', i ? `Move ${i} of ${n}${info ? `, ${playerName(info.player)} ${info.text}` : ''}` : 'Start, empty board');
+  $('rb-first').disabled = $('rb-prev').disabled = i === 0;
+  $('rb-next').disabled = $('rb-last').disabled = i === n;
+  $('rb-play').disabled = n === 0;
+  syncPlayButton();
+
+  // HUD: what is on the board now is the position under review
+  const shownPlayer = info?.player ?? 1;
+  $('hud').className = `game-visible turn-p${shownPlayer} reviewing`;
+  $('turn-chip').className = info ? `p${info.player}` : 'p1 waiting';
+  $('chip-label').textContent = review.returnTo === 'game' ? 'PREVIEW' : 'REPLAY';
+  $('chip-sub').textContent = `MOVE ${i}/${n}`;
+  const status = $('status-text');
+  status.className = 'active';
+  status.textContent = !info ? 'OPENING · EMPTY BOARD'
+    : info.pass ? `${playerName(info.player)} PASSED`
+    : `${playerName(info.player)} ${VERB[entry.action.type] ?? 'PLAYED'} ${PIECE_NAMES[info.type] ?? info.type}`;
+  if (i === n && gameState.winner) status.textContent += ` · ${turnChipText({ state: gameState, mode: gameMode, myPlayer })}`;
+  $('piece-desc').classList.remove('visible');
+  renderQueenMeters(r.state);
+  for (const id of ['btn-pass', 'btn-undo', 'btn-cancel']) $(id).classList.add('hidden');
+
+  if (movesSheetOpen()) syncMovesHighlight();
+}
+
+/** Keys while reviewing; returns true when the key was handled here. */
+function handleReviewKey(event) {
+  const key = event.key;
+  if (key === 'Escape') {
+    if (!gameMenu.hidden) closeGameMenu({ restoreFocus: true });
+    else exitReview();
+    return true;
+  }
+  if (!gameMenu.hidden || event.ctrlKey || event.metaKey || event.altKey) return false;
+  // The slider and buttons keep their own keys (arrows move the slider; Space presses a button).
+  const onSlider = event.target === $('rb-slider');
+  const onButton = !!event.target.closest?.('button');
+  const i = review.replay.index;
+  if (!onSlider && (key === 'ArrowRight' || key === 'ArrowLeft')) {
+    event.preventDefault();
+    seekReview(i + (key === 'ArrowRight' ? 1 : -1), { animate: key === 'ArrowRight' });
+    return true;
+  }
+  if (!onSlider && (key === 'Home' || key === 'End')) {
+    event.preventDefault();
+    seekReview(key === 'Home' ? 0 : review.replay.states.length - 1);
+    return true;
+  }
+  if ((key === ' ' || key.toLowerCase() === 'k') && !onButton) {
+    event.preventDefault();
+    toggleAutoplay();
+    return true;
+  }
+  return false;
+}
+
+$('review-pill').addEventListener('click', exitReview);
+$('rb-first').addEventListener('click', () => seekReview(0));
+$('rb-prev').addEventListener('click', () => seekReview(review.replay.index - 1));
+$('rb-next').addEventListener('click', () => seekReview(review.replay.index + 1, { animate: true }));
+$('rb-last').addEventListener('click', () => seekReview(review.replay.states.length - 1));
+$('rb-play').addEventListener('click', toggleAutoplay);
+$('rb-slider').addEventListener('input', event => seekReview(Number(event.target.value)));
+$('rb-moves').addEventListener('click', () => openMovesSheet());
+$('rb-copy').addEventListener('click', copyMoves);
+
+// ── Move list sheet ────────────────────────────────────
+
+function movesSheetOpen() {
+  return movesSheet.classList.contains('active');
+}
+
+function openMovesSheet() {
+  if (!gameState || movesSheetOpen()) return;
+  closeGameMenu();
+  hidePieceTooltip();
+  sheetReturnFocus = document.activeElement;
+  renderMovesSheet();
+  movesSheet.classList.add('active');
+  movesSheet.setAttribute('aria-hidden', 'false');
+  // Modal: everything else is inert while it is open (the toast stays live for COPY).
+  sheetInerted = [...document.body.children].filter(el => el !== movesSheet && el !== $('toast') && !el.inert);
+  for (const el of sheetInerted) el.inert = true;
+  const current = $('moves-list').querySelector('.mv-ply.current:not(:disabled)');
+  current?.scrollIntoView({ block: 'center' });
+  (current ?? $('btn-close-moves')).focus({ preventScroll: true });
+}
+
+function closeMovesSheet({ restoreFocus = true } = {}) {
+  if (!movesSheetOpen()) return;
+  movesSheet.classList.remove('active');
+  movesSheet.setAttribute('aria-hidden', 'true');
+  for (const el of sheetInerted) el.inert = false;
+  sheetInerted = [];
+  if (restoreFocus) {
+    const back = sheetReturnFocus?.isConnected && sheetReturnFocus.offsetParent !== null ? sheetReturnFocus
+      : review ? $('rb-moves') : $('btn-menu');
+    back.focus();
+  }
+  sheetReturnFocus = null;
+  flushDeferredWin();
+}
+
+/** The log the sheet lists, the position it marks as current, and whether rows can be previewed. */
+function sheetModel() {
+  if (review) return { log: review.log, current: review.replay.index, playable: true };
+  return { log: moveLog, current: moveLog.length, playable: !!replayForGame(moveLog, gameState) };
+}
+
+function renderMovesSheet() {
+  const { log, current, playable } = sheetModel();
+  const focused = document.activeElement?.closest?.('#moves-list .mv-ply')?.dataset.index;
+  $('moves-count').textContent = `${log.length} MOVE${log.length === 1 ? '' : 'S'}`;
+  const note = $('moves-note');
+  note.hidden = playable;
+  note.textContent = 'HISTORY UNAVAILABLE FOR THIS GAME — it was saved by an older version, so past positions can’t be shown.';
+
+  // One row per round: P1's move on the left, P2's on the right.
+  const rounds = new Map();
+  log.forEach((entry, i) => {
+    const round = Math.ceil((entry.turnNumber ?? i + 1) / 2);
+    if (!rounds.has(round)) rounds.set(round, {});
+    rounds.get(round)[entry.player] = { entry, index: i + 1 };
+  });
+  const cell = ply => {
+    if (!ply) return '<span class="mv-ply mv-none" aria-hidden="true"></span>';
+    const info = plyInfo(ply.entry);
+    const label = `Move ${ply.index}: ${playerName(info.player)} ${info.pass ? 'passed' : info.text}`;
+    return `<button class="mv-ply p${info.player}${info.pass ? ' pass' : ''}${ply.index === current ? ' current' : ''}" type="button"
+      data-index="${ply.index}" aria-label="${escapeHTML(label)}"${ply.index === current ? ' aria-current="step"' : ''}${playable ? '' : ' disabled'}>
+      <span class="mini-tile mv-tile${info.type ? '' : ' blank'}" aria-hidden="true">${info.type ? spriteSVG(info.type) : ''}</span>
+      <span class="mv-text">${notationHTML(info.text)}</span></button>`;
+  };
+  $('moves-list').innerHTML = log.length
+    ? [...rounds].map(([round, plies]) =>
+      `<li class="mv-row"><span class="mv-num" aria-hidden="true">${round}</span>${cell(plies[1])}${cell(plies[2])}</li>`).join('')
+    : `<li class="mv-empty">${playable ? 'NO MOVES YET' : 'NO MOVES RECORDED SINCE RESUMING'}</li>`;
+
+  $('btn-copy-moves').disabled = !log.length;
+  $('btn-moves-replay').hidden = !playable || !log.length;
+  if (focused) $('moves-list').querySelector(`[data-index="${focused}"]`)?.focus({ preventScroll: true });
+}
+
+/** Re-mark the current row without rebuilding the list (the replay stepped under the open sheet). */
+function syncMovesHighlight() {
+  const { current } = sheetModel();
+  for (const btn of $('moves-list').querySelectorAll('.mv-ply[data-index]')) {
+    const on = Number(btn.dataset.index) === current;
+    btn.classList.toggle('current', on);
+    if (on) btn.setAttribute('aria-current', 'step');
+    else btn.removeAttribute('aria-current');
+  }
+}
+
+function movesTitle() {
+  const w = gameState.winner;
+  const result = w === 'DRAW' ? 'DRAW' : w ? `P${w} WINS` : 'IN PROGRESS';
+  const exps = Object.entries(gameState.settings.expansions ?? {}).filter(([, on]) => on).map(([name]) => name.toUpperCase());
+  return `HIVE · P1 (w) vs P2 (b) · ${result}${exps.length ? ` · +${exps.join(' +')}` : ''}`;
+}
+
+async function copyMoves() {
+  const log = review ? review.log : moveLog;
+  if (!gameState || !log.length) { toast('NO MOVES TO COPY YET', 'warn', 1400); return; }
+  const ok = await copyText(movesText(log, { title: movesTitle() }));
+  toast(ok ? `${log.length} MOVE${log.length === 1 ? '' : 'S'} COPIED` : 'COULD NOT COPY THE MOVES', ok ? 'good' : 'error', 1600);
+}
+
+$('btn-close-moves').addEventListener('click', () => closeMovesSheet());
+$('btn-copy-moves').addEventListener('click', copyMoves);
+$('btn-moves-replay').addEventListener('click', () => {
+  closeMovesSheet({ restoreFocus: false });
+  if (review) { seekReview(0); startAutoplay(); }
+  else if (enterReview(0)) startAutoplay();
+});
+movesSheet.addEventListener('click', event => {
+  if (event.target === movesSheet) { closeMovesSheet(); return; } // the scrim
+  const ply = event.target.closest('.mv-ply[data-index]');
+  if (!ply || ply.disabled) return;
+  const index = Number(ply.dataset.index);
+  closeMovesSheet({ restoreFocus: false });
+  if (review) { seekReview(index); $('rb-play').focus(); }
+  else enterReview(index);
+});
+movesSheet.addEventListener('keydown', event => {
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    event.stopPropagation();
+    closeMovesSheet();
+    return;
+  }
+  const plies = [...$('moves-list').querySelectorAll('.mv-ply[data-index]:not(:disabled)')];
+  const at = plies.indexOf(document.activeElement);
+  // Rows hold two moves: Up/Down go a round, Left/Right a move.
+  const step = { ArrowDown: 2, ArrowUp: -2, ArrowRight: 1, ArrowLeft: -1 }[event.key];
+  const target = event.key === 'Home' ? 0 : event.key === 'End' ? plies.length - 1
+    : step === undefined ? null : at < 0 ? 0 : Math.max(0, Math.min(plies.length - 1, at + step));
+  if (target !== null && plies.length) {
+    event.preventDefault();
+    plies[target].focus();
+    return;
+  }
+  if (event.key === 'Tab') {
+    // Keep focus inside the sheet.
+    const focusable = [...$('moves-panel').querySelectorAll('button:not(:disabled):not([hidden])')];
+    const first = focusable[0], last = focusable.at(-1);
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  }
 });
 
 // ── Keyboard shortcuts ─────────────────────────────────
@@ -1329,6 +1788,11 @@ document.addEventListener('keydown', event => {
   if (!event.key || event.target.closest?.('input, textarea')) return;
   if (!gameState || isOverlayOpen() || $('win-screen').classList.contains('active')) return;
   const key = event.key;
+  if (movesSheetOpen()) { // keys inside the sheet are its own; this catches Esc with focus elsewhere
+    if (key === 'Escape') closeMovesSheet();
+    return;
+  }
+  if (review && handleReviewKey(event)) return;
 
   if (key === 'Escape') {
     if (!gameMenu.hidden) closeGameMenu({ restoreFocus: true });
@@ -1337,7 +1801,7 @@ document.addEventListener('keydown', event => {
     return;
   }
   if (event.altKey || (event.metaKey && key.toLowerCase() !== 'z')) return;
-  if (key.toLowerCase() === 'z' && gameMode === 'LOCAL') { event.preventDefault(); undo(); }
+  if (key.toLowerCase() === 'z' && gameMode === 'LOCAL' && !review) { event.preventDefault(); undo(); }
   else if (key.toLowerCase() === 'c' && !event.ctrlKey) board.recenter(true);
   else if (key === '+' || key === '=') board.zoomBy(1.2);
   else if (key === '-' || key === '_') board.zoomBy(1 / 1.2);
@@ -1438,6 +1902,7 @@ export function initNetHandlers() {
     if (Array.isArray(serverHistory)) moveLog = serverHistory;
     connectionNotice = null;
     if (snap) {
+      leaveReviewForLive();
       cancelTimers(); // nothing from before the drop (win impact, alarms, chime) may fire over the fresh state
       board.finishAnimations({ clearFx: true });
       const prev = gameState;
@@ -1461,6 +1926,7 @@ export function initNetHandlers() {
   // Server confirmed game over (win, or resign)
   net.on('GAME_OVER', ({ winner, reason }) => {
     if (!gameState) return;
+    leaveReviewForLive();
     gameState = { ...gameState, winner };
     winReason = winReasonFromServer(reason);
     clearSelection(false);

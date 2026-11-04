@@ -173,6 +173,7 @@
   </header>
 
   <nav id="game-menu" role="menu" aria-label="Game menu" hidden>
+    <button role="menuitem" type="button" data-action="moves"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6h1M4 12h1M4 18h1"/></svg> MOVES</button>
     <button role="menuitem" type="button" data-action="rules"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2z"/><path d="M4 19V5"/></svg> HOW TO PLAY</button>
     <button role="menuitem" type="button" data-action="recenter"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="6"/><path d="M12 2v5M12 17v5M2 12h5M17 12h5"/></svg> RECENTER VIEW</button>
     <button role="menuitemcheckbox" aria-checked="true" type="button" data-action="sound" title="Toggle sound (M)"><svg class="icon icon-sound-on" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4.2 4.2 0 0 1 0 6"/><path d="M18.3 6.3a8 8 0 0 1 0 11.4"/></svg><svg class="icon icon-sound-off" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M16 9.5l5 5M21 9.5l-5 5"/></svg> <span id="menu-sound-label">SOUND: ON</span></button>
@@ -209,6 +210,58 @@
     <div id="tray-pieces" role="toolbar" aria-label="Your pieces"></div>
   </footer>
 
+  <!-- GAME REVIEW: move list sheet, replay / preview controls -->
+  <button id="review-pill" type="button" hidden>
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    <span id="review-pill-label">BACK TO GAME</span>
+  </button>
+
+  <footer id="replay-bar" aria-label="Replay controls" hidden>
+    <div class="rb-head">
+      <div id="rb-label" aria-live="polite">
+        <span id="rb-tile" class="mini-tile" aria-hidden="true"></span>
+        <span class="rb-text">
+          <span id="rb-count">START</span>
+          <span id="rb-notation"></span>
+        </span>
+      </div>
+      <div class="rb-tools">
+        <button id="rb-moves" class="hud-btn" type="button" aria-label="Move list" title="Move list"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6h1M4 12h1M4 18h1"/></svg></button>
+        <button id="rb-copy" class="hud-btn" type="button" aria-label="Copy moves" title="Copy moves"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg></button>
+      </div>
+    </div>
+    <input id="rb-slider" type="range" min="0" max="0" step="1" value="0" aria-label="Move">
+    <div class="rb-transport" role="group" aria-label="Step through the game">
+      <button id="rb-first" class="rb-btn" type="button" aria-label="First position" title="Start (Home)"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 5v14"/><path d="M18 5.5v13L9 12z"/></svg></button>
+      <button id="rb-prev" class="rb-btn" type="button" aria-label="Previous move" title="Previous (←)"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M16 5.5v13L6.5 12z"/></svg></button>
+      <button id="rb-play" class="rb-btn rb-play" type="button" aria-label="Play" title="Play / pause (Space)"><svg class="icon icon-play" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 5.5v13l10.5-6.5z"/></svg><svg class="icon icon-pause" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8.5 5.5v13M15.5 5.5v13"/></svg></button>
+      <button id="rb-next" class="rb-btn" type="button" aria-label="Next move" title="Next (→)"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 5.5v13L17.5 12z"/></svg></button>
+      <button id="rb-last" class="rb-btn" type="button" aria-label="Last position" title="End (End)"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M18 5v14"/><path d="M6 5.5v13L15 12z"/></svg></button>
+    </div>
+  </footer>
+
+  <div id="moves-sheet" aria-hidden="true">
+    <section id="moves-panel" role="dialog" aria-modal="true" aria-labelledby="moves-title">
+      <span class="sheet-grip" aria-hidden="true"></span>
+      <header id="moves-header">
+        <div>
+          <p class="rules-kicker">GAME RECORD</p>
+          <h2 id="moves-title">MOVES</h2>
+        </div>
+        <span id="moves-count"></span>
+        <button id="btn-close-moves" class="icon-btn" type="button" aria-label="Close move list"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </header>
+      <p id="moves-note" hidden></p>
+      <div id="moves-scroll">
+        <ol id="moves-list" aria-label="Moves, oldest first"></ol>
+      </div>
+      <footer id="moves-actions">
+        <button id="btn-copy-moves" class="btn btn-ghost btn-small" type="button"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg> COPY MOVES</button>
+        <button id="btn-moves-replay" class="btn btn-primary btn-small" type="button"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 5.5v13l10.5-6.5z"/></svg> REPLAY</button>
+      </footer>
+    </section>
+  </div>
+
   <canvas id="confetti-layer" aria-hidden="true"></canvas>
   <div id="win-screen" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="win-headline">
     <div id="win-card">
@@ -218,6 +271,7 @@
       <p id="win-reason"></p>
       <div id="win-actions">
         <button id="btn-rematch" class="btn btn-primary" type="button">REMATCH</button>
+        <button id="btn-replay" class="btn btn-ghost" type="button"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 5.5v13l10.5-6.5z"/></svg> REPLAY</button>
         <button id="btn-view-board" class="btn btn-ghost" type="button">VIEW BOARD</button>
         <button id="btn-to-menu" class="btn btn-ghost" type="button">MAIN MENU</button>
       </div>
