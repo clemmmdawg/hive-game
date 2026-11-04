@@ -47,6 +47,7 @@ Run with `npm start` (starts `server/index.js`; port 3000), `npm start -- 3001`,
 - Room share: COPY CODE + SHARE/COPY LINK; `?room=CODE` opens JOIN with the code filled in
 - Main menu with mode selection, expansion toggles, tournament rule toggle
 - Server-authoritative online multiplayer with room codes
+- Spectators: a third JOIN_ROOM watches live (see Spectators below) — read-only, animated moves, clocks, danger meters, win sequence/card with neutral copy, moves sheet/previews/replay; HUD chip "WATCHING", 👁 N pill for everyone
 - Token-based seat recovery after transient disconnects; after ROOM_RESUMED the turn banner says whose move it is (`resumeBanner` in hints.js)
 - Responsive refined-neon UI with reduced-motion and focus-visible support
 - Move list + game review: ☰ MOVES opens a slide-up sheet (numbered rounds, sprite + notation, COPY MOVES); tapping a move previews that position read-only (BACK TO GAME pill); REPLAY on the win card (or the sheet, mid-game) holds the empty board ~600 ms then autoplays the game (900 ms/move, steps fly along getMovePath routes) with a scrubber bar (⏮ ◀ ▶/❚❚ ▶ ⏭, slider); Esc / ✕ returns to where review began. The HUD chip reads PREVIEW for a tapped move and REPLAY once autoplay has run; the sheet hides its REPLAY button while reviewing; a throw reads "P2 THREW P1 BEETLE"; the landscape replay bar shows a compact "19/38" so the full notation fits. Logs that do not rebuild the live game (resumed v1 saves) are listed but not previewable
@@ -66,7 +67,6 @@ Run with `npm start` (starts `server/index.js`; port 3000), `npm start -- 3001`,
 ### Known Limitations / Not Yet Built
 - No AI opponent
 - No persistent online rooms (room pause/resume deferred to v2); local games autosave
-- No spectator mode
 - Mosquito throw (mosquito adjacent to pillbug) UI not fully tested
 - Online play needs the network: offline, HOST/JOIN show "OFFLINE — LOCAL PLAY ONLY" (local play, CONTINUE and the pixel font work from cache)
 
@@ -412,6 +412,7 @@ CLIENT → SERVER:
   THROW_PIECE { pillbugHex, from, to }
   PASS_TURN   {}
   RESIGN      {}
+  (JOIN_ROOM also takes { spectate: true }: watch only — never seated, even if a seat were free; NO_ACTIVE_GAME if the room has none yet)
 
 SERVER → CLIENT:
   ROOM_CREATED        { code, player, token }
@@ -423,19 +424,27 @@ SERVER → CLIENT:
   INVALID_MOVE        { reason }
   ERROR               { reason }              — e.g. INVALID_MESSAGE; SEAT_TAKEN (+ close code 4001) when a newer
                                                 connection resumed your seat: net.js does not reconnect, the app
-                                                shows GAME OPENED IN ANOTHER TAB and keeps the saved token
+                                                shows GAME OPENED IN ANOTHER TAB and keeps the saved token;
+                                                NOT_A_PLAYER (a spectator sent an action); ROOM_FULL (16 spectators watching)
+  SPECTATING          { code, gameState, settings, history, clock?, serverNow?, endReason? } — JOIN_ROOM to a room whose seats are taken
+  SPECTATORS          { count }               — to everyone in the room when a spectator joins/leaves (and to a resuming player when count > 0)
   GAME_OVER           { winner, reason, clock?, serverNow? } — reason 'QUEEN'|'RESIGN'|'DRAW'|'REPETITION'|'TIMEOUT'  (REPETITION = automatic threefold draw; TIMEOUT = the side to move's clock ran out, carries the final clock)
 
   clock (timed rooms only) = js/clock.js clock in server time; clients rebaseClock(clock, serverNow, Date.now()).
   Body built by server.js roomSnapshot(room) (GAME_START / ROOM_RESUMED; reusable for any full-state message) / stateFields (GAME_STATE).
-  OPPONENT_DISCONNECTED {}
-  OPPONENT_RECONNECTED  {}
+  OPPONENT_DISCONNECTED { player }            — `player` = the seat that dropped (a spectator reads "PLAYER N DISCONNECTED")
+  OPPONENT_RECONNECTED  { player }
   ROOM_CLOSED         {}                      — room expired or was closed; the server then closes the socket
   WAITING_FOR_OPPONENT {}
 ```
 
 ### Client behavior
 `app.js` uses a mode flag (`'LOCAL'` vs `'ONLINE'`). All actions go through `act()`: online they are sent via `net.js` and the server broadcasts canonical state; locally they are applied and pushed onto the undo history. A player with no legal action gets an explicit PASS control online. `net.on()` keeps one handler per message type — menu.js registers the pre-game handlers and app.js (`initNetHandlers`) replaces them at game start. Fatal in-game `ERROR`s (room gone, seat invalid) return to the menu with a notice. `net.js` ignores events from superseded sockets and cancels pending reconnect timers on `disconnect()`.
+
+### Spectators
+- `JOIN_ROOM` to a room with both seats taken (or `{spectate:true}`) → `SPECTATING` snapshot (same builder as ROOM_RESUMED: `roomSnapshot()`), then `SPECTATORS {count}` to everyone. At most `MAX_SPECTATORS` (16, rooms.js) per room, else `ERROR ROOM_FULL`. Spectators have no token and no seat (a seat never frees: tokens are permanent), receive every broadcast (`broadcast()` covers `room.spectators`), and every action message (PLACE/MOVE/THROW/PASS/RESIGN) gets `ERROR NOT_A_PLAYER`. They never touch `touchActivity`, so they cannot keep a room alive; cleanup sends them `ROOM_CLOSED`. `handleClose(socket)` (server.js, exported for tests) frees a seat or drops a spectator and rebroadcasts the count.
+- Client: `myPlayer === null` in ONLINE mode means spectator (`isSpectator(mode, myPlayer)`, hints.js; `watching()` in app.js). The pure copy helpers (`statusText`, `turnChipText`, `dangerText`, `resumeBanner`, `winCopy`, review `playerName`) fall back to the neutral local wording ("P1 TO MOVE", "PLAYER 1 WINS!", "Player 2 resigned."); the result card plays the `draw` sting (never `lose`) and offers REPLAY / VIEW BOARD / MAIN MENU. `body.spectating` hides the tray pieces and shows both reserve strips (`#reserve-row`, `#reserve-row-b`); the chip sub-line reads WATCHING; `#spectator-count` (👁 N, hidden at 0) is shown to every participant; ☰ has no Restart/Resign (quit = LEAVE ROOM, no confirm); board taps only inspect; `act()` is a no-op.
+- Reconnect: menu.js sets `_spectating` on SPECTATING and its `_connected` handler re-sends `JOIN_ROOM {code, spectate:true}` (no token is stored; a page reload leaves the room). app.js's SPECTATING handler re-applies the snapshot like ROOM_RESUMED (`resumeFromSnapshot`).
 
 ### Reconnection
 The server pings every 30 s and terminates silent sockets; `RESUME_ROOM` with a valid token replaces a still-open old socket (no `SEAT_OCCUPIED`). A seated socket sending CREATE/JOIN gets `ERROR ALREADY_IN_ROOM`. `server.js` exports `createHiveServer()` and never listens by itself; `server/index.js` is the entry point (a "run directly" guard in server.js silently exited 0 through symlinked paths).
@@ -446,6 +455,7 @@ Room code and player token are stored in `localStorage`. If the socket drops, `R
 
 ### Room lifecycle
 - Rooms expire after 30 minutes of inactivity
+- Spectators neither refresh the idle timer nor delay cleanup (both players gone → still cleaned after 30 s)
 - A room with one player waits up to 10 minutes (absolute from creation; resuming does not extend it) for the second to join
 - WebSocket frames are capped at 64 KB; non-JSON frames get ERROR INVALID_MESSAGE
 
@@ -455,7 +465,7 @@ Room code and player token are stored in `localStorage`. If the socket drops, `R
 
 ### v1.1
 - [x] Clock/timer — Fischer presets (`js/clock.js`, HUD player plates, server-authoritative online)
-- [ ] Spectator mode — broadcast game state to extra room sockets read-only
+- [x] Spectator mode — extra room sockets watch read-only (max 16)
 - [x] PWA install — `sw.js` + `manifest.json`
 
 ### v2

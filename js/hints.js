@@ -33,7 +33,8 @@ export function repetitionCount(state) {
 }
 
 export function statusText({ state, phase = 'IDLE', mode = 'LOCAL', myPlayer = 1, blocker = null, throwCount = 0, pieceName = 'PIECE', winReason = null }) {
-  const online = mode === 'ONLINE';
+  const watching = isSpectator(mode, myPlayer);
+  const online = mode === 'ONLINE' && !watching; // a spectator reads like a local game: neutral "PLAYER N" copy
 
   if (state.winner === 'DRAW') {
     if (winReason === 'STALEMATE') return 'DRAW — NO MOVES LEFT';
@@ -57,6 +58,11 @@ export function statusText({ state, phase = 'IDLE', mode = 'LOCAL', myPlayer = 1
   const repeated = repetitionCount(state) === REPETITION_LIMIT - 1
     ? `REPETITION ${REPETITION_LIMIT - 1}/${REPETITION_LIMIT}` : null;
   if (online && state.turn !== myPlayer) return repeated ?? "OPPONENT'S TURN…"; // both seats see the warning
+  if (watching) {
+    if (queenPressure(state)[state.turn] === DANGER_AT) return dangerText(state.turn, { mode, myPlayer });
+    if (repeated) return repeated;
+    return getAllLegalActions(state).mustPass ? `P${state.turn} HAS NO MOVES` : `P${state.turn} TO MOVE`;
+  }
   if (getAllLegalActions(state).mustPass) return 'NO LEGAL MOVES — YOU MUST PASS';
 
   if (phase === 'TRAY')  return `TAP A GREEN HEX TO PLACE ${pieceName}`;
@@ -83,9 +89,12 @@ export function statusText({ state, phase = 'IDLE', mode = 'LOCAL', myPlayer = 1
 /** Occupied sides at which a queen is one move from being surrounded. */
 export const DANGER_AT = 5;
 
+/** An online viewer with no seat (`myPlayer` null): watching the room, never acting. */
+export const isSpectator = (mode, myPlayer) => mode === 'ONLINE' && myPlayer == null;
+
 /** "P1 QUEEN IN DANGER" — online, from the viewer's side ("YOUR" / "ENEMY"). */
 export function dangerText(player, { mode = 'LOCAL', myPlayer = 1 } = {}) {
-  if (mode !== 'ONLINE') return `P${player} QUEEN IN DANGER`;
+  if (mode !== 'ONLINE' || myPlayer == null) return `P${player} QUEEN IN DANGER`;
   return `${player === myPlayer ? 'YOUR' : 'ENEMY'} QUEEN IN DANGER`;
 }
 
@@ -121,7 +130,7 @@ export function resumedWinReason(state, endReason) {
 
 /** Label for the HUD turn chip: whose turn it is, or the result once the game is over. */
 export function turnChipText({ state, mode = 'LOCAL', myPlayer = 1 }) {
-  const online = mode === 'ONLINE';
+  const online = mode === 'ONLINE' && !isSpectator(mode, myPlayer);
   if (state.winner === 'DRAW') return 'DRAW';
   if (state.winner) {
     if (online) return state.winner === myPlayer ? 'YOU WIN' : 'YOU LOSE';
@@ -137,6 +146,7 @@ export function turnChipText({ state, mode = 'LOCAL', myPlayer = 1 }) {
  */
 export function resumeBanner({ state, myPlayer, mustPass = false }) {
   if (state.winner) return null;
+  if (myPlayer == null) return { text: `PLAYER ${state.turn}'S TURN`, color: `p${state.turn}` }; // spectator
   if (state.turn !== myPlayer) return { text: "OPPONENT'S TURN", color: `p${state.turn}` };
   return mustPass ? { text: 'NO MOVES — TAP PASS', color: 'gold' } : { text: 'YOUR TURN', color: `p${state.turn}` };
 }

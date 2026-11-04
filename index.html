@@ -178,6 +178,7 @@
       <div id="piece-desc" aria-live="polite"></div>
     </div>
     <div id="hud-actions">
+      <span id="spectator-count" class="spectator-count" role="status" hidden><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg><span id="spectator-n">0</span></span>
       <button class="hud-btn hud-action hidden" id="btn-pass" type="button">PASS</button>
       <button class="hud-btn hidden" id="btn-undo" type="button" aria-label="Undo last move" title="Undo (Z)"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 7H4V2"/><path d="M4.5 7A8 8 0 1 1 5 16"/></svg></button>
       <button class="hud-btn hidden" id="btn-cancel" type="button" aria-label="Cancel selection" title="Cancel (Esc)"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
@@ -220,6 +221,10 @@
     <div id="reserve-row" aria-label="Opponent's remaining pieces">
       <span id="reserve-label"></span>
       <span id="reserve-pieces"></span>
+    </div>
+    <div id="reserve-row-b" aria-label="Player 2's remaining pieces">
+      <span id="reserve-label-b"></span>
+      <span id="reserve-pieces-b"></span>
     </div>
     <div id="tray-pieces" role="toolbar" aria-label="Your pieces"></div>
   </footer>

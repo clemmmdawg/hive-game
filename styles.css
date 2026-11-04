@@ -971,6 +971,42 @@ kbd {
 
 #hud-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 
+/* 👁 N — spectator count (everyone in the room). A small glass pill with an eye in the species-neutral gold. */
+.spectator-count {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 26px; padding: 0 8px 0 6px;
+  border: 1px solid rgba(255,215,0,.35);
+  border-radius: 13px;
+  background: rgba(255,215,0,.07);
+  color: var(--gold);
+  font-size: 8px; letter-spacing: .5px; line-height: 1;
+  white-space: nowrap;
+  cursor: default;
+}
+.spectator-count[hidden] { display: none; }
+.spectator-count .icon { width: 14px; height: 14px; stroke-width: 1.8; filter: drop-shadow(0 0 3px rgba(255,215,0,.6)); }
+.spectator-count.bump { animation: spec-bump .45s var(--ease-out); }
+@keyframes spec-bump { 0% { transform: scale(1); } 30% { transform: scale(1.22); } 100% { transform: none; } }
+
+/* Spectating: the chip says WATCHING at every width (the usual ROUND line hides on phones), no
+   pieces to pick, and both reserves instead of the tray. */
+#turn-chip.watching #chip-sub { display: block; color: var(--gold); text-shadow: 0 0 6px rgba(255,215,0,.45); }
+body.spectating #tray-pieces { display: none; }
+body.spectating #tray { min-height: 0; gap: 4px; padding-top: 8px; }
+body.spectating #reserve-row-b { display: flex; }
+#reserve-row-b {
+  display: none; align-items: center; justify-content: center; gap: 10px; min-height: 16px;
+  font-size: 5px; letter-spacing: 1.2px; color: var(--ui-dim);
+}
+#reserve-label-b { white-space: nowrap; }
+#reserve-label-b.p1 { color: color-mix(in srgb, var(--p1) 75%, transparent); }
+#reserve-label-b.p2 { color: color-mix(in srgb, var(--p2) 75%, transparent); }
+#reserve-pieces-b { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+#reserve-pieces-b.p1 .reserve-item { border-color: var(--p1-mid); }
+#reserve-pieces-b.p2 .reserve-item { border-color: var(--p2-mid); }
+body.spectating #reserve-row, body.spectating #reserve-row-b { font-size: 6px; letter-spacing: 1.4px; }
+body.spectating #reserve-label, body.spectating #reserve-label-b { min-width: 34px; text-align: right; }
+
 /* Queen danger meters: one per player, pips lit per occupied side of the queen */
 #queen-meters { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
 .qm {
@@ -2205,6 +2241,9 @@ input:focus-visible {
   .reserve-item .sprite { width: 13px; height: 13px; }
   #tray-pieces { flex: 1 1 auto; align-items: center; gap: 6px; }
   .piece-slot { flex-basis: 50px; gap: 1px; padding-top: 2px; }
+  body.spectating #tray { flex-direction: row; justify-content: center; gap: 18px; padding: 4px 12px calc(4px + var(--safe-bottom)); }
+  body.spectating #reserve-row, body.spectating #reserve-row-b { flex: 1 1 0; flex-direction: row; justify-content: center; gap: 6px; }
+  body.spectating .spectator-count { height: 24px; }
   #replay-bar {
     /* The label sizes to its content (the full notation; 160px fits the usual ones, so the slider
        holds still while stepping); the slider takes what is left. */

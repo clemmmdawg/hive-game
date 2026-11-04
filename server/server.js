@@ -32,9 +32,11 @@ import {
   createRoom,
   getRoom,
   joinRoom,
+  joinSpectator,
   resumeRoom,
   removeSocket,
   broadcast,
+  broadcastSpectators,
   sendTo,
   touchActivity,
 } from './rooms.js';
@@ -115,16 +117,7 @@ export function createHiveServer({ heartbeatMs = HEARTBEAT_MS, clockOverride = n
       }
     });
 
-    socket.on('close', () => {
-      // A socket superseded by RESUME_ROOM has been detached (_hiveRoom null).
-      const room = getRoom(socket._hiveRoom);
-      if (room) {
-        const playerNum  = socket._hivePlayer;
-        const opponent   = playerNum === 1 ? 2 : 1;
-        removeSocket(socket);
-        sendTo(room, opponent, { type: 'OPPONENT_DISCONNECTED' });
-      }
-    });
+    socket.on('close', () => handleClose(socket));
 
     socket.on('error', () => {}); // suppress uncaught errors; 'close' fires after
   });
@@ -141,6 +134,24 @@ export function createHiveServer({ heartbeatMs = HEARTBEAT_MS, clockOverride = n
   httpServer.on('close', () => clearInterval(heartbeat));
 
   return { httpServer, wss };
+}
+
+/** A socket closed: free its seat (and tell the others), or drop it from the spectators. */
+export function handleClose(socket) {
+  // A socket superseded by RESUME_ROOM has been detached (_hiveRoom null).
+  const room = getRoom(socket._hiveRoom);
+  if (!room) return;
+  if (socket._hiveSpectator) {
+    removeSocket(socket);
+    broadcast(room, { type: 'SPECTATORS', count: room.spectators.size });
+    return;
+  }
+  const playerNum = socket._hivePlayer;
+  const opponent  = playerNum === 1 ? 2 : 1;
+  removeSocket(socket);
+  const gone = { type: 'OPPONENT_DISCONNECTED', player: playerNum };
+  sendTo(room, opponent, gone);
+  broadcastSpectators(room, gone);
 }
 
 // ── Message dispatch ─────────────────────────────────────────────────────────
@@ -186,6 +197,17 @@ export function handleMessage(socket, msg, options = {}) {
 
       if (!room) {
         socket.send(err('ROOM_NOT_FOUND'));
+        return;
+      }
+
+      // Both seats taken: the game is on, so this socket watches. `spectate` (a watcher re-joining
+      // after a drop) never takes a seat, whatever is free.
+      if (msg.spectate === true || room.tokens.every(Boolean)) {
+        if (!room.gameState) { socket.send(err('NO_ACTIVE_GAME')); return; }
+        const watch = joinSpectator(code, socket);
+        if (watch.error) { socket.send(err(watch.error)); return; }
+        socket.send(JSON.stringify({ type: 'SPECTATING', code, ...roomSnapshot(room) }));
+        broadcast(room, { type: 'SPECTATORS', count: room.spectators.size });
         return;
       }
 
@@ -242,7 +264,10 @@ export function handleMessage(socket, msg, options = {}) {
 
       console.log(`[server] Room ${code} player ${result.playerNum} resumed`);
       const opponent = result.playerNum === 1 ? 2 : 1;
-      sendTo(result.room, opponent, { type: 'OPPONENT_RECONNECTED' });
+      const back = { type: 'OPPONENT_RECONNECTED', player: result.playerNum };
+      sendTo(result.room, opponent, back);
+      broadcastSpectators(result.room, back);
+      if (result.room.spectators.size) socket.send(JSON.stringify({ type: 'SPECTATORS', count: result.room.spectators.size }));
       break;
     }
 
@@ -251,6 +276,7 @@ export function handleMessage(socket, msg, options = {}) {
     case 'MOVE_PIECE':
     case 'THROW_PIECE':
     case 'PASS_TURN': {
+      if (socket._hiveSpectator) { socket.send(err('NOT_A_PLAYER')); return; }
       const room = getRoom(socket._hiveRoom);
       if (!room?.gameState) { socket.send(err('NO_ACTIVE_GAME')); return; }
 
@@ -290,6 +316,7 @@ export function handleMessage(socket, msg, options = {}) {
 
     // ── Resign ─────────────────────────────────────────────────────────────
     case 'RESIGN': {
+      if (socket._hiveSpectator) { socket.send(err('NOT_A_PLAYER')); return; }
       const room = getRoom(socket._hiveRoom);
       // A flag that fell before this message (its timer not yet run) decides the game first.
       if (room?.gameState && !room.gameState.winner && isFlagged(room.clock, room.gameState.turn, Date.now())) {

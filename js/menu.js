@@ -25,7 +25,8 @@ let _joinCode      = '';
 
 // Room state (for HOST/JOIN flow)
 let _roomCode      = null; // code we're hosting/joining
-let _myPlayer      = null; // 1 or 2
+let _myPlayer      = null; // 1 or 2 (null while spectating)
+let _spectating    = false; // joined a full room: re-JOIN by code (no token) after a drop
 let _playerToken   = null;
 let _onlinePending = false; // true from CREATE/JOIN until the game starts or is cancelled
 let _rulesPreviousFocus = null;
@@ -67,6 +68,7 @@ export function showMenu({ notice } = {}) {
   _roomCode    = null;
   _myPlayer    = null;
   _playerToken = null;
+  _spectating  = false;
   _onlinePending = false;
   _resetOnlinePanel();
   if (notice) _showError(notice);
@@ -91,6 +93,7 @@ export function leaveOnlineSession({ keepSaved = false } = {}) {
   _roomCode = null;
   _myPlayer = null;
   _playerToken = null;
+  _spectating = false;
   _onlinePending = false;
   if (!keepSaved) storageSet(SESSION_KEY, null);
 }
@@ -295,7 +298,9 @@ function _startJoinFlow() {
 
   net.on('_connected', () => {
     if (_playerToken) net.send('RESUME_ROOM', { code: _roomCode, token: _playerToken });
-    else net.send('JOIN_ROOM', { code: _roomCode });
+    // A spectator has no seat to reclaim: it re-joins by code, and `spectate` keeps a seat that
+    // happens to be free from ever being handed to it.
+    else net.send('JOIN_ROOM', _spectating ? { code: _roomCode, spectate: true } : { code: _roomCode });
   });
 
   _attachOnlineGameHandlers();
@@ -317,6 +322,16 @@ function _attachOnlineGameHandlers() {
     _callbacks.onNetReady();
     hideMenu();
     _callbacks.onOnlineStart(settings, _myPlayer, gameState, null, history ?? [], { clock, serverNow });
+  });
+
+  // The room was full (or its game under way): this connection watches. No token, nothing saved.
+  net.on('SPECTATING', ({ gameState, settings, endReason, history, clock, serverNow }) => {
+    _spectating = true;
+    _myPlayer = null;
+    _onlinePending = false;
+    _callbacks.onNetReady();
+    hideMenu();
+    _callbacks.onOnlineStart(settings, null, gameState, endReason ?? null, history ?? [], { clock, serverNow });
   });
 
   net.on('_disconnected', () => {
@@ -533,7 +548,7 @@ function _applyRoomLink() {
 function _friendlyError(reason) {
   const messages = {
     ROOM_NOT_FOUND:       'Room not found. Check the code and try again.',
-    ROOM_FULL:            'That room already has two players.',
+    ROOM_FULL:            'That room is full — 16 spectators are already watching.',
     INVALID_RESUME_TOKEN: 'Your saved seat is no longer valid.',
     ALREADY_IN_ROOM:      'You are already in a room — leave it first.',
     NO_ACTIVE_GAME:       'That game is no longer active.',
@@ -554,7 +569,7 @@ function _buildSettingsHTML() {
                type="text" maxlength="4" placeholder="ABCD" inputmode="text"
                autocomplete="off" autocapitalize="characters" spellcheck="false"
                enterkeyhint="go" value="${_joinCode}">
-        <p class="settings-hint">Ask the host for their 4-character code. The host picks the rules.</p>
+        <p class="settings-hint">Ask the host for their 4-character code. The host picks the rules. A game already under way? You'll watch it.</p>
       </div>`;
   }
 

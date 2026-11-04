@@ -19,6 +19,7 @@ const CODE_CHARS   = 'BCDFGHJKLMNPQRSTVWXYZ23456789';
 export const WAIT_TIMEOUT = 10 * 60 * 1000; // 10 min — waiting for 2nd player
 export const IDLE_TIMEOUT = 30 * 60 * 1000; // 30 min — game inactivity
 export const CLOCK_GRACE  = 60 * 1000;      // a timed game's idle deadline stays this far past the running flag
+export const MAX_SPECTATORS = 16;           // watchers per room
 
 /** @type {Map<string, Room>} */
 const rooms = new Map();
@@ -46,6 +47,7 @@ export function createRoom(settings) {
   const room = {
     code,
     sockets:      [null, null],   // index 0 = player 1, index 1 = player 2
+    spectators:   new Set(),      // read-only watcher sockets: never seated, never refresh activity
     tokens:       [null, null],   // reconnect UUIDs parallel to sockets
     gameState:    null,           // set to a live GameState when game starts
     history:      [],             // move log: { notation, player, turnNumber, action } per valid action (incl. PASS)
@@ -96,6 +98,22 @@ export function joinRoom(code, socket) {
 
   touchActivity(room);
   return { playerNum, token, room };
+}
+
+/**
+ * Add a read-only watcher. Spectators have no token and no seat, do not count as room activity, and
+ * are dropped (ROOM_CLOSED) when the room is cleaned up. Returns { room } or { error }.
+ */
+export function joinSpectator(code, socket) {
+  const room = rooms.get(code);
+  if (!room) return { error: 'ROOM_NOT_FOUND' };
+  if (room.spectators.size >= MAX_SPECTATORS) return { error: 'ROOM_FULL' };
+  room.spectators.add(socket);
+  socket._hiveRoom      = code;
+  socket._hivePlayer    = null;
+  socket._hiveToken     = null;
+  socket._hiveSpectator = true;
+  return { room };
 }
 
 /** Reclaim a reserved player seat using the token issued on initial join. */
@@ -156,6 +174,11 @@ export function removeSocket(socket) {
   const room = rooms.get(code);
   if (!room) return;
 
+  if (socket._hiveSpectator) {
+    room.spectators.delete(socket);
+    return;
+  }
+
   const slot = socket._hivePlayer - 1;
   if (room.sockets[slot] === socket) room.sockets[slot] = null;
 
@@ -180,11 +203,19 @@ export function getRoom(code) {
 
 const WS_OPEN = 1;
 
-/** Send a message to all connected players in the room. */
+/** Send a message to everyone in the room: both players and every spectator. */
 export function broadcast(room, message) {
   const json = JSON.stringify(message);
-  for (const sock of room.sockets) {
+  for (const sock of [...room.sockets, ...room.spectators]) {
     if (sock && sock.readyState === WS_OPEN) sock.send(json);
+  }
+}
+
+/** Send a message to the room's spectators only. */
+export function broadcastSpectators(room, message) {
+  const json = JSON.stringify(message);
+  for (const sock of room.spectators) {
+    if (sock.readyState === WS_OPEN) sock.send(json);
   }
 }
 
@@ -224,12 +255,13 @@ function cleanupRoom(code) {
   if (room.clockTimer) clearTimeout(room.clockTimer);
   room.clockTimer = null;
 
-  for (const sock of room.sockets) {
+  for (const sock of [...room.sockets, ...room.spectators]) {
     if (sock && sock.readyState === WS_OPEN) {
       try { sock.send(JSON.stringify({ type: 'ROOM_CLOSED' })); } catch {}
       try { sock.close(); } catch {}
     }
   }
+  room.spectators.clear();
 
   rooms.delete(code);
   console.log(`[rooms] Room ${code} cleaned up. Active rooms: ${rooms.size}`);

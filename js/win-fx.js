@@ -8,7 +8,7 @@
 // Everything live is read through the injected context, so this module owns only its own timers:
 //   createWinFx({
 //     board,                          the Board (shockwave, dim spotlight, reduced motion)
-//     state(), mode(), myPlayer(),    the live game: GameState, 'LOCAL'|'ONLINE', 1|2
+//     state(), mode(), myPlayer(),    the live game: GameState, 'LOCAL'|'ONLINE', 1|2 (null = spectator)
 //     reason(),                       app's win reason: null|'QUEEN'|'RESIGN'|'STALEMATE'|'REPETITION'|'TIMEOUT'
 //     moveLog(),                      the move log (REPLAY is offered when it rebuilds the game)
 //     covered(),                      true while ☰ / move sheet / review would cover the card
@@ -39,7 +39,7 @@ export function surroundedQueens(board) {
 export function winCopy({ state, mode, myPlayer, reason }) {
   const winner = state.winner;
   const rounds = Math.max(1, Math.ceil((state.turnNumber - 1) / 2));
-  const online = mode === 'ONLINE';
+  const online = mode === 'ONLINE' && myPlayer != null; // a spectator (null) reads the neutral "PLAYER N" copy
   const name   = p => (online ? (p === myPlayer ? 'YOU' : 'OPPONENT') : `PLAYER ${p}`);
 
   if (winner === 'DRAW') {
@@ -238,9 +238,11 @@ export function createWinFx(ctx) {
     openCard();
     ($('btn-rematch').hidden ? $('btn-view-board') : $('btn-rematch')).focus();
     const winner = state.winner;
-    const lost = ctx.mode() === 'ONLINE' && winner !== ctx.myPlayer() && winner !== 'DRAW';
+    const watching = ctx.mode() === 'ONLINE' && ctx.myPlayer() == null;
+    const lost = ctx.mode() === 'ONLINE' && !watching && winner !== ctx.myPlayer() && winner !== 'DRAW';
     if (!calm) {
-      sfx.play(winner === 'DRAW' ? 'draw' : lost ? 'lose' : 'win');
+      // A spectator has no side: the neutral sting, never the loser's.
+      sfx.play(winner === 'DRAW' || watching ? 'draw' : lost ? 'lose' : 'win');
       if (!lost) launchConfetti();
     }
     ctx.sync();

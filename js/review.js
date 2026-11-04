@@ -33,10 +33,10 @@ const $ = id => document.getElementById(id);
 export const AUTOPLAY_MS = 900;
 export const REPLAY_HOLD_MS = 600; // a replay from the top lingers on the empty board before move 1
 
-/** "YOU" / "OPPONENT" online, "P1" / "P2" locally. */
-export const playerName = (p, mode, myPlayer) => (mode === 'ONLINE' ? (p === myPlayer ? 'YOU' : 'OPPONENT') : `P${p}`);
+/** "YOU" / "OPPONENT" online, "P1" / "P2" locally (and for a spectator, whose myPlayer is null). */
+export const playerName = (p, mode, myPlayer) => (mode === 'ONLINE' && myPlayer != null ? (p === myPlayer ? 'YOU' : 'OPPONENT') : `P${p}`);
 /** Possessive form for a piece's owner. */
-export const pieceOwnerName = (p, mode, myPlayer) => (mode === 'ONLINE' ? (p === myPlayer ? 'YOUR' : 'OPPONENT\'S') : `P${p}`);
+export const pieceOwnerName = (p, mode, myPlayer) => (mode === 'ONLINE' && myPlayer != null ? (p === myPlayer ? 'YOUR' : 'OPPONENT\'S') : `P${p}`);
 
 /** The exit pill's label for where the review returns to. */
 export const returnLabel = returnTo => (returnTo === 'game' ? 'BACK TO GAME' : returnTo === 'card' ? 'CLOSE REPLAY' : 'BACK TO BOARD');
