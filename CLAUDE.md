@@ -30,14 +30,16 @@ Run with `npm start` (port 3000), `npm start -- 3001`, or `npm start -- --port 3
 - Non-blocking turn banner between turns (replaced the full-screen interstitial)
 - Last-move marker (gold corner ticks on the destination, dashed outline on the source)
 - Move animation: pieces fly along their real route (`getMovePath`) — slides glide, hops/climbs/throws arc, placements drop in with squash; landing ripple (player colour), species-colour sparks, camera nudge on climbs/throws. Opponent moves animate online (`inferAction`). Undo and reduced motion are instant
-- Gentle camera follow (`board.reveal`): pans (zooms out only if needed) to show off-screen move targets and the moved piece, never while the user is panning
+- Gentle camera follow (`board.reveal`): pans (zooms out only if needed) to show off-screen move targets and the moved piece, never while the user is panning. Zoom-out floor: tiles never below `REVEAL_MIN_TILE_PX` (17 px) and never below an already smaller zoom; a pinch/wheel/key zoom is kept until the next recenter. Targets that don't fit are framed nearest-first around the selected/moved piece
+- Airborne pieces occlude the hive: each floating tile cuts its footprint out of `#emoji-layer` before its own glyph is drawn; pips and rings are painted under floating pieces
+- Landscape phones (`max-height: 500px` + landscape): 44 px HUD with the piece description inline under the status line, single-row 64 px tray with the opponent's reserve beside your pieces
 - HiDPI canvas rendering, animated recenter/fit (⌖ button, `C` key), piece pop-in animation
 - Status line explains why a selected piece can't move (`getMoveBlocker` + `js/hints.js`)
 - Local undo (↶ button, `Z` key) and autosave/resume of the local game (CONTINUE GAME on the menu)
 - Opponent reserve strip above the tray; online tray always shows your own pieces
 - Win screen with reason, bug emoji confetti, Rematch (local) / View Board / Main Menu
-- Queen danger meter: six pips on each queen's rim (lit per occupied side; gold, amber pulse at 4, red pulse + halo + face wash at 5), mirrored by two HUD meters (`#queen-meters`); stepping up to 5 plays `danger` once at touchdown with a red banner, and the endangered mover's status reads "P1 QUEEN IN DANGER"
-- Win sequence: the winning move flies at 0.4× (capped at 1 s), a white shockwave + camera punch at touchdown, the board dims 30% round the fallen queen (`#board-dim`), then confetti + card — card ≤ 1.6 s (`winTiming`); the HUD holds the result until impact. Reduced motion: card after 300 ms, no slow-mo/shockwave. A finished game opened by reload/resume shows the card calmly (no sting, no confetti)
+- Queen danger meter: six pips on each queen's rim (lit per occupied side; gold, amber pulse at 4, red pulse + halo + face wash at 5), mirrored by two HUD meters (`#queen-meters`); stepping up to 5 plays `danger` once at touchdown (from `board.onLand`, or when the flight is snapped home) with a red banner — the 12 ms landing buzz is skipped whenever an alarm (danger or win) fires on that landing — and the endangered mover's status reads "P1 QUEEN IN DANGER"
+- Win sequence: the winning move flies at 0.4× (capped at 1 s), a white shockwave + camera punch at touchdown, the board dims 45% round the fallen queen (`#board-dim`; an even dim when no queen is surrounded), then confetti + card — card ≤ 1.6 s (`winTiming`); the HUD holds the result until impact. Reduced motion: card after 300 ms, no slow-mo/shockwave. A finished game opened by reload/resume shows the card calmly (no sting, no confetti). If ☰ is open when the card is due, the card waits until it closes
 - Settings (expansions, tournament rule) remembered in localStorage
 - Room share: COPY CODE + SHARE/COPY LINK; `?room=CODE` opens JOIN with the code filled in
 - Main menu with mode selection, expansion toggles, tournament rule toggle
@@ -45,7 +47,7 @@ Run with `npm start` (port 3000), `npm start -- 3001`, or `npm start -- --port 3
 - Token-based seat recovery after transient disconnects
 - Responsive refined-neon UI with reduced-motion and focus-visible support
 - ☰ game menu: How to Play, Recenter, Restart/Rematch (local), Quit (local, keeps save) / Resign (online)
-- Piece description bar in HUD (slides in on selection)
+- Piece description bar (`#piece-desc`, inside `#hud-center`; hangs below the HUD, inline on landscape phones) slides in on selection
 - Hover/focus/tap piece tooltips for tray and board pieces
 - Accessible How to Play dialog, reachable from the menu and in-game (`?` key)
 - Keyboard: `Esc` cancel/close, `Z` undo, `C` recenter, `+`/`-` zoom, `M` sound on/off
@@ -162,6 +164,7 @@ applyAction(state, action) → GameState
 // Check win condition
 checkWin(state) → null | 1 | 2 | 'DRAW'
 queenPressure(state) → { 1: n|null, 2: n|null }   // occupied sides of each queen (null = not placed)
+queenSides(board, isOccupied?) → [{ key, player, sides[6], lit[6] }] // per-queen side occupancy in neighbors() order — the one source for queenPressure and board queenPips
 
 // Utilities (also exported)
 isArticulationPoint(board, key) → bool
@@ -194,14 +197,14 @@ neighbors(q, r) → { q, r }[]
 ```js
 sfx.unlock();               // create/resume the AudioContext — app.js calls it on every pointerdown/keydown/touchend
 sfx.resume();               // resume an existing suspended context only (never creates one) — app.js calls it on visibilitychange → visible
-sfx.play(name, { haptic }?) // no-op before unlock, while muted, for unknown names, or the same name again within 30 ms
+sfx.play(name, { haptic, duration }?) // no-op before unlock, while muted, for unknown names, or the same name again within 30 ms; duration (ms) holds the slide whoosh for the flight
 sfx.setMuted(bool); sfx.toggle() → muted; sfx.muted   // persisted under localStorage `hiveMuted`; mutes haptics too
 SOUND_NAMES                 // select deselect invalid place slide hop climb throw turn danger win lose draw
 ```
 
 Voices are synthesised per play (oscillators + gain envelopes + filtered noise) into a bus: lowpass 8 kHz + a small convolver plate send → master gain `MASTER_GAIN` 0.35 → `softClip` WaveShaper (linear to 0.7, ceiling −1 dBFS). Per-voice `TRIM_DB` balances loudness. Do not put a DynamicsCompressor back in: Chrome ducks short transients by ~10 dB. Haptics: 12 ms for place/slide/hop/climb/throw, `[30,40,30]` danger, `[40,60,80]` win.
 
-How app.js uses it: selecting a piece plays `select`; a piece with no moves plays `invalid`, and so does a disabled tray slot or a server rejection. Backing out plays `deselect`. A flying move plays its kind (`slide`/`hop`/`climb`/`throw`, with no haptic) at departure, and `board.onLand` plays `place` with the haptic at touchdown. A move that does not fly (reduced motion) plays `place` straight away. `turn` plays online when it becomes your turn, after the opponent's piece lands, and locally on a forced pass. The win card plays `win`, `lose` (the online loser) or `draw`. `danger` is for the queen-danger meter.
+How app.js uses it: selecting a piece plays `select`; a piece with no moves plays `invalid`, and so does a disabled tray slot or a server rejection. Backing out plays `deselect`. A flying move plays its kind (`slide`/`hop`/`climb`/`throw`, with no haptic; the slide stretched to `board.flightMs()`) at departure, and `board.onLand` plays `place` with the haptic at touchdown (no haptic when the landing raises the danger alarm or the win impact). A move that does not fly (reduced motion) plays `place` straight away. `turn` plays online when it becomes your turn, after the opponent's piece lands, and locally on a forced pass. The win card plays `win`, `lose` (the online loser) or `draw`. `danger` is for the queen-danger meter.
 
 ## Sprites (sprites.js)
 
@@ -230,7 +233,8 @@ board.insets = { top, bottom }; // px covered by HUD / tray — recenter fits th
 board.recenter(animate);  // fit the whole hive (or origin) into view
 board.zoomBy(ratio);      // keyboard / button zoom around the playable center
 board.markArrival(key);   // pop-in animation for a piece that just arrived
-board.reveal(keys, context?); // animated minimal pan (zoom-out only if needed) to show keys; also fits context when moving anyway; no-op while the user pans
+board.reveal(keys, context?, { anchor }?); // animated minimal pan (zoom-out only if needed, floored at REVEAL_MIN_TILE_PX / the user's own zoom) to show keys; frames anchor + nearest keys when they can't all fit; also fits context when it all fits; no-op while the user pans
+board.flightMs();          // tween duration (ms) of the running flight, 0 when idle
 board.animateMove({ path, kind, piece?, player?, toKey?, speed? }) → Promise // fly the top piece of toKey along a getMovePath route, then landing FX; speed < 1 = slow motion (win)
 board.shockwave(keys);    // win: white flash, expanding hex rings, sparks and a camera punch from each queen key
 board.finishAnimations({ clearFx? }); // snap running flights home (act/undo/new GAME_STATE); clearFx also drops sparks/ripples/nudge/shockwaves
@@ -240,7 +244,9 @@ board.draw(t);            // call every RAF frame with DOMHighResTimeStamp
 
 // Pure helper (exported): stack geometry, bottom first. Top layer scale ≥ 0.8, shade 0.
 stackLayers(height, size) → [{ dx, dy, scale, shade }]
-queenPips(pieces, hidden?) → [{ key, player, count, lit[6], dirs[6], height }] // danger-meter geometry; hexes in `hidden` (in flight) don't count yet
+queenPips(pieces, hidden?) → [{ key, player, count, lit[6], dirs[6], height }] // danger-meter geometry (counts via game.js queenSides); hexes in `hidden` (in flight) don't count yet
+pipPulse(count, t, reducedMotion?) → 0..1    // pip pulse; steady under reduced motion
+REVEAL_MIN_TILE_PX, PIP_DIST                 // reveal zoom floor (17 px tile radius); pip centre 0.72 × face radius
 winTiming(kind, steps, { reducedMotion }?) → { flightMs, landMs, cardMs }      // win-sequence timeline; cardMs ≤ WIN_REVEAL_MAX_MS (1600)
 
 // Written by app.js each frame/action:
@@ -309,7 +315,7 @@ Buttons share `.btn` + `.btn-primary | .btn-ghost | .btn-danger | .btn-small`; i
 | 2 | `#emoji-layer` canvas | Isolated emoji rendering |
 | 3 | `#board-dim` | Win-sequence dim with a spotlight on the fallen queen, pointer-events: none |
 | 18 | `#board-hint`, `#btn-recenter` | First-run hint, floating recenter button |
-| 19 | `#piece-desc` | Slides in below HUD |
+| 20 | `#piece-desc` | Inside `#hud` (its stacking context); hangs below it, inline on landscape phones |
 | 20 | `#hud`, `#tray` | Game chrome; hidden until game starts |
 | 25 | `#turn-banner` | Non-blocking turn announcement, pointer-events: none |
 | 30 | `#game-menu` | ☰ popover |
