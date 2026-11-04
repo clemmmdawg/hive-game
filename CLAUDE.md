@@ -253,6 +253,7 @@ board.onViewChange = () => {}                  // user panned or zoomed
 ```
 
 Buttons share `.btn` + `.btn-primary | .btn-ghost | .btn-danger | .btn-small`; icons are inline SVG `.icon`.
+`.mini-tile` is a small bevelled hex tile that matches the board tiles. Its rim takes the `--rim` colour and its width comes from `--rim-w`. It is used by the stack inspector chips, the How to Play piece guide and the win emblem.
 
 ### User-applied CSS overrides (do not revert)
 - `.toggle-pill` font-size: 6px
@@ -277,8 +278,8 @@ Buttons share `.btn` + `.btn-primary | .btn-ghost | .btn-danger | .btn-small`; i
 | 50 | `#crt` | Scanline overlay, pointer-events: none |
 | 60 | `#piece-tooltip` | Piece tooltip / stack inspector |
 | 70 | `#toast` | Transient notices (undo, reconnect, errors) |
-| 95 | `#confetti-layer` | Win animation, pointer-events: none |
-| 96 | `#win-screen` | Result card: rematch / view board / menu |
+| 95 | `#win-screen` | Result card: rematch / view board / menu |
+| 96 | `#confetti-layer` | Win animation above the card (crisp, not under its blur), pointer-events: none |
 | 97 | `#resign-confirm` | Generic confirm dialog (`showConfirm` in menu.js) |
 | 98 | `#menu-screen` | Main menu |
 | 99 | `#rules-overlay` | How to Play; makes everything else `inert` while open |

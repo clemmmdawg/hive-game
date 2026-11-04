@@ -122,14 +122,14 @@
         <section class="rules-piece-guide">
           <h3>PIECE GUIDE</h3>
           <dl>
-            <div><dt><span class="dt-sprite" data-sprite="QUEEN" aria-hidden="true"></span>QUEEN</dt><dd>Slides one space.</dd></div>
-            <div><dt><span class="dt-sprite" data-sprite="BEETLE" aria-hidden="true"></span>BEETLE</dt><dd>Moves one space and can climb onto the hive.</dd></div>
-            <div><dt><span class="dt-sprite" data-sprite="GRASSHOPPER" aria-hidden="true"></span>GRASSHOPPER</dt><dd>Jumps in a straight line over one or more pieces.</dd></div>
-            <div><dt><span class="dt-sprite" data-sprite="ANT" aria-hidden="true"></span>ANT</dt><dd>Slides any distance around the hive.</dd></div>
-            <div><dt><span class="dt-sprite" data-sprite="SPIDER" aria-hidden="true"></span>SPIDER</dt><dd>Slides exactly three spaces.</dd></div>
-            <div><dt><span class="dt-sprite" data-sprite="MOSQUITO" aria-hidden="true"></span>MOSQUITO</dt><dd>Copies the movement of an adjacent piece.</dd></div>
-            <div><dt><span class="dt-sprite" data-sprite="LADYBUG" aria-hidden="true"></span>LADYBUG</dt><dd>Moves two spaces over the hive, then one space down.</dd></div>
-            <div><dt><span class="dt-sprite" data-sprite="PILLBUG" aria-hidden="true"></span>PILLBUG</dt><dd>Slides one space or relocates an adjacent piece.</dd></div>
+            <div><dt style="--sp: var(--sp-queen)"><span class="mini-tile guide-tile"><span class="dt-sprite" data-sprite="QUEEN" aria-hidden="true"></span></span>QUEEN</dt><dd>Slides one space.</dd></div>
+            <div><dt style="--sp: var(--sp-beetle)"><span class="mini-tile guide-tile"><span class="dt-sprite" data-sprite="BEETLE" aria-hidden="true"></span></span>BEETLE</dt><dd>Moves one space and can climb onto the hive.</dd></div>
+            <div><dt style="--sp: var(--sp-grasshopper)"><span class="mini-tile guide-tile"><span class="dt-sprite" data-sprite="GRASSHOPPER" aria-hidden="true"></span></span>GRASSHOPPER</dt><dd>Jumps in a straight line over one or more pieces.</dd></div>
+            <div><dt style="--sp: var(--sp-ant)"><span class="mini-tile guide-tile"><span class="dt-sprite" data-sprite="ANT" aria-hidden="true"></span></span>ANT</dt><dd>Slides any distance around the hive.</dd></div>
+            <div><dt style="--sp: var(--sp-spider)"><span class="mini-tile guide-tile"><span class="dt-sprite" data-sprite="SPIDER" aria-hidden="true"></span></span>SPIDER</dt><dd>Slides exactly three spaces.</dd></div>
+            <div><dt style="--sp: var(--sp-mosquito)"><span class="mini-tile guide-tile"><span class="dt-sprite" data-sprite="MOSQUITO" aria-hidden="true"></span></span>MOSQUITO</dt><dd>Copies the movement of an adjacent piece.</dd></div>
+            <div><dt style="--sp: var(--sp-ladybug)"><span class="mini-tile guide-tile"><span class="dt-sprite" data-sprite="LADYBUG" aria-hidden="true"></span></span>LADYBUG</dt><dd>Moves two spaces over the hive, then one space down.</dd></div>
+            <div><dt style="--sp: var(--sp-pillbug)"><span class="mini-tile guide-tile"><span class="dt-sprite" data-sprite="PILLBUG" aria-hidden="true"></span></span>PILLBUG</dt><dd>Slides one space or relocates an adjacent piece.</dd></div>
           </dl>
         </section>
 
@@ -203,7 +203,7 @@
   <canvas id="confetti-layer" aria-hidden="true"></canvas>
   <div id="win-screen" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="win-headline">
     <div id="win-card">
-      <div id="win-emblem" aria-hidden="true"></div>
+      <div id="win-emblem" class="mini-tile" aria-hidden="true"></div>
       <p id="win-kicker">GAME OVER</p>
       <p id="win-headline"></p>
       <p id="win-reason"></p>

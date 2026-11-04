@@ -153,7 +153,7 @@ function showPieceTooltip({ type, owner, stack }, x, y, preferAbove = false) {
     for (const piece of [...stack].reverse()) {
       const li = document.createElement('li');
       li.className = `p${piece.player}`;
-      li.innerHTML = `<span class="stack-chip">${spriteSVG(piece.type)}</span><span></span>`;
+      li.innerHTML = `<span class="stack-chip mini-tile">${spriteSVG(piece.type)}</span><span></span>`;
       li.lastElementChild.textContent = `P${piece.player} ${PIECE_NAMES[piece.type] ?? piece.type}`;
       list.append(li);
     }
@@ -565,15 +565,16 @@ const SPRITE_SIZE  = 36;
 const CONFETTI_GLOW = ['#ff2d78', '#00f5ff'];
 const bugSprites   = TRAY_ORDER.flatMap(type => CONFETTI_GLOW.map(glow => {
   const colors = { ink: SPECIES_COLOR[type], fill: bodyFill(SPECIES_COLOR[type]), glow };
+  const px  = SPRITE_SIZE * 3; // enough backing pixels for the largest particle at dpr 2
   const oc  = document.createElement('canvas');
-  oc.width  = SPRITE_SIZE * 2;
-  oc.height = SPRITE_SIZE * 2;
+  oc.width  = px;
+  oc.height = px;
   const octx = oc.getContext('2d');
-  if (!drawSprite(octx, type, SPRITE_SIZE, SPRITE_SIZE, SPRITE_SIZE * 2, colors)) {
-    octx.font         = `${SPRITE_SIZE * 2 - 8}px serif`;
+  if (!drawSprite(octx, type, px / 2, px / 2, px, colors)) {
+    octx.font         = `${px - 12}px serif`;
     octx.textAlign    = 'center';
     octx.textBaseline = 'middle';
-    octx.fillText(PIECE_UI[type].emoji, SPRITE_SIZE, SPRITE_SIZE);
+    octx.fillText(PIECE_UI[type].emoji, px / 2, px / 2);
   }
   return oc;
 }));
@@ -593,15 +594,20 @@ function launchConfetti() {
 
   const cv  = $('confetti-layer');
   const ctx = cv.getContext('2d');
-  cv.width  = window.innerWidth;
-  cv.height = window.innerHeight;
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const W = window.innerWidth, H = window.innerHeight; // particles live in CSS px
+  cv.width  = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  cv.style.width  = `${W}px`;
+  cv.style.height = `${H}px`;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   cv.style.display = 'block';
 
   // No respawn: particles start above the screen and fall through once.
   // Stagger start Y so they don't all arrive at once.
   const pts = Array.from({ length: 52 }, () => ({
-    x:      Math.random() * cv.width,
-    y:      -SPRITE_SIZE - Math.random() * cv.height * 0.9,
+    x:      Math.random() * W,
+    y:      -SPRITE_SIZE - Math.random() * H * 0.9,
     vx:     (Math.random() - 0.5) * 2.2,
     vy:     1.6 + Math.random() * 3.2,
     sprite: bugSprites[Math.floor(Math.random() * bugSprites.length)],
@@ -617,18 +623,18 @@ function launchConfetti() {
     const elapsed = now - start;
 
     if (elapsed > DUR) {
-      ctx.clearRect(0, 0, cv.width, cv.height);
+      ctx.clearRect(0, 0, W, H);
       stopConfetti();
       return;
     }
 
-    ctx.clearRect(0, 0, cv.width, cv.height);
+    ctx.clearRect(0, 0, W, H);
     ctx.globalAlpha = elapsed > DUR - 800
       ? 1 - (elapsed - (DUR - 800)) / 800
       : 1;
 
     for (const p of pts) {
-      if (p.y > cv.height + SPRITE_SIZE) continue; // already off screen, skip
+      if (p.y > H + SPRITE_SIZE) continue; // already off screen, skip
 
       p.x   += p.vx;
       p.y   += p.vy;
@@ -694,7 +700,7 @@ function showWinScreen() {
   screen.className = winner === 'DRAW' ? 'draw' : `p${winner}`;
   $('win-headline').textContent = copy.headline;
   $('win-reason').textContent   = copy.reason;
-  $('win-emblem').innerHTML     = spriteSVG(copy.emblem);
+  $('win-emblem').innerHTML     = spriteSVG(copy.emblem); // on a .mini-tile in the winner's rim
   $('btn-rematch').hidden       = gameMode !== 'LOCAL';
 
   screen.setAttribute('aria-hidden', 'false');
@@ -871,6 +877,8 @@ trayEl.addEventListener('keydown', event => {
   }
 });
 const showSlotTooltip = slot => {
+  // The selected piece's text is already in the description bar under the HUD.
+  if (uiState.trayPick?.type === slot.dataset.type) return;
   const rect = slot.getBoundingClientRect();
   showPieceTooltip({ type: slot.dataset.type, owner: gameState ? trayPlayer() : undefined },
     rect.left + rect.width / 2, rect.top, true);
@@ -882,9 +890,18 @@ trayEl.addEventListener('pointerover', event => {
 trayEl.addEventListener('pointerout', event => {
   if (!event.relatedTarget?.closest?.('.piece-slot')) hidePieceTooltip();
 });
+// A touch tap also focuses the slot. Selecting it opens the description bar, so the
+// tooltip would only repeat it (and cover the reserve strip); keep it for keyboard
+// focus, and for touch taps on slots that can't be selected.
+let trayTouchAt = -Infinity;
+trayEl.addEventListener('pointerdown', event => {
+  if (event.pointerType !== 'mouse') trayTouchAt = performance.now();
+});
 trayEl.addEventListener('focusin', event => {
   const slot = event.target.closest('.piece-slot');
-  if (slot) showSlotTooltip(slot);
+  if (!slot) return;
+  const touched = performance.now() - trayTouchAt < 1000;
+  if (!touched || slot.classList.contains('disabled')) showSlotTooltip(slot);
 });
 trayEl.addEventListener('focusout', hidePieceTooltip);
 
