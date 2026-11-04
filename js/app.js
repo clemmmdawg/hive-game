@@ -8,7 +8,7 @@ import {
   getAllLegalActions, deserializeState,
 } from './game.js';
 import { initMenu, showMenu, showConfirm, showRules, leaveOnlineSession, isOverlayOpen } from './menu.js';
-import { statusText, describeLastMove, winReasonFromServer } from './hints.js';
+import { statusText, describeLastMove, winReasonFromServer, resumedWinReason, turnChipText } from './hints.js';
 import { encodeLocalSave, decodeLocalSave, MAX_UNDO } from './local-save.js';
 import { spriteSVG, drawSprite } from './sprites.js';
 import * as net from './net.js';
@@ -252,11 +252,11 @@ function resetBoardView() {
 }
 
 /** Tear down the current game and return to the main menu. */
-function exitToMenu({ notice } = {}) {
+function exitToMenu({ notice, keepSaved = false } = {}) {
   cancelTimers();
   hideGame();
   resetBoardView();
-  if (gameMode === 'ONLINE') leaveOnlineSession();
+  if (gameMode === 'ONLINE') leaveOnlineSession({ keepSaved });
   gameState = null;
   history = [];
   connectionNotice = null;
@@ -293,8 +293,9 @@ function startGame(settings, restore = null) {
  * @param {object} settings        - Game settings (from GAME_START)
  * @param {number} playerNum       - 1 or 2
  * @param {object} serializedState - JSON-safe state from serializeState()
+ * @param {string|null} [endReason] - server end reason when resuming a finished game
  */
-export function startOnlineGame(settings, playerNum, serializedState) {
+export function startOnlineGame(settings, playerNum, serializedState, endReason = null) {
   cancelTimers();
   gameMode     = 'ONLINE';
   myPlayer     = playerNum;
@@ -304,7 +305,9 @@ export function startOnlineGame(settings, playerNum, serializedState) {
   connectionNotice = null;
   opponentAway = false;
   beginGameSession(describeLastMove(null, gameState));
+  winReason = resumedWinReason(gameState, endReason);
   if (gameState.winner) {
+    syncUI();
     winTimer = setTimeout(showWinScreen, 300);
   } else {
     showBanner(`YOU ARE PLAYER ${myPlayer}`, `p${myPlayer}`, PieceType.QUEEN, 1800);
@@ -718,7 +721,7 @@ $('btn-to-menu').addEventListener('click', () => exitToMenu());
 $('btn-view-board').addEventListener('click', () => {
   hideWinScreen();
   board.recenter(true);
-  toast('GAME OVER · ☰ FOR REMATCH OR MENU', '', 2600);
+  toast(gameMode === 'ONLINE' ? 'GAME OVER · ☰ FOR MENU' : 'GAME OVER · ☰ FOR REMATCH OR MENU', '', 2600);
   $('btn-menu').focus();
 });
 
@@ -910,8 +913,9 @@ function syncUI() {
   // Turn chip + HUD accent
   $('hud').className = `game-visible turn-p${over && gameState.winner !== 'DRAW' ? gameState.winner : turn}`;
   const chip = $('turn-chip');
-  chip.className = `p${turn}${myTurn || over ? '' : ' waiting'}`;
-  $('chip-label').textContent = online ? (turn === myPlayer ? 'YOU' : 'OPP') : `P${turn}`;
+  const chipPlayer = over && gameState.winner !== 'DRAW' ? gameState.winner : turn;
+  chip.className = `p${chipPlayer}${myTurn || over ? '' : ' waiting'}`;
+  $('chip-label').textContent = turnChipText({ state: gameState, mode: gameMode, myPlayer });
   $('chip-sub').textContent   = over ? 'FINAL' : `ROUND ${Math.ceil(gameState.turnNumber / 2)}`;
 
   // Status line
@@ -1093,6 +1097,8 @@ function hideBoardHint() {
 const FATAL_ERRORS = {
   ROOM_NOT_FOUND:       'That room no longer exists.',
   INVALID_RESUME_TOKEN: 'Your seat in that game is no longer valid.',
+  // The stored session is kept (see exitToMenu) so the player can reclaim the seat later.
+  SEAT_TAKEN:           'GAME OPENED IN ANOTHER TAB',
   NO_ACTIVE_GAME:       'That game is no longer active.',
 };
 
@@ -1163,7 +1169,7 @@ export function initNetHandlers() {
   net.on('ROOM_CLOSED', () => exitToMenu({ notice: 'The room was closed after a period of inactivity.' }));
 
   net.on('ERROR', ({ reason }) => {
-    if (FATAL_ERRORS[reason]) exitToMenu({ notice: FATAL_ERRORS[reason] });
+    if (FATAL_ERRORS[reason]) exitToMenu({ notice: FATAL_ERRORS[reason], keepSaved: reason === 'SEAT_TAKEN' });
     else if (reason === 'ALREADY_IN_ROOM') toast('ALREADY IN A ROOM', 'warn');
     else toast(`SERVER ERROR: ${reason}`, 'error');
   });

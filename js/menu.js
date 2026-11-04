@@ -80,14 +80,18 @@ export function showMenu({ notice } = {}) {
   _renderContinue();
 }
 
-/** Leave any online session and clear reconnect credentials. */
-export function leaveOnlineSession() {
+/**
+ * Leave any online session and clear reconnect credentials, unless
+ * `keepSaved` (the seat was taken by another tab; the token stays so the
+ * player can reclaim it later).
+ */
+export function leaveOnlineSession({ keepSaved = false } = {}) {
   net.disconnect();
   _roomCode = null;
   _myPlayer = null;
   _playerToken = null;
   _onlinePending = false;
-  storageSet(SESSION_KEY, null);
+  if (!keepSaved) storageSet(SESSION_KEY, null);
 }
 
 /** Fade the menu out. */
@@ -309,7 +313,7 @@ function _attachOnlineGameHandlers() {
 
   net.on('WAITING_FOR_OPPONENT', ({ code }) => _showRoom(code));
 
-  net.on('ROOM_RESUMED', ({ player, token, gameState, settings }) => {
+  net.on('ROOM_RESUMED', ({ player, token, gameState, settings, endReason }) => {
     _myPlayer = player;
     _playerToken = token;
     _saveSession();
@@ -317,14 +321,14 @@ function _attachOnlineGameHandlers() {
       _onlinePending = false;
       _callbacks.onNetReady();
       hideMenu();
-      _callbacks.onOnlineStart(settings, player, gameState);
+      _callbacks.onOnlineStart(settings, player, gameState, endReason ?? null);
     } else {
       _showRoom(_roomCode);
     }
   });
 
   net.on('ERROR', ({ reason }) => {
-    leaveOnlineSession();
+    leaveOnlineSession({ keepSaved: reason === 'SEAT_TAKEN' });
     _resetOnlinePanel();
     _syncModeButtons();
     _showError(_friendlyError(reason));
@@ -507,6 +511,7 @@ function _friendlyError(reason) {
     INVALID_RESUME_TOKEN: 'Your saved seat is no longer valid.',
     ALREADY_IN_ROOM:      'You are already in a room — leave it first.',
     NO_ACTIVE_GAME:       'That game is no longer active.',
+    SEAT_TAKEN:           'GAME OPENED IN ANOTHER TAB',
   };
   return messages[reason] ?? 'Unable to connect. Please try again.';
 }

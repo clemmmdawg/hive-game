@@ -49,6 +49,7 @@ export function createRoom(settings) {
     settings,
     endReason:    null,           // 'QUEEN' | 'RESIGN' | 'DRAW' once finished
     idleTimer:    null,
+    createdAt:    Date.now(),
     lastActivity: Date.now(),
   };
   rooms.set(code, room);
@@ -107,7 +108,7 @@ export function resumeRoom(code, token, socket) {
     current._hiveRoom   = null;
     current._hivePlayer = null;
     current._hiveToken  = null;
-    current.terminate?.();
+    evictSocket(current);
   }
 
   const playerNum = slot + 1;
@@ -117,6 +118,24 @@ export function resumeRoom(code, token, socket) {
   socket._hiveToken  = token;
   touchActivity(room);
   return { playerNum, token, room };
+}
+
+/** Close code sent to a socket whose seat was reclaimed by a newer connection. */
+export const SEAT_TAKEN_CLOSE = 4001;
+
+/**
+ * Tell a superseded socket why it is being dropped so its client does not
+ * auto-reconnect and steal the seat back, then close it. A truly half-open
+ * socket never receives the frame, so it is terminated after a short grace.
+ */
+function evictSocket(sock) {
+  if (sock.readyState === WS_OPEN) {
+    try { sock.send(JSON.stringify({ type: 'ERROR', reason: 'SEAT_TAKEN' })); } catch {}
+    try { sock.close?.(SEAT_TAKEN_CLOSE, 'SEAT_TAKEN'); } catch {}
+  }
+  const killer = setTimeout(() => { try { sock.terminate?.(); } catch {} }, 2000);
+  killer.unref?.();
+  sock.once?.('close', () => clearTimeout(killer));
 }
 
 // ── Socket removal ───────────────────────────────────────────────────────────
@@ -176,7 +195,10 @@ function touchActivity(room) {
   room.lastActivity = Date.now();
   if (room.idleTimer) clearTimeout(room.idleTimer);
   // Until a second player has claimed a seat the room is only waiting for them.
-  const delay = room.tokens[1] ? IDLE_TIMEOUT : WAIT_TIMEOUT;
+  // The wait deadline is absolute from creation, so resuming cannot extend it.
+  const delay = room.tokens[1]
+    ? IDLE_TIMEOUT
+    : Math.max(0, room.createdAt + WAIT_TIMEOUT - Date.now());
   room.idleTimer = setTimeout(() => cleanupRoom(room.code), delay);
   room.idleTimer.unref?.();
 }

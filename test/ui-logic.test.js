@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { ActionType, PieceType, applyAction, createGame, getLegalPlacements } from '../js/game.js';
-import { statusText, describeLastMove, winReasonFromServer } from '../js/hints.js';
+import { statusText, describeLastMove, winReasonFromServer, resumedWinReason, turnChipText } from '../js/hints.js';
 import { encodeLocalSave, decodeLocalSave, MAX_UNDO } from '../js/local-save.js';
 
 const P = (player, type) => ({ player, type });
@@ -121,4 +121,22 @@ test('winReasonFromServer maps server end reasons onto client win reasons', () =
   assert.equal(winReasonFromServer(null), null);
   assert.equal(winReasonFromServer(undefined), null);
   assert.equal(winReasonFromServer('???'), null);
+});
+
+test('resumedWinReason keeps the server end reason only for a finished game', () => {
+  assert.equal(resumedWinReason({ winner: 2 }, 'RESIGN'), 'RESIGN');
+  assert.equal(resumedWinReason({ winner: 'DRAW' }, 'DRAW'), 'QUEEN');
+  assert.equal(resumedWinReason({ winner: null }, 'RESIGN'), null);
+  assert.equal(resumedWinReason({ winner: 1 }, undefined), null);
+});
+
+test('turnChipText shows the result once the game is over', () => {
+  const live = { winner: null, turn: 2 };
+  assert.equal(turnChipText({ state: live, mode: 'LOCAL' }), 'P2');
+  assert.equal(turnChipText({ state: live, mode: 'ONLINE', myPlayer: 2 }), 'YOU');
+  assert.equal(turnChipText({ state: live, mode: 'ONLINE', myPlayer: 1 }), 'OPP');
+  assert.equal(turnChipText({ state: { winner: 1, turn: 2 }, mode: 'LOCAL' }), 'P1 WINS');
+  assert.equal(turnChipText({ state: { winner: 1, turn: 2 }, mode: 'ONLINE', myPlayer: 1 }), 'YOU WIN');
+  assert.equal(turnChipText({ state: { winner: 1, turn: 2 }, mode: 'ONLINE', myPlayer: 2 }), 'YOU LOSE');
+  assert.equal(turnChipText({ state: { winner: 'DRAW', turn: 2 }, mode: 'LOCAL' }), 'DRAW');
 });

@@ -308,6 +308,9 @@ SERVER → CLIENT:
   GAME_START          { gameState, settings }
   GAME_STATE          { gameState }           — after every valid action
   INVALID_MOVE        { reason }
+  ERROR               { reason }              — e.g. INVALID_MESSAGE; SEAT_TAKEN (+ close code 4001) when a newer
+                                                connection resumed your seat: net.js does not reconnect, the app
+                                                shows GAME OPENED IN ANOTHER TAB and keeps the saved token
   GAME_OVER           { winner, reason }      — reason 'QUEEN'|'RESIGN'|'DRAW'
   OPPONENT_DISCONNECTED {}
   OPPONENT_RECONNECTED  {}
@@ -323,7 +326,8 @@ Room code and player token are stored in `localStorage`. If the socket drops, `R
 
 ### Room lifecycle
 - Rooms expire after 30 minutes of inactivity
-- A room with one player waits up to 10 minutes for the second to join
+- A room with one player waits up to 10 minutes (absolute from creation; resuming does not extend it) for the second to join
+- WebSocket frames are capped at 64 KB; non-JSON frames get ERROR INVALID_MESSAGE
 
 ---
 

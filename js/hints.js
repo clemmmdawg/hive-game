@@ -73,6 +73,22 @@ export function winReasonFromServer(reason) {
   return null;
 }
 
+/** winReason for a game restored from the server (ROOM_RESUMED): only meaningful once it has ended. */
+export function resumedWinReason(state, endReason) {
+  return state?.winner ? winReasonFromServer(endReason) : null;
+}
+
+/** Label for the HUD turn chip: whose turn it is, or the result once the game is over. */
+export function turnChipText({ state, mode = 'LOCAL', myPlayer = 1 }) {
+  const online = mode === 'ONLINE';
+  if (state.winner === 'DRAW') return 'DRAW';
+  if (state.winner) {
+    if (online) return state.winner === myPlayer ? 'YOU WIN' : 'YOU LOSE';
+    return `P${state.winner} WINS`;
+  }
+  return online ? (state.turn === myPlayer ? 'YOU' : 'OPP') : `P${state.turn}`;
+}
+
 /**
  * Work out what changed between two snapshots so the board can mark it.
  * Online play only receives snapshots, so the source hex is found by diffing.

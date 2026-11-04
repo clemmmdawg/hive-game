@@ -119,17 +119,51 @@ async function startGame(srv) {
   return { a, b, code: created.code, tokenA: created.token, tokenB: (await next(b, 'PLAYER_ASSIGNMENT')).token };
 }
 
-test('malformed messages never crash the server', async () => {
+test('malformed messages never crash the server and get an ERROR reply', async () => {
   const srv = await startServer();
   try {
     const ws = await srv.client();
-    for (const bad of ['null', '42', '"x"', '[]', '{"type":5}']) send(ws, bad);
+    for (const bad of ['null', '42', '"x"', '[]', '{"type":5}', 'not json {']) {
+      send(ws, bad);
+      assert.equal((await next(ws, 'ERROR')).reason, 'INVALID_MESSAGE', bad);
+    }
     send(ws, { type: 'CREATE_ROOM', settings: null });
     assert.equal((await next(ws, 'ROOM_CREATED')).player, 1);
     const ws2 = await srv.client();
     send(ws2, { type: 'CREATE_ROOM', settings: { expansions: null } });
     assert.ok((await next(ws2, 'ROOM_CREATED')).code);
     assert.equal(ws.readyState, 1);
+  } finally { await srv.stop(); }
+});
+
+test('oversized frames are rejected by closing the socket (maxPayload 64 KB)', async () => {
+  const srv = await startServer();
+  try {
+    const ws = await srv.client();
+    const code = new Promise(r => ws.once('close', c => r(c)));
+    send(ws, JSON.stringify({ type: 'CREATE_ROOM', pad: 'x'.repeat(70 * 1024) }));
+    assert.equal(await code, 1009);
+  } finally { await srv.stop(); }
+});
+
+test('two sockets resuming one token settle: the newer holds the seat, the older is told SEAT_TAKEN', async () => {
+  const srv = await startServer();
+  try {
+    const { a, b, code, tokenA } = await startGame(srv);
+    const a2 = await srv.client();
+    const closeCode = new Promise(r => a.once('close', c => r(c)));
+    send(a2, { type: 'RESUME_ROOM', code, token: tokenA });
+    await next(a2, 'ROOM_RESUMED');
+    assert.equal((await next(a, 'ERROR')).reason, 'SEAT_TAKEN');
+    assert.equal(await closeCode, 4001);
+    await next(b, 'OPPONENT_RECONNECTED');
+    // The evicted socket stays out: nothing re-seats it, the seat stays with a2.
+    await new Promise(r => setTimeout(r, 150));
+    
+    send(a2, { type: 'RESIGN' });
+    assert.equal((await next(b, 'GAME_OVER')).winner, 2);
+    assert.equal(b.inbox.some(m => m.type === 'OPPONENT_DISCONNECTED'), false);
+    assert.equal(a2.readyState, 1);
   } finally { await srv.stop(); }
 });
 
@@ -159,6 +193,21 @@ test('host waiting timer stays 10 minutes after the host joins', () => {
     mock.timers.tick(2000);
     assert.equal(getRoom(room.code), undefined, 'expired at 10 min, not 30');
     assert.ok(IDLE_TIMEOUT > WAIT_TIMEOUT);
+  } finally { mock.timers.reset(); }
+});
+
+test('resuming repeatedly does not extend the 10 minute wait for a second player', () => {
+  mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  try {
+    const room = createRoom({});
+    const host = joinRoom(room.code, socket());
+    mock.timers.tick(WAIT_TIMEOUT - 60_000);
+    resumeRoom(room.code, host.token, socket());   // each resume used to restart the wait
+    mock.timers.tick(30_000);
+    resumeRoom(room.code, host.token, socket());
+    assert.ok(getRoom(room.code), 'alive 30s before the deadline');
+    mock.timers.tick(31_000);
+    assert.equal(getRoom(room.code), undefined, 'expired 10 min after creation');
   } finally { mock.timers.reset(); }
 });
 

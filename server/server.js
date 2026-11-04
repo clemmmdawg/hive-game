@@ -53,6 +53,7 @@ const DEFAULT_SETTINGS = Object.freeze({
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const ROOT      = join(__dirname, '..');
 const HEARTBEAT_MS = 30_000;
+const MAX_PAYLOAD  = 64 * 1024; // no legitimate message is anywhere near this
 
 function readPort(args, envPort) {
   const flagIndex = args.findIndex(arg => arg === '--port' || arg === '-p');
@@ -109,7 +110,7 @@ function serveStatic(req, res) {
  */
 export function createHiveServer({ heartbeatMs = HEARTBEAT_MS } = {}) {
   const httpServer = createServer(serveStatic);
-  const wss = new WebSocketServer({ server: httpServer });
+  const wss = new WebSocketServer({ server: httpServer, maxPayload: MAX_PAYLOAD });
 
   wss.on('connection', (socket) => {
     socket.isAlive = true;
@@ -117,7 +118,7 @@ export function createHiveServer({ heartbeatMs = HEARTBEAT_MS } = {}) {
 
     socket.on('message', (raw) => {
       let msg;
-      try { msg = JSON.parse(raw.toString()); } catch { return; }
+      try { msg = JSON.parse(raw.toString()); } catch { try { socket.send(err('INVALID_MESSAGE')); } catch {} return; }
       try {
         handleMessage(socket, msg);
       } catch (e) {
