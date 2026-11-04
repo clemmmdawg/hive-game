@@ -900,18 +900,33 @@ function queenSurrounded(board, q, r) {
 }
 
 /**
+ * Every queen on `board` with the occupancy of its six sides: `sides` are the
+ * neighbour keys in neighbors() order and `lit[i]` says whether `sides[i]`
+ * counts as occupied. `isOccupied(key)` decides that (default: any piece there;
+ * the board renderer leaves out pieces still in flight). The single source of
+ * neighbour counts for queenPressure and the board's danger pips / HUD meters.
+ * @returns {{key:string, player:1|2, sides:string[], lit:boolean[]}[]}
+ */
+export function queenSides(board, isOccupied = key => board.has(key)) {
+  const out = [];
+  for (const [key, stack] of board) {
+    const queen = stack.find(p => p.type === PieceType.QUEEN);
+    if (!queen) continue;
+    const { q, r } = parseKey(key);
+    const sides = neighbors(q, r).map(n => hexKey(n.q, n.r));
+    out.push({ key, player: queen.player, sides, lit: sides.map(k => !!isOccupied(k)) });
+  }
+  return out;
+}
+
+/**
  * How hemmed in each queen is: the number of occupied hexes around it (0–6;
  * six means surrounded), or null while that queen is still in the supply.
  * @returns {{1: number|null, 2: number|null}}
  */
 export function queenPressure(state) {
   const pressure = { 1: null, 2: null };
-  for (const [key, stack] of state.board) {
-    const queen = stack.find(p => p.type === PieceType.QUEEN);
-    if (!queen) continue;
-    const { q, r } = parseKey(key);
-    pressure[queen.player] = neighbors(q, r).filter(n => occupied(state.board, n.q, n.r)).length;
-  }
+  for (const { player, lit } of queenSides(state.board)) pressure[player] = lit.filter(Boolean).length;
   return pressure;
 }
 

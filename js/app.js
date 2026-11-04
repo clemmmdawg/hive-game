@@ -1,11 +1,11 @@
 // app.js — Game state machine + UI
-import { hexKey, hexToPixel, hexNeighbors } from './hex.js';
+import { hexKey, hexToPixel } from './hex.js';
 import { Board, moveDuration, winTiming, queenPips } from './board.js';
 import {
   PieceType, ActionType,
   createGame, applyAction,
   getLegalPlacements, getLegalMoves, getLegalThrows, getMoveBlocker,
-  getAllLegalActions, deserializeState, getMovePath, queenPressure,
+  getAllLegalActions, deserializeState, getMovePath, queenPressure, neighbors,
 } from './game.js';
 import { initMenu, showMenu, showConfirm, showRules, leaveOnlineSession, isOverlayOpen } from './menu.js';
 import {
@@ -1185,7 +1185,7 @@ function syncUI() {
 
 // A tiny queen hex ringed by six pips, laid out like the board's neighbours
 // (same order as queenPips), so the HUD reads exactly like the pips on the tile.
-const METER_PIPS = hexNeighbors(0, 0).map(({ q, r }) => {
+const METER_PIPS = neighbors(0, 0).map(({ q, r }) => {
   const p = hexToPixel(q, r, 1);
   const len = Math.hypot(p.x, p.y);
   return { x: (p.x / len) * 8.6, y: (p.y / len) * 8.6 };

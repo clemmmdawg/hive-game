@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { Board, REVEAL_MIN_TILE_PX, stackLayers, hiveLayerKey, hiveBounds, layerCovers, badgeLayout, tweenPoint, moveDuration, LAND_MS, queenPips, winTiming, WIN_REVEAL_MAX_MS } from '../js/board.js';
+import { Board, REVEAL_MIN_TILE_PX, pipPulse, PIP_DIST, stackLayers, hiveLayerKey, hiveBounds, layerCovers, badgeLayout, tweenPoint, moveDuration, LAND_MS, queenPips, winTiming, WIN_REVEAL_MAX_MS } from '../js/board.js';
 import { hexToPixel } from '../js/hex.js';
+import { queenPressure } from '../js/game.js';
 
 // Just enough of a <canvas> for Board's constructor and input wiring.
 function fakeCanvas() {
@@ -627,4 +628,30 @@ test('flightMs reports the running flight\'s tween duration, 0 when idle', async
   board.finishAnimations();
   await p;
   assert.equal(board.flightMs(), 0);
+});
+
+test('queenPips agrees with queenPressure (one source of truth for neighbour counts)', () => {
+  const pieces = new Map([
+    ['0,0', [pc(1, 'QUEEN')]], ['1,0', [pc(2, 'QUEEN')]], ['0,1', [pc(2, 'ANT')]],
+    ['-1,0', [pc(1, 'ANT')]], ['0,-1', [pc(2, 'SPIDER'), pc(1, 'BEETLE')]], ['2,0', [pc(1, 'SPIDER')]],
+  ]);
+  const pressure = queenPressure({ board: pieces });
+  for (const m of queenPips(pieces)) assert.equal(m.count, pressure[m.player], `P${m.player}`);
+});
+
+test('pipPulse: amber and red pulse, calm and surrounded are steady, reduced motion is steady', () => {
+  const vals = (count, rm) => [0, 100, 200, 300].map(t => pipPulse(count, t, rm));
+  assert.ok(new Set(vals(4, false)).size > 1, 'four pulses');
+  assert.ok(new Set(vals(5, false)).size > 1, 'five pulses');
+  for (const c of [0, 3, 6]) assert.deepEqual(vals(c, false), [1, 1, 1, 1]);
+  for (const c of [4, 5]) assert.deepEqual(vals(c, true), [1, 1, 1, 1], `${c} under reduced motion`);
+});
+
+test('badgeLayout: buried-piece chips are ~15 px wide at default phone zoom', () => {
+  const b = badgeLayout(36);
+  assert.ok(2 * b.chipR >= 14.5, `chip ${2 * b.chipR} px`);
+});
+
+test('queen pips sit far enough in that adjacent queens\' pips never touch', () => {
+  assert.ok(PIP_DIST <= 0.74);
 });

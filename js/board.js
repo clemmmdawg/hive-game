@@ -3,6 +3,7 @@
 
 import { hexToPixel, pixelToHex, hexNeighbors, hexKey, parseKey } from './hex.js';
 import { drawSprite, bodyFill, SPECIES_COLOR } from './sprites.js';
+import { queenSides } from './game.js';
 
 const BG         = '#05050f';
 const P1         = '#ff2d78';
@@ -113,7 +114,7 @@ export function badgeLayout(r) {
     return { mode: 'compact', chipR: r * 0.27, chipDist: r * 0.62, angle: -Math.PI * 0.31, font: r * 0.34 };
   }
   return {
-    mode: 'full', chipR: r * 0.17, chipDist: r * 0.74, angle: Math.PI * 0.1, step: Math.PI * 0.13,
+    mode: 'full', chipR: r * 0.21, chipDist: r * 0.73, angle: Math.PI * 0.1, step: Math.PI * 0.17,
     font: Math.max(6, Math.round(r * 0.2)), pillX: r * 0.45, pillY: -r * 0.62,
   };
 }
@@ -146,7 +147,7 @@ const LIFT        = {                              // arc height (× SIZE) and h
   hop:   { h: 0.55, grow: 0.16, perStep: 0.12, max: 1.2 },
   climb: { h: 0.5,  grow: 0.10 },
   throw: { h: 1.3,  grow: 0.22 },
-  place: { h: 1.8,  grow: 0.30 },
+  place: { h: 0.35, grow: 0.25 },                 // a short drop toward the viewer: mostly scale, little rise
 };
 const SQUASH      = { slide: 0.05, hop: 0.13, climb: 0.11, throw: 0.14, place: 0.17 };
 const SPARKS      = { slide: 10, place: 12, hop: 14, climb: 14, throw: 16 };
@@ -196,7 +197,7 @@ export function winTiming(kind, steps, { reducedMotion = false } = {}) {
 }
 
 // ── Queen danger pips ──
-const PIP_DIST = 0.83;   // pip centre, × top-face radius, toward each neighbour (on the rim, clear of the glyph)
+export const PIP_DIST = 0.72;   // pip centre, × top-face radius, toward each neighbour (inside the rim: adjacent queens' pips stay apart)
 const PIP_R    = 0.115;  // pip radius, × top-face radius
 const PIP_MIN_PX = 2.4;  // never smaller than this on screen
 const PIP_LEVEL = {      // occupied sides → lit colour (RGB) and pulse speed (rad/ms; 0 = steady)
@@ -207,34 +208,36 @@ const PIP_LEVEL = {      // occupied sides → lit colour (RGB) and pulse speed 
 };
 
 /**
- * Danger-meter geometry for every queen on the board: which of its six sides are
- * occupied (`lit`, aligned with `dirs`, unit vectors toward each neighbour in
- * board space), how many, and the visible stack height it sits under. Hexes in
+ * Danger-meter geometry for every queen on the board (counts from game.js
+ * queenSides): which of its six sides are occupied (`lit`, in neighbors() order,
+ * aligned with `dirs`, unit vectors toward each neighbour in board space), how many, and the visible stack height it sits under. Hexes in
  * `hidden` have their top piece in flight: an empty hex it is flying to does
  * not count yet, and a flying queen gets no meter until it lands.
  * @returns {{key:string, player:1|2, count:number, lit:boolean[], dirs:{x:number,y:number}[], height:number}[]}
  */
 export function queenPips(pieces, hidden = new Set()) {
+  const height = key => (pieces.get(key)?.length ?? 0) - (hidden.has(key) ? 1 : 0);
   const out = [];
-  for (const [key, stack] of pieces) {
-    const queen = stack.find(p => p.type === 'QUEEN');
-    if (!queen) continue;
-    const height = stack.length - (hidden.has(key) ? 1 : 0);
-    if (stack.indexOf(queen) >= height) continue; // the queen herself is in the air
+  for (const { key, player, sides, lit } of queenSides(pieces, k => height(k) > 0)) {
+    const stack = pieces.get(key);
+    if (stack.findIndex(p => p.type === 'QUEEN') >= height(key)) continue; // the queen herself is in the air
     const { q, r } = parseKey(key);
     const c = hexToPixel(q, r, 1);
-    const lit = [], dirs = [];
-    for (const n of hexNeighbors(q, r)) {
+    const dirs = sides.map(k => {
+      const n = parseKey(k);
       const p = hexToPixel(n.q, n.r, 1);
       const len = Math.hypot(p.x - c.x, p.y - c.y);
-      dirs.push({ x: (p.x - c.x) / len, y: (p.y - c.y) / len });
-      const nk = hexKey(n.q, n.r);
-      const st = pieces.get(nk);
-      lit.push(!!st && st.length - (hidden.has(nk) ? 1 : 0) > 0);
-    }
-    out.push({ key, player: queen.player, count: lit.filter(Boolean).length, lit, dirs, height });
+      return { x: (p.x - c.x) / len, y: (p.y - c.y) / len };
+    });
+    out.push({ key, player, count: lit.filter(Boolean).length, lit, dirs, height: height(key) });
   }
   return out;
+}
+
+/** Pulse 0..1 of a queen's danger pips at time t: amber/red levels pulse, others (and reduced motion) hold steady at 1. */
+export function pipPulse(count, t, reducedMotion = false) {
+  const level = PIP_LEVEL[count] ?? PIP_LEVEL.calm;
+  return level.pulse && !reducedMotion ? 0.5 + 0.5 * Math.sin(t * level.pulse) : 1;
 }
 
 /** Height profile 0..1 of a move at progress u: arcs for hops/throws, a hover for slides, a fall for drops. */
@@ -805,7 +808,7 @@ export class Board {
       const top = stackLayers(m.height, tileR).at(-1);
       const fx = c.x, fy = c.y + top.dy, fr = tileR * top.scale;
       const level = PIP_LEVEL[m.count] ?? PIP_LEVEL.calm;
-      const pulse = level.pulse ? 0.5 + 0.5 * Math.sin(t * level.pulse) : 1;
+      const pulse = pipPulse(m.count, t, this.reducedMotion);
       if (m.count === 5) {
         this._tintFace(ctx, faces.get(m.key), '255,48,72', 0.25 + 0.75 * pulse);
         this._blitRingAt(ctx, 'danger', fx, fy, 0.35 + 0.65 * pulse, 1 + 0.05 * pulse);

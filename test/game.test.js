@@ -10,6 +10,7 @@ import {
   getAllLegalActions,
   getLegalPlacements,
   queenPressure,
+  queenSides,
   serializeState,
 } from '../js/game.js';
 
@@ -89,4 +90,15 @@ test('queenPressure finds a queen buried under a beetle and counts all six sides
     '-1,0': [[2, 'ANT']], '-1,1': [[1, 'SPIDER']], '0,1': [[2, 'SPIDER']],
   });
   assert.deepEqual(queenPressure(state), { 1: null, 2: 6 });
+});
+
+test('queenSides: each queen with its six sides in neighbors() order; isOccupied decides what counts', () => {
+  const board = boardOf({ '0,0': [[1, 'QUEEN']], '1,0': [[2, 'ANT']], '0,-1': [[2, 'ANT']] });
+  const [q] = queenSides(board);
+  assert.equal(q.key, '0,0');
+  assert.equal(q.player, 1);
+  assert.deepEqual(q.sides, ['1,0', '1,-1', '0,-1', '-1,0', '-1,1', '0,1']);
+  assert.deepEqual(q.lit, [true, false, true, false, false, false]);
+  const [h] = queenSides(board, key => key === '1,0');
+  assert.deepEqual(h.lit, [true, false, false, false, false, false]);
 });
