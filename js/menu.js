@@ -17,6 +17,7 @@ const DEFAULT_SETTINGS = {
 
 const SETTINGS_KEY = 'hiveSettings';
 const SESSION_KEY  = 'hiveSession';
+const WATCH_KEY    = 'hiveWatch'; // sessionStorage: the room a spectator is watching (survives a reload of the tab)
 const CODE_CHARS   = /[^BCDFGHJKLMNPQRSTVWXYZ2-9]/g;
 
 let _settings      = deepClone(DEFAULT_SETTINGS);
@@ -34,6 +35,14 @@ let _inertedForRules = [];
 
 function deepClone(obj) { return JSON.parse(JSON.stringify(obj)); }
 const $ = id => document.getElementById(id);
+
+/** The room being watched, kept for this tab only: a reload re-joins it as a spectator. */
+function watchSet(code) {
+  try { if (code) sessionStorage.setItem(WATCH_KEY, code); else sessionStorage.removeItem(WATCH_KEY); } catch { /* blocked storage */ }
+}
+function watchGet() {
+  try { return String(sessionStorage.getItem(WATCH_KEY) ?? '').toUpperCase().replace(CODE_CHARS, '').slice(0, 4); } catch { return ''; }
+}
 
 function storageGet(key) {
   try { return localStorage.getItem(key); } catch { return null; }
@@ -94,6 +103,7 @@ export function leaveOnlineSession({ keepSaved = false } = {}) {
   _myPlayer = null;
   _playerToken = null;
   _spectating = false;
+  watchSet(null); // leaving, a closed room or a fatal error: do not re-join on the next load
   _onlinePending = false;
   if (!keepSaved) storageSet(SESSION_KEY, null);
 }
@@ -238,6 +248,7 @@ function _handleRulesKeydown(event) {
 
 function _handleStart() {
   _clearError();
+  watchSet(null); // starting anything else ends a remembered watch
   const mode = _settings.mode;
   if (mode === 'LOCAL') {
     hideMenu();
@@ -325,13 +336,14 @@ function _attachOnlineGameHandlers() {
   });
 
   // The room was full (or its game under way): this connection watches. No token, nothing saved.
-  net.on('SPECTATING', ({ gameState, settings, endReason, history, clock, serverNow }) => {
+  net.on('SPECTATING', ({ gameState, settings, endReason, history, clock, serverNow, away }) => {
     _spectating = true;
     _myPlayer = null;
+    watchSet(_roomCode);
     _onlinePending = false;
     _callbacks.onNetReady();
     hideMenu();
-    _callbacks.onOnlineStart(settings, null, gameState, endReason ?? null, history ?? [], { clock, serverNow });
+    _callbacks.onOnlineStart(settings, null, gameState, endReason ?? null, history ?? [], { clock, serverNow, away });
   });
 
   net.on('_disconnected', () => {
@@ -516,10 +528,23 @@ function _saveSession() {
   storageSet(SESSION_KEY, JSON.stringify({ code: _roomCode, token: _playerToken, player: _myPlayer }));
 }
 
+/** A reloaded spectator tab: re-join the room it was watching (no seat, no token). */
+function _tryRejoinWatch() {
+  const code = watchGet();
+  if (code.length !== 4 || _joinCode) return; // an invite link in the URL wins
+  if (_offline()) return;
+  _roomCode = code;
+  _spectating = true;
+  _beginOnline('REJOINING…');
+  _attachOnlineGameHandlers();
+  net.on('_connected', () => net.send('JOIN_ROOM', { code: _roomCode, spectate: true }));
+  net.connect();
+}
+
 function _tryResumeSavedSession() {
   let saved;
-  try { saved = JSON.parse(storageGet(SESSION_KEY)); } catch { return; }
-  if (!saved?.code || !saved?.token) return;
+  try { saved = JSON.parse(storageGet(SESSION_KEY)); } catch { saved = null; }
+  if (!saved?.code || !saved?.token) { _tryRejoinWatch(); return; }
   if (_offline()) return; // keep the saved seat for when the network is back
 
   _roomCode = String(saved.code).toUpperCase().replace(CODE_CHARS, '').slice(0, 4);

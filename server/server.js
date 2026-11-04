@@ -206,7 +206,8 @@ export function handleMessage(socket, msg, options = {}) {
         if (!room.gameState) { socket.send(err('NO_ACTIVE_GAME')); return; }
         const watch = joinSpectator(code, socket);
         if (watch.error) { socket.send(err(watch.error)); return; }
-        socket.send(JSON.stringify({ type: 'SPECTATING', code, ...roomSnapshot(room) }));
+        const away = [1, 2].filter(p => !room.sockets[p - 1]); // seats whose player is currently disconnected
+        socket.send(JSON.stringify({ type: 'SPECTATING', code, ...roomSnapshot(room), away }));
         broadcast(room, { type: 'SPECTATORS', count: room.spectators.size });
         return;
       }
@@ -267,7 +268,7 @@ export function handleMessage(socket, msg, options = {}) {
       const back = { type: 'OPPONENT_RECONNECTED', player: result.playerNum };
       sendTo(result.room, opponent, back);
       broadcastSpectators(result.room, back);
-      if (result.room.spectators.size) socket.send(JSON.stringify({ type: 'SPECTATORS', count: result.room.spectators.size }));
+      socket.send(JSON.stringify({ type: 'SPECTATORS', count: result.room.spectators.size })); // always, 0 included: clears a stale 👁
       break;
     }
 

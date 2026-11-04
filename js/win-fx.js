@@ -243,7 +243,7 @@ export function createWinFx(ctx) {
     if (!calm) {
       // A spectator has no side: the neutral sting, never the loser's.
       sfx.play(winner === 'DRAW' || watching ? 'draw' : lost ? 'lose' : 'win');
-      if (!lost) launchConfetti();
+      if (!lost && !watching) launchConfetti(); // a spectator gets the neutral sting, no party
     }
     ctx.sync();
   }

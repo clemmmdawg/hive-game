@@ -330,6 +330,7 @@ const watching = () => isSpectator(gameMode, myPlayer);
 
 
 function showGame() {
+  document.body.classList.toggle('spectating', watching()); // the tray's height depends on it: set before measuring insets
   for (const id of ['hud', 'tray', 'btn-recenter']) $(id).classList.add('game-visible');
   updateInsets();
   board.recenter(false);
@@ -445,6 +446,9 @@ export function startOnlineGame(settings, playerNum, serializedState, endReason 
     winFx.scheduleCard(300, { calm: true });
   } else if (watching()) {
     showBanner(`WATCHING · PLAYER ${gameState.turn} TO MOVE`, `p${gameState.turn}`, PieceType.QUEEN, 1800);
+    for (const p of clockInfo.away ?? []) awayPlayers.add(p); // a player already disconnected when we joined
+    const [gone] = awayPlayers;
+    if (gone) toast(`PLAYER ${gone} DISCONNECTED`, 'warn', 0);
   } else {
     showBanner(`YOU ARE PLAYER ${myPlayer}`, `p${myPlayer}`, PieceType.QUEEN, 1800);
   }
@@ -1278,7 +1282,9 @@ function syncUI() {
   const chipPlayer = over && gameState.winner !== 'DRAW' ? gameState.winner : turn;
   chip.className = `p${chipPlayer}${myTurn || over ? '' : ' waiting'}`;
   $('chip-label').textContent = turnChipText({ state: gameState, mode: gameMode, myPlayer });
-  $('chip-sub').textContent   = over ? 'FINAL' : spectating ? 'WATCHING' : `ROUND ${Math.ceil(gameState.turnNumber / 2)}`;
+  // A spectator's chip says WATCHING (the side to move is the chip colour and the status line).
+  if (spectating && !over) $('chip-label').textContent = 'WATCHING';
+  $('chip-sub').textContent   = over ? 'FINAL' : `ROUND ${Math.ceil(gameState.turnNumber / 2)}`;
   $('turn-chip').classList.toggle('watching', spectating);
   renderSpectators();
 
@@ -1337,9 +1343,14 @@ function syncUI() {
   $('menu-quit-label').textContent = over ? 'MAIN MENU' : spectating ? 'LEAVE ROOM' : online ? 'RESIGN GAME' : 'QUIT TO MENU';
 
   renderTray(actions);
+  if (spectating) { // two reserve rows: if the tray's height changed, re-measure and keep the hive in frame
+    const h = $('tray').offsetHeight;
+    if (h !== lastTrayH) { lastTrayH = h; updateInsets(); board.reveal(board.pieces.keys(), []); }
+  }
   reviewer.sync();
   syncClockRun();
 }
+let lastTrayH = 0;
 
 /** 👁 N — how many are watching, shown to everyone in the room (hidden while nobody is). */
 function renderSpectators() {
@@ -1665,12 +1676,17 @@ export function initNetHandlers() {
 
   net.on('ROOM_RESUMED', msg => {
     myPlayer = msg.player;
+    spectatorCount = 0; // the server sends the current count right after
     resumeFromSnapshot(msg);
   });
 
   net.on('SPECTATING', msg => {
     myPlayer = null;
     resumeFromSnapshot(msg);
+    // Players already away when we joined: say so (resumeFromSnapshot cleared the set).
+    for (const p of msg.away ?? []) awayPlayers.add(p);
+    const [gone] = awayPlayers;
+    if (gone && !gameState?.winner) toast(`PLAYER ${gone} DISCONNECTED`, 'warn', 0);
   });
 
   net.on('SPECTATORS', ({ count }) => {

@@ -990,7 +990,8 @@ kbd {
 
 /* Spectating: the chip says WATCHING at every width (the usual ROUND line hides on phones), no
    pieces to pick, and both reserves instead of the tray. */
-#turn-chip.watching #chip-sub { display: block; color: var(--gold); text-shadow: 0 0 6px rgba(255,215,0,.45); }
+#turn-chip.watching #chip-label { color: var(--gold); text-shadow: 0 0 6px rgba(255,215,0,.45); }
+#turn-chip.watching #chip-sub { display: block; }
 body.spectating #tray-pieces { display: none; }
 body.spectating #tray { min-height: 0; gap: 4px; padding-top: 8px; }
 body.spectating #reserve-row-b { display: flex; }

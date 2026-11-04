@@ -252,3 +252,21 @@ test('spectator copy is neutral: PLAYER N, never YOU / OPPONENT', () => {
   const entry = { player: 2, turnNumber: 2, notation: 'bQ', action: { type: 'PLACE', pieceType: 'QUEEN', to: '0,0' } };
   assert.match(reviewStatusText(entry, { mode: 'ONLINE', myPlayer: null, pieceNames: { QUEEN: 'QUEEN' } }), /^P2 PLACED/);
 });
+
+test('a resuming player always gets the spectator count, 0 included (no stale 👁)', () => {
+  const { a, code, room } = startRoom();
+  const tokenA = room.tokens[0];
+  const w = watch(code);
+  a.readyState = 3; handleClose(a);
+  handleClose(w); // the count drops while player 1 is away
+  const a2 = fakeSocket();
+  handleMessage(a2, { type: 'RESUME_ROOM', code, token: tokenA });
+  assert.equal(last(a2, 'SPECTATORS').count, 0);
+});
+
+test('SPECTATING lists the seats whose players are currently disconnected', () => {
+  const { a, code } = startRoom();
+  assert.deepEqual(last(watch(code), 'SPECTATING').away, []);
+  a.readyState = 3; handleClose(a);
+  assert.deepEqual(last(watch(code), 'SPECTATING').away, [1]);
+});
