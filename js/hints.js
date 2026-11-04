@@ -25,12 +25,20 @@ function placedCount(board, player) {
  * @param {string|null} [ctx.blocker]  getMoveBlocker() result for the selected piece
  * @param {number} [ctx.throwCount] throwable neighbours of the selected piece
  * @param {string} [ctx.pieceName]  display name of the selected tray piece
+ * @param {string|null} [ctx.winReason] 'QUEEN' | 'STALEMATE' | 'RESIGN' | null — why the game ended
  */
-export function statusText({ state, phase = 'IDLE', mode = 'LOCAL', myPlayer = 1, blocker = null, throwCount = 0, pieceName = 'PIECE' }) {
+export function statusText({ state, phase = 'IDLE', mode = 'LOCAL', myPlayer = 1, blocker = null, throwCount = 0, pieceName = 'PIECE', winReason = null }) {
   const online = mode === 'ONLINE';
 
-  if (state.winner === 'DRAW') return 'DRAW — BOTH QUEENS SURROUNDED';
+  if (state.winner === 'DRAW') {
+    return winReason === 'STALEMATE' ? 'DRAW — NO MOVES LEFT' : 'DRAW — BOTH QUEENS SURROUNDED';
+  }
   if (state.winner) {
+    if (winReason === 'RESIGN') {
+      const loser = state.winner === 1 ? 2 : 1;
+      if (online) return loser === myPlayer ? 'YOU RESIGNED' : 'OPPONENT RESIGNED — YOU WIN';
+      return `PLAYER ${loser} RESIGNED — PLAYER ${state.winner} WINS`;
+    }
     if (online) return state.winner === myPlayer ? 'YOU WIN' : 'YOU LOSE';
     return `PLAYER ${state.winner} WINS`;
   }
@@ -52,6 +60,17 @@ export function statusText({ state, phase = 'IDLE', mode = 'LOCAL', myPlayer = 1
     return placed === 3 ? 'PLACE YOUR QUEEN NOW — 4TH PIECE' : 'PLACE A PIECE · QUEEN BY YOUR 4TH';
   }
   return 'PLACE OR MOVE A PIECE';
+}
+
+/**
+ * Map a server end reason (GAME_OVER.reason / ROOM_RESUMED.endReason) onto the
+ * client's winReason. A server 'DRAW' means both queens fell together.
+ * @returns {'QUEEN'|'RESIGN'|null}
+ */
+export function winReasonFromServer(reason) {
+  if (reason === 'RESIGN') return 'RESIGN';
+  if (reason === 'QUEEN' || reason === 'DRAW') return 'QUEEN';
+  return null;
 }
 
 /**

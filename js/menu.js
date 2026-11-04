@@ -505,7 +505,7 @@ function _friendlyError(reason) {
     ROOM_NOT_FOUND:       'Room not found. Check the code and try again.',
     ROOM_FULL:            'That room already has two players.',
     INVALID_RESUME_TOKEN: 'Your saved seat is no longer valid.',
-    SEAT_OCCUPIED:        'This seat is already connected in another tab.',
+    ALREADY_IN_ROOM:      'You are already in a room — leave it first.',
     NO_ACTIVE_GAME:       'That game is no longer active.',
   };
   return messages[reason] ?? 'Unable to connect. Please try again.';

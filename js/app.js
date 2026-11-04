@@ -8,7 +8,7 @@ import {
   getAllLegalActions, deserializeState,
 } from './game.js';
 import { initMenu, showMenu, showConfirm, showRules, leaveOnlineSession, isOverlayOpen } from './menu.js';
-import { statusText, describeLastMove } from './hints.js';
+import { statusText, describeLastMove, winReasonFromServer } from './hints.js';
 import { encodeLocalSave, decodeLocalSave, MAX_UNDO } from './local-save.js';
 import { spriteSVG, drawSprite } from './sprites.js';
 import * as net from './net.js';
@@ -117,7 +117,7 @@ let gameMode     = 'LOCAL'; // 'LOCAL' | 'ONLINE'
 let myPlayer     = 1;       // 1 or 2 — only meaningful in ONLINE mode
 let history      = [];      // LOCAL only: states before each action, for undo
 let winPresented = false;
-let winReason    = null;    // null | 'RESIGN' | 'STALEMATE'
+let winReason    = null;    // null | 'QUEEN' | 'RESIGN' | 'STALEMATE'
 let passTimer    = null;    // pending automatic pass in LOCAL mode
 let winTimer     = null;
 let connectionNotice = null; // shown in place of the status line while offline
@@ -925,7 +925,7 @@ function syncUI() {
   } else {
     status.textContent = statusText({
       state: gameState, phase: uiState.phase, mode: gameMode, myPlayer,
-      blocker, throwCount, pieceName: PIECE_NAMES[type] ?? 'PIECE',
+      blocker, throwCount, pieceName: PIECE_NAMES[type] ?? 'PIECE', winReason,
     });
     const warn = (blocker && !throwCount) || (myTurn && actions.mustPass)
       || (myTurn && !over && uiState.phase === 'IDLE' && /QUEEN NOW/.test(status.textContent));
@@ -1094,7 +1094,6 @@ const FATAL_ERRORS = {
   ROOM_NOT_FOUND:       'That room no longer exists.',
   INVALID_RESUME_TOKEN: 'Your seat in that game is no longer valid.',
   NO_ACTIVE_GAME:       'That game is no longer active.',
-  SEAT_OCCUPIED:        'This game is already open in another tab.',
 };
 
 /**
@@ -1115,7 +1114,7 @@ export function initNetHandlers() {
     onStateChanged(prev);
   });
 
-  net.on('ROOM_RESUMED', ({ player, gameState: snap }) => {
+  net.on('ROOM_RESUMED', ({ player, gameState: snap, endReason }) => {
     myPlayer = player;
     connectionNotice = null;
     if (snap) {
@@ -1125,6 +1124,7 @@ export function initNetHandlers() {
       const lastMove = describeLastMove(prev, gameState);
       if (lastMove) board.lastMove = lastMove;
       syncBoardRenderer();
+      if (gameState.winner) winReason = winReasonFromServer(endReason);
       if (gameState.winner) winTimer = setTimeout(showWinScreen, 300);
     }
     syncUI();
@@ -1135,7 +1135,7 @@ export function initNetHandlers() {
   net.on('GAME_OVER', ({ winner, reason }) => {
     if (!gameState) return;
     gameState = { ...gameState, winner };
-    if (reason) winReason = reason;
+    winReason = winReasonFromServer(reason);
     clearSelection(false);
     syncUI();
     if (!winTimer && !winPresented) winTimer = setTimeout(showWinScreen, reason ? 200 : 700);
@@ -1164,6 +1164,7 @@ export function initNetHandlers() {
 
   net.on('ERROR', ({ reason }) => {
     if (FATAL_ERRORS[reason]) exitToMenu({ notice: FATAL_ERRORS[reason] });
+    else if (reason === 'ALREADY_IN_ROOM') toast('ALREADY IN A ROOM', 'warn');
     else toast(`SERVER ERROR: ${reason}`, 'error');
   });
 }

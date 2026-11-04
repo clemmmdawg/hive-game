@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { ActionType, PieceType, applyAction, createGame, getLegalPlacements } from '../js/game.js';
-import { statusText, describeLastMove } from '../js/hints.js';
+import { statusText, describeLastMove, winReasonFromServer } from '../js/hints.js';
 import { encodeLocalSave, decodeLocalSave, MAX_UNDO } from '../js/local-save.js';
 
 const P = (player, type) => ({ player, type });
@@ -100,4 +100,25 @@ test('last move is null after a pass and falls back to lastMovedHex on resume', 
   assert.equal(describeLastMove(prev, passed), null);
   assert.deepEqual(describeLastMove(null, prev), { from: null, to: '0,0', player: 1 });
   assert.equal(describeLastMove(null, createGame({})), null);
+});
+
+// ── end-of-game copy ─────────────────────────────────────────────────────────
+
+test('statusText explains a stalemate draw, a queen draw and a resignation', () => {
+  const state = createGame({});
+  assert.match(statusText({ state: { ...state, winner: 'DRAW' }, winReason: 'STALEMATE' }), /NO MOVES/);
+  assert.match(statusText({ state: { ...state, winner: 'DRAW' }, winReason: 'QUEEN' }), /BOTH QUEENS SURROUNDED/);
+  assert.match(statusText({ state: { ...state, winner: 'DRAW' } }), /BOTH QUEENS SURROUNDED/);
+  assert.match(statusText({ state: { ...state, winner: 1 }, winReason: 'RESIGN' }), /RESIGNED/);
+  assert.match(statusText({ state: { ...state, winner: 2 }, winReason: 'RESIGN', mode: 'ONLINE', myPlayer: 2 }), /RESIGNED/);
+  assert.match(statusText({ state: { ...state, winner: 1 }, winReason: 'RESIGN', mode: 'ONLINE', myPlayer: 2 }), /YOU RESIGNED/);
+});
+
+test('winReasonFromServer maps server end reasons onto client win reasons', () => {
+  assert.equal(winReasonFromServer('QUEEN'), 'QUEEN');
+  assert.equal(winReasonFromServer('RESIGN'), 'RESIGN');
+  assert.equal(winReasonFromServer('DRAW'), 'QUEEN');
+  assert.equal(winReasonFromServer(null), null);
+  assert.equal(winReasonFromServer(undefined), null);
+  assert.equal(winReasonFromServer('???'), null);
 });
