@@ -303,12 +303,12 @@ CLIENT → SERVER:
 
 SERVER → CLIENT:
   ROOM_CREATED        { code, player, token }
-  ROOM_RESUMED        { code, player, token, gameState, settings }
+  ROOM_RESUMED        { code, player, token, gameState, settings, endReason? }  — endReason 'QUEEN'|'RESIGN'|'DRAW' if finished
   PLAYER_ASSIGNMENT   { player, token }
   GAME_START          { gameState, settings }
   GAME_STATE          { gameState }           — after every valid action
   INVALID_MOVE        { reason }
-  GAME_OVER           { winner }
+  GAME_OVER           { winner, reason }      — reason 'QUEEN'|'RESIGN'|'DRAW'
   OPPONENT_DISCONNECTED {}
   OPPONENT_RECONNECTED  {}
   WAITING_FOR_OPPONENT {}
@@ -318,6 +318,7 @@ SERVER → CLIENT:
 `app.js` uses a mode flag (`'LOCAL'` vs `'ONLINE'`). All actions go through `act()`: online they are sent via `net.js` and the server broadcasts canonical state; locally they are applied and pushed onto the undo history. A player with no legal action gets an explicit PASS control online. `net.on()` keeps one handler per message type — menu.js registers the pre-game handlers and app.js (`initNetHandlers`) replaces them at game start. Fatal in-game `ERROR`s (room gone, seat invalid) return to the menu with a notice. `net.js` ignores events from superseded sockets and cancels pending reconnect timers on `disconnect()`.
 
 ### Reconnection
+The server pings every 30 s and terminates silent sockets; `RESUME_ROOM` with a valid token replaces a still-open old socket (no `SEAT_OCCUPIED`). A seated socket sending CREATE/JOIN gets `ERROR ALREADY_IN_ROOM`. `server.js` exports `createHiveServer()` and only listens when run directly.
 Room code and player token are stored in `localStorage`. If the socket drops, `RESUME_ROOM` reclaims the reserved seat and returns the authoritative state. Persistence across a server restart is not supported.
 
 ### Room lifecycle
