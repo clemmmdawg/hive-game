@@ -25,7 +25,7 @@ function placedCount(board, player) {
  * @param {string|null} [ctx.blocker]  getMoveBlocker() result for the selected piece
  * @param {number} [ctx.throwCount] throwable neighbours of the selected piece
  * @param {string} [ctx.pieceName]  display name of the selected tray piece
- * @param {string|null} [ctx.winReason] 'QUEEN' | 'STALEMATE' | 'REPETITION' | 'RESIGN' | null — why the game ended
+ * @param {string|null} [ctx.winReason] 'QUEEN' | 'STALEMATE' | 'REPETITION' | 'RESIGN' | 'TIMEOUT' | null — why the game ended
  */
 /** Times the current position has occurred (0 when unknown). */
 export function repetitionCount(state) {
@@ -41,6 +41,11 @@ export function statusText({ state, phase = 'IDLE', mode = 'LOCAL', myPlayer = 1
     return 'DRAW — BOTH QUEENS SURROUNDED';
   }
   if (state.winner) {
+    if (winReason === 'TIMEOUT') {
+      const loser = state.winner === 1 ? 2 : 1;
+      if (online) return loser === myPlayer ? 'YOU RAN OUT OF TIME' : 'OPPONENT RAN OUT OF TIME';
+      return `P${loser} RAN OUT OF TIME`;
+    }
     if (winReason === 'RESIGN') {
       const loser = state.winner === 1 ? 2 : 1;
       if (online) return loser === myPlayer ? 'YOU RESIGNED' : 'OPPONENT RESIGNED — YOU WIN';
@@ -99,10 +104,11 @@ export function newDangers(prev, next) {
 /**
  * Map a server end reason (GAME_OVER.reason / ROOM_RESUMED.endReason) onto the
  * client's winReason. A server 'DRAW' means both queens fell together.
- * @returns {'QUEEN'|'REPETITION'|'RESIGN'|null}
+ * @returns {'QUEEN'|'REPETITION'|'RESIGN'|'TIMEOUT'|null}
  */
 export function winReasonFromServer(reason) {
   if (reason === 'RESIGN') return 'RESIGN';
+  if (reason === 'TIMEOUT') return 'TIMEOUT';
   if (reason === 'REPETITION') return 'REPETITION';
   if (reason === 'QUEEN' || reason === 'DRAW') return 'QUEEN';
   return null;

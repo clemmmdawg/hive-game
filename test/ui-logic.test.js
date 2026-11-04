@@ -220,6 +220,7 @@ test('winReasonFromServer maps server end reasons onto client win reasons', () =
   assert.equal(winReasonFromServer(null), null);
   assert.equal(winReasonFromServer(undefined), null);
   assert.equal(winReasonFromServer('???'), null);
+  assert.equal(winReasonFromServer('TIMEOUT'), 'TIMEOUT');
 });
 
 test('resumedWinReason keeps the server end reason only for a finished game', () => {
@@ -261,4 +262,52 @@ test('resumeBanner: after a reconnect, says whose turn it is (and when you must 
   assert.deepEqual(resumeBanner({ state, myPlayer: 2 }), { text: "OPPONENT'S TURN", color: 'p1' });
   assert.deepEqual(resumeBanner({ state, myPlayer: 1, mustPass: true }), { text: 'NO MOVES — TAP PASS', color: 'gold' });
   assert.equal(resumeBanner({ state: { ...state, winner: 2 }, myPlayer: 1 }), null);
+});
+
+// ── Game clock: copy + local save ────────────────────────────────────────────
+
+import { createClock, startTurn, pause, endTurn } from '../js/clock.js';
+
+test('statusText: a flag reads "P1 RAN OUT OF TIME" (online from your side)', () => {
+  const over = { ...createGame({}), winner: 2 };
+  assert.equal(statusText({ state: over, mode: 'LOCAL', winReason: 'TIMEOUT' }), 'P1 RAN OUT OF TIME');
+  assert.equal(statusText({ state: { ...over, winner: 1 }, mode: 'LOCAL', winReason: 'TIMEOUT' }), 'P2 RAN OUT OF TIME');
+  assert.equal(statusText({ state: over, mode: 'ONLINE', myPlayer: 1, winReason: 'TIMEOUT' }), 'YOU RAN OUT OF TIME');
+  assert.equal(statusText({ state: over, mode: 'ONLINE', myPlayer: 2, winReason: 'TIMEOUT' }), 'OPPONENT RAN OUT OF TIME');
+  assert.equal(resumedWinReason(over, 'TIMEOUT'), 'TIMEOUT');
+});
+
+const TIMED = { enabled: true, type: 'FISCHER', time: 300_000, increment: 0 };
+
+test('local save v3 round-trips the clock (paused) and the clock snapshots kept with undo history', () => {
+  const settings = { expansions: {}, tournamentRule: false, clock: TIMED };
+  const first = createGame(settings);
+  const second = place(first, PieceType.ANT);
+  const before = pause(startTurn(createClock(TIMED), 0), 4000);
+  const clock = startTurn(endTurn(before, 1, 4000), 4000); // still running when saved
+  const saved = decodeLocalSave(encodeLocalSave({ settings, state: second, history: [first], clock, clockHistory: [before] }));
+  assert.deepEqual(saved.clock.remaining, { 1: 296_000, 2: 300_000 });
+  assert.equal(saved.clock.active, 2);
+  assert.equal(saved.clock.running, false, 'a loaded clock waits for the game screen');
+  assert.equal(saved.clockHistory.length, 1);
+  assert.deepEqual(saved.clockHistory[0].remaining, { 1: 296_000, 2: 300_000 });
+  assert.equal(saved.clockHistory[0].active, 1);
+});
+
+test('local save: clock off stays null; older saves migrate to clock off', () => {
+  const state = createGame({});
+  const off = decodeLocalSave(encodeLocalSave({ settings: {}, state, history: [state] }));
+  assert.equal(off.clock, null);
+  assert.deepEqual(off.clockHistory, [null]);
+  const timed = createGame({ clock: TIMED });
+  const v2 = JSON.parse(encodeLocalSave({ settings: { clock: TIMED }, state: timed, history: [timed], clock: createClock(TIMED), clockHistory: [createClock(TIMED)] }));
+  v2.v = 2; delete v2.clock; delete v2.clockHistory;
+  const migrated = decodeLocalSave(JSON.stringify(v2));
+  assert.equal(migrated.clock, null);
+  assert.deepEqual(migrated.clockHistory, [null]);
+  assert.deepEqual(migrated.settings.clock, { enabled: false });
+  assert.deepEqual(migrated.state.settings.clock, { enabled: false });
+  // A v3 save whose snapshots do not line up with the history keeps the history, without clock undo.
+  const odd = JSON.parse(encodeLocalSave({ settings: { clock: TIMED }, state: timed, history: [timed, timed], clock: createClock(TIMED), clockHistory: [] }));
+  assert.deepEqual(decodeLocalSave(JSON.stringify(odd)).clockHistory, [null, null]);
 });

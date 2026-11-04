@@ -277,6 +277,12 @@ const VOICES = {
     tone(c, out, t, { freq: N.A3 / 2, to: N.E3, glide: 0.17, attack: 0.12, decay: 0.2, peak: 0.12 });
   },
 
+  /** Low-time clock tick: a dry woody click with a faint high pip, well under the UI blips. */
+  tick(c, out, t) {
+    noise(c, out, t, { from: 2600, Q: 2.2, attack: 0.001, decay: 0.025, peak: 0.3 });
+    tone(c, out, t, { type: 'triangle', freq: N.A5, to: N.E5, glide: 0.03, attack: 0.002, decay: 0.05, peak: 0.12 });
+  },
+
   /** Soft two-note bell (E5 → A5). */
   turn(c, out, t) {
     for (const [dt, f] of [[0, N.E5], [0.08, N.A5]]) {
@@ -327,7 +333,7 @@ export const SOUND_NAMES = Object.freeze(Object.keys(VOICES));
 // after the master gain). Broadband whooshes sit lower than tones of equal peak.
 const TRIM_DB = {
   select: 4, deselect: 5, invalid: 3.3, place: 2.4, slide: 10, hop: 5.3, climb: 7,
-  throw: 7, turn: 9, danger: 10.8, win: 9.7, lose: 10.5, draw: 6.4,
+  throw: 7, tick: 0, turn: 9, danger: 10.8, win: 9.7, lose: 10.5, draw: 6.4,
 };
 
 // ── Public API ──────────────────────────────────────────────────────────────

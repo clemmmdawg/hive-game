@@ -4,6 +4,7 @@
 
 import * as net from './net.js';
 import { spriteSVG } from './sprites.js';
+import { CLOCK_PRESETS, presetSettings, presetIdOf, normalizeClockSettings } from './clock.js';
 
 // ── Default settings ────────────────────────────────────
 
@@ -310,12 +311,12 @@ function _attachOnlineGameHandlers() {
     _saveSession();
   });
 
-  net.on('GAME_START', ({ gameState, settings, history }) => {
+  net.on('GAME_START', ({ gameState, settings, history, clock, serverNow }) => {
     _onlinePending = false;
     // Wire up in-game net handlers before handing off
     _callbacks.onNetReady();
     hideMenu();
-    _callbacks.onOnlineStart(settings, _myPlayer, gameState, null, history ?? []);
+    _callbacks.onOnlineStart(settings, _myPlayer, gameState, null, history ?? [], { clock, serverNow });
   });
 
   net.on('_disconnected', () => {
@@ -327,7 +328,7 @@ function _attachOnlineGameHandlers() {
 
   net.on('WAITING_FOR_OPPONENT', ({ code }) => _showRoom(code));
 
-  net.on('ROOM_RESUMED', ({ player, token, gameState, settings, endReason, history }) => {
+  net.on('ROOM_RESUMED', ({ player, token, gameState, settings, endReason, history, clock, serverNow }) => {
     _myPlayer = player;
     _playerToken = token;
     _saveSession();
@@ -335,7 +336,7 @@ function _attachOnlineGameHandlers() {
       _onlinePending = false;
       _callbacks.onNetReady();
       hideMenu();
-      _callbacks.onOnlineStart(settings, player, gameState, endReason ?? null, history ?? []);
+      _callbacks.onOnlineStart(settings, player, gameState, endReason ?? null, history ?? [], { clock, serverNow });
     } else {
       _showRoom(_roomCode);
     }
@@ -480,6 +481,7 @@ function _loadSavedSettings() {
         pillbug:  !!saved.expansions?.pillbug,
       },
       tournamentRule: !!saved.tournamentRule,
+      clock: normalizeClockSettings(saved.clock),
     };
   } catch {
     return {};
@@ -490,6 +492,7 @@ function _persistSettings() {
   storageSet(SETTINGS_KEY, JSON.stringify({
     expansions: _settings.expansions,
     tournamentRule: _settings.tournamentRule,
+    clock: _settings.clock,
   }));
 }
 
@@ -569,7 +572,29 @@ function _buildSettingsHTML() {
       <div class="settings-row">
         ${_toggle('tournament', 'CROWN', 'TOURNAMENT OPENING', s.tournamentRule)}
       </div>
+    </div>
+    <div class="settings-group">
+      <div class="settings-label" id="clock-label">CLOCK</div>
+      <div class="clock-row" role="radiogroup" aria-labelledby="clock-label" aria-describedby="clock-hint">
+        ${CLOCK_PRESETS.map(p => _clockChip(p, presetIdOf(s.clock) === p.id)).join('')}
+      </div>
+      <p class="settings-hint clock-hint" id="clock-hint">${_clockHint(s.clock)}</p>
     </div>`;
+}
+
+/** One clock preset chip (a radio in the CLOCK group). */
+function _clockChip(preset, checked) {
+  const off = preset.id === 'OFF';
+  const aria = off ? 'No clock' : `${preset.time / 60_000} minutes plus ${preset.increment / 1000} seconds per move`;
+  return `
+    <button class="clock-chip${checked ? ' on' : ''}${off ? ' off' : ''}" data-clock="${preset.id}" type="button"
+            role="radio" aria-checked="${checked}" aria-label="${aria}" tabindex="${checked ? 0 : -1}">${preset.label}</button>`;
+}
+
+function _clockHint(clock) {
+  if (!clock?.enabled) return 'Untimed. Pick minutes + seconds added per move.';
+  const min = clock.time / 60_000, inc = clock.increment / 1000;
+  return `${min} minutes each${inc ? `, +${inc} s after every move` : ', no increment'}. Run out and you lose.`;
 }
 
 function _buildGameSettings() {
@@ -606,6 +631,30 @@ function _bindSettingsEvents() {
       btn.setAttribute('aria-pressed', val);
       btn.querySelector('.toggle-pill').textContent = val ? 'ON' : 'OFF';
       _persistSettings();
+    });
+  });
+
+  const chips = [...document.querySelectorAll('.clock-chip')];
+  const pick = chip => {
+    _settings.clock = presetSettings(chip.dataset.clock);
+    for (const c of chips) {
+      const on = c === chip;
+      c.classList.toggle('on', on);
+      c.setAttribute('aria-checked', String(on));
+      c.tabIndex = on ? 0 : -1;
+    }
+    $('clock-hint').textContent = _clockHint(_settings.clock);
+    _persistSettings();
+  };
+  chips.forEach((chip, i) => {
+    chip.addEventListener('click', () => pick(chip));
+    chip.addEventListener('keydown', event => { // radio-group arrows
+      const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
+      if (!step) return;
+      event.preventDefault();
+      const next = chips[(i + step + chips.length) % chips.length];
+      pick(next);
+      next.focus();
     });
   });
 

@@ -9,7 +9,7 @@
 //   createWinFx({
 //     board,                          the Board (shockwave, dim spotlight, reduced motion)
 //     state(), mode(), myPlayer(),    the live game: GameState, 'LOCAL'|'ONLINE', 1|2
-//     reason(),                       app's win reason: null|'QUEEN'|'RESIGN'|'STALEMATE'|'REPETITION'
+//     reason(),                       app's win reason: null|'QUEEN'|'RESIGN'|'STALEMATE'|'REPETITION'|'TIMEOUT'
 //     moveLog(),                      the move log (REPLAY is offered when it rebuilds the game)
 //     covered(),                      true while ☰ / move sheet / review would cover the card
 //     beforeCard(),                   called just before the card opens (hides the tooltip)
@@ -56,6 +56,13 @@ export function winCopy({ state, mode, myPlayer, reason }) {
 
   const loser = other(winner);
   const headline = online ? (winner === myPlayer ? 'YOU WIN!' : 'YOU LOSE') : `PLAYER ${winner} WINS!`;
+  if (reason === 'TIMEOUT') {
+    return {
+      headline,
+      reason: online ? (loser === myPlayer ? 'You ran out of time.' : 'Your opponent ran out of time.') : `Player ${loser} ran out of time.`,
+      emblem: PieceType.QUEEN,
+    };
+  }
   if (reason === 'RESIGN') {
     return {
       headline,

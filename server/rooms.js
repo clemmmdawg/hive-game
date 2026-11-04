@@ -48,7 +48,9 @@ export function createRoom(settings) {
     gameState:    null,           // set to a live GameState when game starts
     history:      [],             // move log: { notation, player, turnNumber, action } per valid action (incl. PASS)
     settings,
-    endReason:    null,           // 'QUEEN' | 'RESIGN' | 'DRAW' | 'REPETITION' once finished
+    endReason:    null,           // 'QUEEN' | 'RESIGN' | 'DRAW' | 'REPETITION' | 'TIMEOUT' once finished
+    clock:        null,           // js/clock.js clock while the game is timed (server time base)
+    clockTimer:   null,           // timeout for the side to move (server.js scheduleFlag)
     idleTimer:    null,
     createdAt:    Date.now(),
     lastActivity: Date.now(),
@@ -213,6 +215,8 @@ function cleanupRoom(code) {
   if (!room) return;
 
   if (room.idleTimer) clearTimeout(room.idleTimer);
+  if (room.clockTimer) clearTimeout(room.clockTimer);
+  room.clockTimer = null;
 
   for (const sock of room.sockets) {
     if (sock && sock.readyState === WS_OPEN) {

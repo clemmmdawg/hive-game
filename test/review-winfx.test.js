@@ -88,3 +88,11 @@ test('winCopy: local and online wins, resignations, both draws', () => {
   assert.equal(winCopy({ state: draw, mode: 'LOCAL' }).headline, "IT'S A DRAW");
   assert.equal(winCopy({ state: draw, mode: 'LOCAL' }).reason, 'Both queens were surrounded on the same move.');
 });
+
+test('winCopy: running out of time', () => {
+  const state = { winner: 1, turnNumber: 16 };
+  assert.deepEqual(winCopy({ state, mode: 'LOCAL', reason: 'TIMEOUT' }),
+    { headline: 'PLAYER 1 WINS!', reason: 'Player 2 ran out of time.', emblem: 'QUEEN' });
+  assert.equal(winCopy({ state, mode: 'ONLINE', myPlayer: 2, reason: 'TIMEOUT' }).reason, 'You ran out of time.');
+  assert.equal(winCopy({ state, mode: 'ONLINE', myPlayer: 1, reason: 'TIMEOUT' }).reason, 'Your opponent ran out of time.');
+});

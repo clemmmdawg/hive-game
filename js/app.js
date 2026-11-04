@@ -19,6 +19,10 @@ import { createWinFx } from './win-fx.js';
 import { createReview } from './review.js';
 import * as net from './net.js';
 import { sfx } from './audio.js';
+import {
+  createClock, endTurn, remainingFor, isFlagged, pause as pauseClock, resume as resumeClock, flag as flagClock,
+  rebaseClock, formatClock, LOW_TIME_MS,
+} from './clock.js';
 
 // ── Piece display definitions ──────────────────────────
 
@@ -135,7 +139,8 @@ window.addEventListener('resize', () => {
 });
 
 // Request the next frame first: an exception in a landing callback must not freeze the board.
-(function loop(t) { requestAnimationFrame(loop); board.draw(t); })(0);
+// (Started on the first frame: renderClocks reads game state declared further down.)
+requestAnimationFrame(function loop(t) { requestAnimationFrame(loop); board.draw(t); renderClocks(); });
 
 // The ×N stack badges use the pixel font: re-render the cached layer once it has
 // loaded, or a cold start keeps the fallback face in the cache.
@@ -156,6 +161,10 @@ let landingAlarm = null;   // …or raised by board.onLand when the piece that c
 let turnSoundTimer = null; // "your turn" chime, held back until the opponent's piece lands
 let connectionNotice = null; // shown in place of the status line while offline
 let opponentAway = false;
+let repetitionWarned = false; // the REPETITION 2/3 banner fires once per game
+let clock        = null;    // js/clock.js clock, null = untimed. LOCAL: owned here (Date.now() time base);
+                            // ONLINE: the server's, rebased onto Date.now() (display only — the server flags)
+let clockHistory = [];      // LOCAL only: the clock (paused) before each `history` entry, for undo
 
 const uiState = {
   phase:           'IDLE',
@@ -319,6 +328,7 @@ function showGame() {
   updateInsets();
   board.recenter(false);
   showBoardHintOnce();
+  syncClockRun(); // a local clock starts (or a continued one resumes) once the game is on screen
 }
 
 function hideGame() {
@@ -360,6 +370,8 @@ function exitToMenu({ notice, keepSaved = false } = {}) {
   gameState = null;
   history = [];
   moveLog = [];
+  clock = null;
+  clockHistory = [];
   connectionNotice = null;
   opponentAway = false;
   updateInsets();
@@ -380,6 +392,9 @@ function startGame(settings, restore = null) {
   gameSettings = settings;
   history      = restore?.history ?? [];
   moveLog      = restore?.moveLog ?? [];
+  // A new clock stands still until the game screen shows; a continued one comes back paused.
+  clock        = restore ? restore.clock : createClock(settings.clock);
+  clockHistory = restore?.clockHistory ?? [];
   gameState    = restore?.state ?? createGame({
     expansions:     settings.expansions,
     tournamentRule: settings.tournamentRule,
@@ -397,13 +412,16 @@ function startGame(settings, restore = null) {
  * @param {object} serializedState - JSON-safe state from serializeState()
  * @param {string|null} [endReason] - server end reason when resuming a finished game
  * @param {object[]} [serverHistory] - the room's move log so far (GAME_START: [], ROOM_RESUMED: all of it)
+ * @param {{clock?: object, serverNow?: number}} [clockInfo] - the room's clock (timed games) and the server time it was sent at
  */
-export function startOnlineGame(settings, playerNum, serializedState, endReason = null, serverHistory = []) {
+export function startOnlineGame(settings, playerNum, serializedState, endReason = null, serverHistory = [], clockInfo = {}) {
   cancelTimers();
   gameMode     = 'ONLINE';
   myPlayer     = playerNum;
   gameSettings = settings;
   history      = [];
+  clockHistory = [];
+  setServerClock(clockInfo);
   moveLog      = serverHistory ?? [];
   gameState    = deserializeState(serializedState);
   connectionNotice = null;
@@ -420,6 +438,8 @@ export function startOnlineGame(settings, playerNum, serializedState, endReason 
 }
 
 function beginGameSession(lastMove) {
+  repetitionWarned = false;
+  lowTickAt = null;
   reviewer.end();
   reviewer.closeSheet({ restoreFocus: false });
   board.finishAnimations({ clearFx: true });
@@ -438,7 +458,10 @@ function beginGameSession(lastMove) {
 function saveLocal() {
   if (gameMode !== 'LOCAL' || !gameState) return;
   if (gameState.winner) { storageSet(LOCAL_SAVE_KEY, null); return; }
-  storageSet(LOCAL_SAVE_KEY, encodeLocalSave({ settings: gameSettings, state: gameState, history, moveLog }));
+  storageSet(LOCAL_SAVE_KEY, encodeLocalSave({
+    settings: gameSettings, state: gameState, history, moveLog,
+    clock: pauseClock(clock, Date.now()), clockHistory, // the time spent so far is saved, even mid-turn
+  }));
 }
 
 function loadLocalSave() {
@@ -451,7 +474,8 @@ function localSaveSummary() {
   const round = Math.ceil(saved.state.turnNumber / 2);
   const exps  = Object.entries(saved.state.settings.expansions ?? {}).filter(([, on]) => on)
     .map(([name]) => name.toUpperCase());
-  return `ROUND ${round} · PLAYER ${saved.state.turn} TO MOVE${exps.length ? ` · +${exps.join(' +')}` : ''}`;
+  const timed = saved.clock ? ` · ${formatClock(remainingFor(saved.clock, saved.state.turn, 0))} LEFT` : '';
+  return `ROUND ${round} · PLAYER ${saved.state.turn} TO MOVE${timed}${exps.length ? ` · +${exps.join(' +')}` : ''}`;
 }
 
 function continueLocal() {
@@ -590,11 +614,16 @@ function act(action) {
   }
 
   const prev = gameState;
+  const now  = Date.now();
+  if (isFlagged(clock, prev.turn, now)) { flagLocal(now); return; } // the flag fell before this frame noticed
   const move = getMovePath(prev, action);
   history.push(prev);
+  clockHistory.push(pauseClock(clock, now));
   moveLog.push(logEntry(prev, action));
-  if (history.length > MAX_UNDO) history.shift();
+  if (history.length > MAX_UNDO) { history.shift(); clockHistory.shift(); }
   gameState = applyAction(prev, action);
+  clock = endTurn(clock, prev.turn, now);
+  if (gameState.winner) clock = pauseClock(clock, now);
   onStateChanged(prev, { move });
 }
 
@@ -643,7 +672,8 @@ function onStateChanged(prev, { animate = true, move = null } = {}) {
   const landingMs = flying ? moveDuration(move.kind, move.path.length - 1) : 0;
   announceTurn(landingMs, dangers, landed);
   // The position just reached has now occurred twice (the count only passes 2 once): say so (replaces the turn banner for both seats).
-  if (animate && repetitionCount(gameState) === 2) {
+  if (animate && !repetitionWarned && repetitionCount(gameState) === 2) {
+    repetitionWarned = true;
     showBanner('REPETITION 2/3 — A THIRD TIME DRAWS', 'gold', PieceType.QUEEN, 2200);
   }
 }
@@ -700,12 +730,16 @@ function announceTurn(landingMs = 0, dangers = [], landed = null) {
     passTimer = setTimeout(() => {
       passTimer = null;
       if (gameState !== stuck) return; // undone or quit meanwhile
+      const now = Date.now();
+      if (isFlagged(clock, stuck.turn, now)) { flagLocal(now); return; }
       moveLog.push(logEntry(stuck, { type: ActionType.PASS }));
       gameState = applyAction(stuck, { type: ActionType.PASS });
+      clock = endTurn(clock, stuck.turn, now);
       if (getAllLegalActions(gameState).mustPass) {
         // Neither side can act: the game can never progress.
         gameState = { ...gameState, winner: 'DRAW' };
         winReason = 'STALEMATE';
+        clock = pauseClock(clock, now);
       }
       onStateChanged(stuck, { animate: false });
     }, 1700);
@@ -761,8 +795,11 @@ function undo() {
   board.finishAnimations({ clearFx: true }); // no animation, and nothing left mid-air
   cancelTimers();
   const restored = history.pop();
+  const restoredClock = clockHistory.pop();
   moveLog = undoLogEntry(moveLog); // the move, plus any forced pass that followed it
   gameState    = restored;
+  // The clock as it stood when that move was made (paused; syncClockRun restarts it below).
+  if (restoredClock) clock = restoredClock;
   winFx.reset();
   winReason    = null;
   winFx.hide();
@@ -772,9 +809,113 @@ function undo() {
   if (!history.length && !restored.lastMovedHex) board.lastMove = null;
   syncBoardRenderer();
   syncUI();
+  syncClockRun();
   saveLocal();
   sfx.play('deselect');
   toast(`UNDONE · PLAYER ${restored.turn} TO MOVE`, '', 1400);
+}
+
+// ── Game clock (js/clock.js) ───────────────────────────
+
+const clockEls  = { 1: $('clock-1'), 2: $('clock-2') };
+const plateEls  = { 1: $('plate-1'), 2: $('plate-2') };
+const clockText = { 1: '', 2: '' };   // what each display shows (written only when it changes)
+const plateCls  = { 1: '', 2: '' };
+let clockUiOn   = false;
+let lowTickAt   = null;               // whole second of the last low-time tick
+
+/** An online clock from the server: rebased onto our Date.now() (skew-free). Untimed → null. */
+function setServerClock({ clock: serverClock, serverNow } = {}) {
+  const now = Date.now();
+  clock = serverClock ? rebaseClock(serverClock, typeof serverNow === 'number' ? serverNow : now, now) : null;
+}
+
+/** LOCAL: the clock stands still while something covers the game or the page is hidden. */
+function clockHeld() {
+  return document.hidden || !gameMenu.hidden || isOverlayOpen() || reviewer.active || reviewer.sheetOpen()
+    || !$('hud').classList.contains('game-visible');
+}
+
+/** Pause or resume a local clock to match clockHeld() (online the server's clock never pauses). */
+function syncClockRun() {
+  if (gameMode !== 'LOCAL' || !clock || !gameState || gameState.winner) return;
+  const now = Date.now();
+  if (clockHeld()) {
+    if (clock.running) { clock = pauseClock(clock, now); saveLocal(); }
+  } else if (!clock.running) {
+    clock = resumeClock(clock, now);
+  }
+}
+
+// The ☰ menu, How to Play, the confirm dialog and the move sheet open and close in several places
+// (menu.js included): watch them rather than hooking each one.
+const clockObserver = new MutationObserver(() => syncClockRun());
+for (const id of ['game-menu', 'rules-overlay', 'resign-confirm', 'moves-sheet']) {
+  clockObserver.observe($(id), { attributes: true, attributeFilter: ['class', 'hidden'] });
+}
+document.addEventListener('visibilitychange', () => syncClockRun());
+window.addEventListener('pagehide', () => saveLocal()); // keep the time spent this turn
+
+/** LOCAL: the side to move ran out of time — the other side wins through the usual win sequence. */
+function flagLocal(now) {
+  if (!gameState || gameState.winner || !clock) return;
+  board.finishAnimations();
+  cancelTimers(); // a pending forced pass, alarms, the chime
+  const loser = clock.active;
+  clock = flagClock(clock, now);
+  gameState = { ...gameState, winner: other(loser) };
+  winReason = 'TIMEOUT';
+  clearSelection(false);
+  hidePieceTooltip();
+  hideBanner();
+  syncUI();
+  saveLocal();
+  winFx.play(null);
+}
+
+/**
+ * Per frame: the two HUD clocks. Text nodes and classes are written only when they change (once a
+ * second, ten times a second under 10 s), so nothing re-lays out the HUD or touches the board layer.
+ * Under 10 s the running side pulses red and ticks once a second (online: only your own clock).
+ */
+function renderClocks() {
+  const on = !!(clock && gameState);
+  if (on !== clockUiOn) {
+    clockUiOn = on;
+    $('queen-meters').classList.toggle('timed', on);
+    for (const p of [1, 2]) {
+      clockEls[p].hidden = !on;
+      clockText[p] = plateCls[p] = '';
+      plateEls[p].className = `plate p${p}`;
+      if (!on) clockEls[p].textContent = '';
+    }
+  }
+  if (!on) return;
+  const now = Date.now();
+  if (gameMode === 'LOCAL' && clock.running && !gameState.winner && isFlagged(clock, clock.active, now)) flagLocal(now);
+  const over = !!gameState.winner;
+  for (const p of [1, 2]) {
+    const ms   = remainingFor(clock, p, now);
+    const text = formatClock(ms);
+    if (text !== clockText[p]) {
+      clockText[p] = text;
+      clockEls[p].textContent = text;
+      const who = gameMode === 'ONLINE' ? (p === myPlayer ? 'Your' : "Opponent's") : `Player ${p}`;
+      if (!clockEls[p].title.startsWith(who)) clockEls[p].title = `${who} time`;
+    }
+    const active = !over && clock.active === p;
+    const cls = `plate p${p}${active ? ' active' : ''}${active && !clock.running ? ' paused' : ''}`
+      + `${active && ms > 0 && ms < LOW_TIME_MS ? ' low' : ''}${ms <= 0 ? ' flagged' : ''}`;
+    if (cls !== plateCls[p]) { plateCls[p] = cls; plateEls[p].className = cls; }
+  }
+  const left = remainingFor(clock, clock.active, now);
+  const mine = gameMode === 'LOCAL' || clock.active === myPlayer;
+  if (!over && clock.running && mine && left > 0 && left < LOW_TIME_MS && !reviewer.active) {
+    const sec = Math.ceil(left / 1000);
+    if (sec !== lowTickAt) { lowTickAt = sec; sfx.play('tick', { haptic: false }); }
+  } else {
+    lowTickAt = null;
+  }
 }
 
 // ── Win sequence + result card (js/win-fx.js) ─────────
@@ -1155,6 +1296,7 @@ function syncUI() {
 
   renderTray(actions);
   reviewer.sync();
+  syncClockRun();
 }
 
 // ── HUD queen meters ───────────────────────────────────
@@ -1421,9 +1563,10 @@ export function initNetHandlers() {
   });
 
   // Authoritative game state after any action
-  net.on('GAME_STATE', ({ gameState: snap, history: serverHistory }) => {
+  net.on('GAME_STATE', ({ gameState: snap, history: serverHistory, clock: serverClock, serverNow }) => {
     board.finishAnimations();
     if (Array.isArray(serverHistory)) moveLog = serverHistory;
+    setServerClock({ clock: serverClock, serverNow });
     const prev = gameState;
     gameState = deserializeState(snap);
     // Snapshots carry no action: recover it, and its route, from the previous state.
@@ -1431,9 +1574,10 @@ export function initNetHandlers() {
     onStateChanged(prev, { move });
   });
 
-  net.on('ROOM_RESUMED', ({ player, gameState: snap, endReason, history: serverHistory }) => {
+  net.on('ROOM_RESUMED', ({ player, gameState: snap, endReason, history: serverHistory, clock: serverClock, serverNow }) => {
     myPlayer = player;
     if (Array.isArray(serverHistory)) moveLog = serverHistory;
+    setServerClock({ clock: serverClock, serverNow });
     connectionNotice = null;
     if (snap) {
       reviewer.leaveForLive();
@@ -1462,14 +1606,19 @@ export function initNetHandlers() {
   });
 
   // Server confirmed game over (win, or resign)
-  net.on('GAME_OVER', ({ winner, reason }) => {
+  net.on('GAME_OVER', ({ winner, reason, clock: serverClock, serverNow }) => {
     if (!gameState) return;
     reviewer.leaveForLive();
+    if (serverClock) setServerClock({ clock: serverClock, serverNow });
+    else if (clock) clock = pauseClock(clock, Date.now()); // the game is over: the display stops too
     gameState = { ...gameState, winner };
     winReason = winReasonFromServer(reason);
     clearSelection(false);
+    hidePieceTooltip();
     syncUI();
-    if (!winFx.cardPending && !winFx.presented) winFx.scheduleCard(reason ? 200 : 700);
+    if (winFx.cardPending || winFx.presented) return;
+    if (reason === 'TIMEOUT') { hideBanner(); winFx.play(null); } // the flag falls: dim, then the card
+    else winFx.scheduleCard(reason ? 200 : 700);
   });
 
   // Server rejected a move (shouldn't happen with correct client logic)

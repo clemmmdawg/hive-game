@@ -41,7 +41,9 @@ Run with `npm start` (starts `server/index.js`; port 3000), `npm start -- 3001`,
 - Win screen with reason, species-colour sprite confetti, Rematch (local) / View Board / Main Menu
 - Queen danger meter: six pips on each queen's rim (lit per occupied side; gold, amber pulse at 4, red pulse + halo + face wash at 5), mirrored by two HUD meters (`#queen-meters`); stepping up to 5 plays `danger` once at touchdown (from `board.onLand`, or when the flight is snapped home) with a red banner — the 12 ms landing buzz is skipped whenever an alarm (danger or win) fires on that landing — and the endangered mover's status reads "P1 QUEEN IN DANGER"
 - Win sequence: the winning move flies at 0.4× (capped at 1 s), a white shockwave + camera punch at touchdown, the board dims 45% round the fallen queen (`#board-dim`; an even dim when no queen is surrounded), then confetti + card — card ≤ 1.6 s (`winTiming`); the HUD holds the result until impact. Reduced motion: card after 300 ms, no slow-mo/shockwave. A finished game opened by reload/resume shows the card calmly (no sting, no confetti). If ☰ is open when the card is due, the card waits until it closes
-- Settings (expansions, tournament rule) remembered in localStorage
+- Settings (expansions, tournament rule, clock preset) remembered in localStorage
+- Game clock (Fischer): menu CLOCK chips OFF / 5+0 / 10+5 / 15+10 / 30+0 (minutes + seconds per move). Each HUD queen meter becomes a player plate (meter + time, `#plate-N` / `#clock-N`; stacked P1-over-P2 on phones and landscape phones, side by side on wider screens); mm:ss, tenths (`09.4`) under 10 s; the side to move is lit in its colour; under 10 s the plate pulses red (none under reduced motion) and a soft `tick` plays once a second (online: only your own clock). Flag → the win sequence with "P1 RAN OUT OF TIME" (online "YOU / OPPONENT RAN OUT OF TIME"). Local: the clock runs once the game screen shows and pauses while ☰, How to Play, a confirm dialog, the move sheet, a review/replay or a hidden page covers it (`clockHeld`, MutationObserver + visibilitychange); undo restores the clock snapshot kept with each history entry; autosave keeps the (paused) clock. Online: server-authoritative (see Multiplayer). Clock OFF → no clock UI. The display is written from the RAF loop only when its text/class changes (never touches the board layer)
+- The REPETITION 2/3 banner shows once per game (`repetitionWarned`, reset on new game / rematch / continue / online start)
 - Room share: COPY CODE + SHARE/COPY LINK; `?room=CODE` opens JOIN with the code filled in
 - Main menu with mode selection, expansion toggles, tournament rule toggle
 - Server-authoritative online multiplayer with room codes
@@ -62,7 +64,6 @@ Run with `npm start` (starts `server/index.js`; port 3000), `npm start -- 3001`,
 - Static server serves only an allowlist (`index.html`, `styles.css`, `js/`, `assets/`, PWA files)
 
 ### Known Limitations / Not Yet Built
-- No clock/timer (designed in settings, not implemented)
 - No AI opponent
 - No persistent online rooms (room pause/resume deferred to v2); local games autosave
 - No spectator mode
@@ -89,7 +90,8 @@ Run with `npm start` (starts `server/index.js`; port 3000), `npm start -- 3001`,
 │   ├── hints.js        — Pure: HUD status copy (statusText, dangerText, newDangers, resumeBanner) + last-move diff (describeLastMove, inferAction)
 │   ├── notation.js     — Pure: toNotation / pieceIds / logEntry / undoLogEntry; BoardSpace-style move text and move-log entries, imports only game.js
 │   ├── replay.js       — Pure: createReplay / replayForGame / sameBoard / plyInfo (player, owner, type) / movesText / notationHTML; rebuilds positions from the move log (game review), imports only game.js
-│   ├── local-save.js   — Pure: encode/decode the local game + undo history + move log for localStorage (save VERSION 2; v1 loads with an empty log)
+│   ├── local-save.js   — Pure: encode/decode the local game + undo history + move log + clock (and a clock snapshot per undo step) for localStorage (save VERSION 3; v1 loads with an empty log, v1/v2 as clock-off games)
+│   ├── clock.js        — Pure Fischer clock (injected `now`; server-importable): presets, createClock/startTurn/endTurn/remainingFor/isFlagged/pause/resume/flag, rebaseClock (server → local time), restoreClock, formatClock
 │   ├── audio.js        — WebAudio synth sound effects + haptics + persisted mute (`sfx`)
 │   └── net.js          — WebSocket client (see Multiplayer)
 ├── assets/fonts/       — press-start-2p-latin.woff2 (self-hosted, precached) + OFL.txt (its SIL OFL 1.1 licence)
@@ -156,7 +158,7 @@ createGame(settings) → GameState
 {
   expansions:     { mosquito: bool, ladybug: bool, pillbug: bool },
   tournamentRule: bool,
-  clock:          { enabled: bool, type: 'ABSOLUTE'|'FISCHER'|'BRONSTEIN', time: number, increment: number }
+  clock:          { enabled: false } | { enabled: true, type: 'FISCHER', time: ms, increment: ms }  // only CLOCK_PRESETS (js/clock.js)
 }
 
 // Query legal actions
@@ -230,7 +232,7 @@ sfx.unlock();               // create/resume the AudioContext — app.js calls i
 sfx.resume();               // resume an existing suspended context only (never creates one) — app.js calls it on visibilitychange → visible
 sfx.play(name, { haptic, duration }?) // no-op before unlock, while muted, for unknown names, or the same name again within 30 ms; duration (ms) holds the slide whoosh for the flight
 sfx.setMuted(bool); sfx.toggle() → muted; sfx.muted   // persisted under localStorage `hiveMuted`; mutes haptics too
-SOUND_NAMES                 // select deselect invalid place slide hop climb throw turn danger win lose draw
+SOUND_NAMES                 // select deselect invalid place slide hop climb throw tick turn danger win lose draw
 ```
 
 Voices are synthesised per play (oscillators + gain envelopes + filtered noise) into a bus: lowpass 8 kHz + a small convolver plate send → master gain `MASTER_GAIN` 0.35 → `softClip` WaveShaper (linear to 0.7, ceiling −1 dBFS). Per-voice `TRIM_DB` balances loudness. Do not put a DynamicsCompressor back in: Chrome ducks short transients by ~10 dB. Haptics: 12 ms for place/slide/hop/climb/throw, `[30,40,30]` danger, `[40,60,80]` win, `[30,30]` draw.
@@ -413,16 +415,19 @@ CLIENT → SERVER:
 
 SERVER → CLIENT:
   ROOM_CREATED        { code, player, token }
-  ROOM_RESUMED        { code, player, token, gameState, settings, endReason?, history }  — endReason 'QUEEN'|'RESIGN'|'DRAW'|'REPETITION' if finished
+  ROOM_RESUMED        { code, player, token, gameState, settings, endReason?, history, clock?, serverNow? }  — endReason 'QUEEN'|'RESIGN'|'DRAW'|'REPETITION'|'TIMEOUT' if finished
   PLAYER_ASSIGNMENT   { player, token }
-  GAME_START          { gameState, settings, history: [] }
-  GAME_STATE          { gameState, history }  — after every valid action; history = full move log so far
+  GAME_START          { gameState, settings, history: [], clock?, serverNow? }
+  GAME_STATE          { gameState, history, clock?, serverNow? }  — after every valid action; history = full move log so far
                         (entries { notation, player, turnNumber, action }, PASS included, appended server-side)
   INVALID_MOVE        { reason }
   ERROR               { reason }              — e.g. INVALID_MESSAGE; SEAT_TAKEN (+ close code 4001) when a newer
                                                 connection resumed your seat: net.js does not reconnect, the app
                                                 shows GAME OPENED IN ANOTHER TAB and keeps the saved token
-  GAME_OVER           { winner, reason }      — reason 'QUEEN'|'RESIGN'|'DRAW'|'REPETITION'  (REPETITION = automatic threefold draw)
+  GAME_OVER           { winner, reason, clock?, serverNow? } — reason 'QUEEN'|'RESIGN'|'DRAW'|'REPETITION'|'TIMEOUT'  (REPETITION = automatic threefold draw; TIMEOUT = the side to move's clock ran out, carries the final clock)
+
+  clock (timed rooms only) = js/clock.js clock in server time; clients rebaseClock(clock, serverNow, Date.now()).
+  Body built by server.js roomSnapshot(room) (GAME_START / ROOM_RESUMED; reusable for any full-state message) / stateFields (GAME_STATE).
   OPPONENT_DISCONNECTED {}
   OPPONENT_RECONNECTED  {}
   ROOM_CLOSED         {}                      — room expired or was closed; the server then closes the socket
@@ -436,6 +441,9 @@ SERVER → CLIENT:
 The server pings every 30 s and terminates silent sockets; `RESUME_ROOM` with a valid token replaces a still-open old socket (no `SEAT_OCCUPIED`). A seated socket sending CREATE/JOIN gets `ERROR ALREADY_IN_ROOM`. `server.js` exports `createHiveServer()` and never listens by itself; `server/index.js` is the entry point (a "run directly" guard in server.js silently exited 0 through symlinked paths).
 Room code and player token are stored in `localStorage`. If the socket drops, `RESUME_ROOM` reclaims the reserved seat and returns the authoritative state; the client then shows RECONNECTED and the turn banner (`resumeBanner`: YOUR TURN / OPPONENT'S TURN / NO MOVES — TAP PASS; none if the game is over or a review is open). Persistence across a server restart is not supported.
 
+### Game clock (server)
+`normalizeSettings` (exported) accepts only the clock presets. The room's clock starts when GAME_START is sent; each valid action applies `endTurn` (client clock values are never read) and re-arms `room.clockTimer` for the side to move; it keeps running while a player is disconnected. On expiry (or an action arriving after the deadline) → `GAME_OVER {reason:'TIMEOUT'}`, `endReason 'TIMEOUT'`. Win / resign stop it; room cleanup clears the timer. Test hook: `createHiveServer({ clockOverride: { time, increment } })` swaps an enabled preset's numbers for short ones (never set by `server/index.js`).
+
 ### Room lifecycle
 - Rooms expire after 30 minutes of inactivity
 - A room with one player waits up to 10 minutes (absolute from creation; resuming does not extend it) for the second to join
@@ -446,7 +454,7 @@ Room code and player token are stored in `localStorage`. If the socket drops, `R
 ## Planned Features (Backlog)
 
 ### v1.1
-- [ ] Clock/timer (Absolute, Fischer, Bronstein) — UI already in settings, needs `clock.js` and HUD display
+- [x] Clock/timer — Fischer presets (`js/clock.js`, HUD player plates, server-authoritative online)
 - [ ] Spectator mode — broadcast game state to extra room sockets read-only
 - [x] PWA install — `sw.js` + `manifest.json`
 

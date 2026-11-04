@@ -75,7 +75,7 @@ const sourcesOf = ctx => ctx.nodes.filter(n => n.kind === 'osc' || n.kind === 'b
 test('exposes every sound name from the spec', () => {
   assert.deepEqual(
     [...SOUND_NAMES].sort(),
-    ['climb', 'danger', 'deselect', 'draw', 'hop', 'invalid', 'lose', 'place', 'select', 'slide', 'throw', 'turn', 'win'].sort(),
+    ['climb', 'danger', 'deselect', 'draw', 'hop', 'invalid', 'lose', 'place', 'select', 'slide', 'throw', 'tick', 'turn', 'win'].sort(),
   );
 });
 
@@ -226,4 +226,15 @@ test('play(slide, { duration }) stretches the whoosh to the flight', () => {
   const long = Math.max(...c.stops) - c.currentTime;
   assert.ok(short <= 0.4, `default ${short}`);
   assert.ok(long >= 0.55 && long <= 0.7, `550 ms flight → ${long.toFixed(3)} s whoosh`);
+});
+
+test('tick is a short, soft clock tick with no haptic', () => {
+  const { ctx, buzz } = setup();
+  sfx.unlock();
+  const c = ctx();
+  c.stops.length = 0;
+  sfx.play('tick');
+  const len = Math.max(...c.stops) - c.currentTime;
+  assert.ok(len > 0 && len <= 0.12, `tick lasts ${len}`);
+  assert.equal(buzz.length, 0);
 });

@@ -542,6 +542,42 @@ kbd {
   color: #05050f;
 }
 
+/* Clock presets: one segmented row of chips (a radio group) */
+.clock-row {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+}
+.clock-chip {
+  min-height: 44px;
+  padding: 0 2px;
+  border-radius: var(--radius-sm);
+  background: rgba(255,255,255,.04);
+  border: 1px solid rgba(255,255,255,.10);
+  color: rgba(255,255,255,.62);
+  font-family: var(--font);
+  font-size: 8px;
+  letter-spacing: .5px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background .15s, border-color .15s, box-shadow .15s, color .15s;
+  -webkit-tap-highlight-color: transparent;
+}
+.clock-chip:hover { background: rgba(255,255,255,.07); }
+.clock-chip.off { color: rgba(255,255,255,.42); }
+.clock-chip.on {
+  background: var(--p1-dim);
+  border-color: rgba(255,45,120,.55);
+  box-shadow: 0 0 14px rgba(255,45,120,.14), inset 0 -2px 0 var(--p1);
+  color: #fff;
+}
+.clock-chip.off.on {
+  background: rgba(255,255,255,.08);
+  border-color: rgba(255,255,255,.3);
+  box-shadow: inset 0 -2px 0 rgba(255,255,255,.45);
+}
+.clock-hint { min-height: 1.4em; }
+
 /* ── Start button ───────────────────────────────────── */
 #btn-start {
   min-width: min(100%, 260px);
@@ -978,6 +1014,53 @@ kbd {
   36%  { transform: scale(1.2) rotate(6deg); }
   54%  { transform: scale(1.3) rotate(-4deg); }
   100% { transform: none; }
+}
+
+/* Game clock: with a clock each queen meter becomes a player plate — meter + time. Untimed, the
+   plates are layout-transparent and the meters sit exactly as before. */
+.plate { display: contents; }
+.clock[hidden] { display: none; }
+#queen-meters.timed { gap: 6px; }
+#queen-meters.timed .plate {
+  --pc: var(--p1);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 30px;
+  padding: 0 9px 0 2px;
+  border-radius: 15px;
+  border: 1px solid rgba(255,255,255,.09);
+  background: rgba(255,255,255,.025);
+  transition: border-color .25s, background .25s, box-shadow .25s;
+}
+#queen-meters.timed .plate.p2 { --pc: var(--p2); }
+#queen-meters.timed .qm { width: 26px; height: 26px; }
+.clock {
+  width: 5em;               /* Press Start 2P is monospaced: "05:00" and "09.4" share one box, nothing shifts */
+  font-size: 9px;
+  line-height: 1;
+  letter-spacing: 0;
+  text-align: center;
+  color: rgba(255,255,255,.42);
+  contain: layout paint;
+  transition: color .25s, text-shadow .25s;
+}
+#queen-meters.timed .plate.active {
+  border-color: color-mix(in srgb, var(--pc) 75%, transparent);
+  background: color-mix(in srgb, var(--pc) 13%, rgba(5,5,15,.6));
+  box-shadow: 0 0 12px color-mix(in srgb, var(--pc) 32%, transparent), inset 0 0 10px color-mix(in srgb, var(--pc) 12%, transparent);
+}
+.plate.active .clock { color: #fff; text-shadow: 0 0 6px var(--pc); }
+/* Local clock held (☰, How to Play, review, hidden page): the running side's time breathes */
+.plate.active.paused .clock { animation: clock-held 1.6s ease-in-out infinite; }
+/* Under 10 s: red, with a pulse once a second */
+#queen-meters.timed .plate.low { --pc: #ff3048; animation: clock-low 1s ease-out infinite; }
+.plate.low .clock { color: #ffd0d5; text-shadow: 0 0 8px #ff3048; }
+.plate.flagged .clock { color: #ff3048; text-shadow: 0 0 8px rgba(255,48,72,.7); }
+@keyframes clock-held { 50% { opacity: .35; } }
+@keyframes clock-low {
+  0%   { box-shadow: 0 0 18px rgba(255,48,72,.85), inset 0 0 12px rgba(255,48,72,.45); background: rgba(255,48,72,.32); }
+  100% { box-shadow: 0 0 8px rgba(255,48,72,.25), inset 0 0 6px rgba(255,48,72,.1); background: rgba(255,48,72,.1); }
 }
 
 /* The win sequence dims the board round the fallen queen(s) */
@@ -2008,6 +2091,11 @@ input:focus-visible {
   .qm { width: 24px; height: 24px; }
   #queen-meters { gap: 0; }
   #chip-sub { display: none; }
+  /* Timed: the two plates stack into a small scoreboard (P1 over P2) */
+  #queen-meters.timed { flex-direction: column; align-items: stretch; gap: 3px; }
+  #queen-meters.timed .plate { height: 21px; padding: 0 7px 0 1px; gap: 2px; border-radius: 11px; }
+  #queen-meters.timed .qm { width: 20px; height: 20px; }
+  .clock { font-size: 8px; }
   #status-text { font-size: 8px; letter-spacing: .6px; line-height: 1.6; }
   #hud-actions { gap: 4px; }
   .hud-btn { width: 38px; height: 38px; }
@@ -2079,6 +2167,11 @@ input:focus-visible {
   body.reviewing.sheet-open #toast, body.reviewing.sheet-open #toast.visible { transform: none; }
   #hud-center { align-items: stretch; }
   #status-text { line-height: 1.5; }
+  /* Timed: stacked like on portrait phones, so the status + description line keeps its width */
+  #queen-meters.timed { flex-direction: column; align-items: stretch; gap: 2px; }
+  #queen-meters.timed .plate { height: 19px; padding: 0 7px 0 1px; gap: 2px; border-radius: 10px; }
+  #queen-meters.timed .qm { width: 18px; height: 18px; }
+  .clock { font-size: 8px; }
   #piece-desc {
     position: static;
     padding: 0;
@@ -2142,4 +2235,6 @@ input:focus-visible {
     transition-duration: .01ms !important;
   }
   #crt { display: none; }
+  .plate.low, .plate.active.paused .clock { animation: none !important; }
+  #queen-meters.timed .plate.low { background: rgba(255,48,72,.22); }
 }
