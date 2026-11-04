@@ -99,6 +99,8 @@ Two stacked canvases share the same fixed inset:
 - `#board` — everything except piece glyphs (hexes, glows, ghosts, stars). `touch-action: none`
 - `#emoji-layer` — piece sprites (or opt-in PNG art), `pointer-events: none`. Completely isolated 2D context to prevent animated canvas state from bleeding into glyph rendering. (The id predates the sprites.)
 
+**Hive layer cache.** `draw()` does not repaint the hive every frame. Grid hints, tiles, stacks, the last-move marks and the static parts of ghosts go into an offscreen board layer. Glyphs and stack badges go into a separate offscreen glyph layer, so the glyph context stays isolated. The layers re-render only when `hiveLayerKey()` changes (pieces, ghosts, selection, throw pick, last move, hidden pieces), when scale or dpr changes, when a pan uncovers hive that was clipped out (`layerCovers()`), or after `invalidate()`. Each frame blits the board layer over the stars, then draws the animated overlays: loose pieces (the arrival pop and `floating`), the selection and throw-pick rings, ghost pulses and amber throw rings. The rings are pre-rendered glow sprites, so no frame uses `shadowBlur`. `#emoji-layer` is only rewritten when its layer moved or a loose piece is live. While a zoom settles, the stale layer is blitted scaled. Stack badges size from `badgeLayout(r)`: full chips and a ×N pill at r ≥ 22 screen px, a compact numeral disc below that, and nothing under 9 px.
+
 A third canvas `#confetti-layer` is `display:none` except during the win animation.
 
 ### Coordinate system
@@ -213,7 +215,11 @@ board.pieces        // Map<hexKey, Array<{player, type, emoji, image?}>> — ful
 board.ghosts        // Set<hexKey>  — green placement/move highlights
 board.throwTargets  // Set<hexKey>  — amber pillbug-throw highlights
 board.selectedHex   // string|null  — white pulsing selection ring
+board.throwPick     // string|null  — piece picked for a pillbug throw (lifted, bright ring)
 board.lastMove      // {from, to, player}|null — last-move marker
+board.hiddenTop     // Set<hexKey>  — top piece left out of the cached layer (e.g. while it flies)
+board.floating      // [{piece:{player,type}, x, y, lift?, scale?}] — pieces drawn live each frame (board space)
+board.invalidate(); // force the cached hive layer to re-render next frame
 
 // Input callbacks (set by app.js):
 board.onTap = (q, r, clientX, clientY) => {}  // clean single-pointer tap (never fired after a pinch)

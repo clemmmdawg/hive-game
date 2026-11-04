@@ -248,6 +248,7 @@ function resetBoardView() {
   board.pieces.clear();
   board.ghosts       = new Set();
   board.throwTargets = new Set();
+  board.throwPick    = null;
   board.selectedHex  = null;
   board.lastMove     = null;
 }
@@ -375,6 +376,7 @@ function syncBoardRenderer() {
 function updateGhosts() {
   board.ghosts       = new Set();
   board.throwTargets = new Set();
+  board.throwPick    = null;
   const { phase, trayPick, boardPick, throwPillbugHex } = uiState;
 
   if (phase === 'TRAY' && trayPick) {
@@ -394,8 +396,8 @@ function updateGhosts() {
       .filter(t => t.pillbugHex === throwPillbugHex && t.from === boardPick)
       .map(t => t.to);
     board.ghosts = new Set(dests);
-    // Keep the throw source highlighted in amber so the player sees what's being thrown
-    board.throwTargets.add(boardPick);
+    // The picked piece is lifted with a bright ring so it stands out from the thrower
+    board.throwPick = boardPick;
   }
 }
 
@@ -409,6 +411,7 @@ function clearSelection(sync = true) {
   board.selectedHex       = null;
   board.ghosts            = new Set();
   board.throwTargets      = new Set();
+  board.throwPick         = null;
   if (sync && gameState) syncUI();
 }
 

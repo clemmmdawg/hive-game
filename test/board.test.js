@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { Board, stackLayers } from '../js/board.js';
+import { Board, stackLayers, hiveLayerKey, hiveBounds, layerCovers, badgeLayout } from '../js/board.js';
 import { hexToPixel } from '../js/hex.js';
 
 // Just enough of a <canvas> for Board's constructor and input wiring.
@@ -103,5 +103,106 @@ test('stackLayers scales with the tile size', () => {
   for (let i = 0; i < 3; i++) {
     assert.equal(big[i].dy, small[i].dy * 2);
     assert.equal(big[i].scale, small[i].scale);
+  }
+});
+
+
+// ── Hive layer cache helpers ─────────────────────────────
+
+function layerInputs(over = {}) {
+  return {
+    pieces: new Map([['0,0', [{ player: 1, type: 'QUEEN' }]], ['1,0', [{ player: 2, type: 'ANT' }, { player: 1, type: 'BEETLE' }]]]),
+    ghosts: new Set(['2,0', '-1,0']),
+    throwTargets: new Set(),
+    selectedHex: null,
+    throwPick: null,
+    lastMove: { from: '2,-1', to: '1,0', player: 1 },
+    hiddenTop: new Set(),
+    hiddenStacks: new Set(),
+    ...over,
+  };
+}
+
+test('hiveLayerKey: equal content in fresh Map/Set instances gives the same key', () => {
+  assert.equal(hiveLayerKey(layerInputs()), hiveLayerKey(layerInputs()));
+});
+
+test('hiveLayerKey: changes whenever something the layer draws changes', () => {
+  const base = hiveLayerKey(layerInputs());
+  const variants = {
+    'piece added':      layerInputs({ pieces: new Map([...layerInputs().pieces, ['0,1', [{ player: 2, type: 'SPIDER' }]]]) }),
+    'stack grew':       layerInputs({ pieces: new Map([['0,0', [{ player: 1, type: 'QUEEN' }, { player: 2, type: 'BEETLE' }]], ['1,0', layerInputs().pieces.get('1,0')]]) }),
+    'owner changed':    layerInputs({ pieces: new Map([['0,0', [{ player: 2, type: 'QUEEN' }]], ['1,0', layerInputs().pieces.get('1,0')]]) }),
+    'ghosts':           layerInputs({ ghosts: new Set(['2,0']) }),
+    'selection':        layerInputs({ selectedHex: '0,0' }),
+    'throw pick':       layerInputs({ throwPick: '0,0' }),
+    'last move':        layerInputs({ lastMove: { from: null, to: '1,0', player: 1 } }),
+    'no last move':     layerInputs({ lastMove: null }),
+    'hidden top':       layerInputs({ hiddenTop: new Set(['1,0']) }),
+    'hidden stack':     layerInputs({ hiddenStacks: new Set(['0,0']) }),
+    'png art loaded':   layerInputs({ pieces: new Map([['0,0', [{ player: 1, type: 'QUEEN', image: {} }]], ['1,0', layerInputs().pieces.get('1,0')]]) }),
+  };
+  for (const [what, inputs] of Object.entries(variants)) assert.notEqual(hiveLayerKey(inputs), base, what);
+});
+
+test('hiveLayerKey: sees pieces mutated in place (app.js clears and refills the same Map)', () => {
+  const inputs = layerInputs();
+  const before = hiveLayerKey(inputs);
+  inputs.pieces.get('0,0').push({ player: 2, type: 'BEETLE' });
+  assert.notEqual(hiveLayerKey(inputs), before);
+});
+
+test('hiveLayerKey: throw targets alone do not dirty the layer (they are drawn live)', () => {
+  assert.equal(hiveLayerKey(layerInputs({ throwTargets: new Set(['0,0']) })), hiveLayerKey(layerInputs()));
+});
+
+test('hiveBounds: null when empty, padded box around every hex otherwise', () => {
+  assert.equal(hiveBounds([], 50, 10), null);
+  const b = hiveBounds(['0,0', '2,0'], 50, 10);
+  const far = hexToPixel(2, 0, 50);
+  assert.equal(b.x0, -10);
+  assert.equal(b.y0, -10);
+  assert.equal(b.x1, far.x + 10);
+  assert.equal(b.y1, far.y + 10);
+});
+
+test('layerCovers: the visible part of the hive must lie inside the cached layer', () => {
+  const layer   = { x0: 0, y0: 0, x1: 100, y1: 100 };
+  const content = { x0: 10, y0: 10, x1: 300, y1: 90 };
+  assert.equal(layerCovers(layer, { x0: 0, y0: 0, x1: 100, y1: 100 }, content), true);
+  assert.equal(layerCovers(layer, { x0: 50, y0: 0, x1: 150, y1: 100 }, content), false, 'panned onto uncached hive');
+  assert.equal(layerCovers(layer, { x0: 500, y0: 0, x1: 600, y1: 100 }, content), true, 'hive entirely off-screen');
+  assert.equal(layerCovers(layer, { x0: 0, y0: 0, x1: 100, y1: 100 }, null), true, 'empty board');
+});
+
+test('badgeLayout: full badges scale with the tile; small tiles get a compact cue', () => {
+  const big = badgeLayout(40), bigger = badgeLayout(80);
+  assert.equal(big.mode, 'full');
+  assert.equal(bigger.chipR, big.chipR * 2);
+  assert.equal(badgeLayout(21).mode, 'compact');
+  assert.equal(badgeLayout(14).mode, 'compact');
+  assert.equal(badgeLayout(6).mode, 'none');
+});
+
+test('badgeLayout: badges never reach past the tile onto neighbours', () => {
+  for (const r of [10, 14, 18, 21, 22, 28, 40, 80]) {
+    const b = badgeLayout(r);
+    assert.ok(b.chipDist + b.chipR <= r * 0.95, `chips inside the tile at r=${r}`);
+  }
+});
+
+test('badgeLayout: the compact cue covers at most ~15% of the top glyph', () => {
+  for (const r of [10, 14, 18, 21]) {
+    const b = badgeLayout(r);
+    // Monte Carlo the overlap of the cue disc with the glyph's art box (78% of GLYPH_BOX·r).
+    const half = r * 1.34 * 0.78 / 2;
+    const cx = b.chipDist * Math.cos(b.angle), cy = b.chipDist * Math.sin(b.angle);
+    let inBox = 0, covered = 0;
+    for (let i = 0; i < 200; i++) for (let j = 0; j < 200; j++) {
+      const x = -half + (2 * half) * (i + 0.5) / 200, y = -half + (2 * half) * (j + 0.5) / 200;
+      inBox++;
+      if (Math.hypot(x - cx, y - cy) <= b.chipR) covered++;
+    }
+    assert.ok(covered / inBox <= 0.15, `r=${r}: covers ${(100 * covered / inBox).toFixed(1)}%`);
   }
 });
