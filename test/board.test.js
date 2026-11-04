@@ -484,3 +484,63 @@ test('finishAnimations({clearFx}) drops a running shockwave', () => {
   board.finishAnimations({ clearFx: true });
   assert.equal(board._shockwaves.length, 0);
 });
+
+// ── Airborne pieces occlude the hive ─────────────────────────────────────────
+
+/** A context that logs fills/strokes/drawImage with the composite op in force. */
+function recordingCanvas(log) {
+  const c = fakeCanvas();
+  const stub = new Proxy(function () {}, { get: () => stub, apply: () => stub });
+  const state = { globalCompositeOperation: 'source-over', globalAlpha: 1 };
+  const saved = [];
+  const ctx = new Proxy(state, {
+    get: (t, key) => {
+      if (key === 'save') return () => saved.push({ ...t });
+      if (key === 'restore') return () => Object.assign(t, saved.pop());
+      if (key in t) return t[key];
+      if (['fill', 'stroke', 'drawImage', 'clearRect', 'fillText'].includes(key)) return () => log.push({ op: key, gco: t.globalCompositeOperation });
+      return () => stub;
+    },
+    set: (t, key, v) => { t[key] = v; return true; },
+  });
+  c.getContext = () => ctx;
+  return c;
+}
+
+test('a piece in the air erases the glyphs beneath it before its own glyph is drawn', async () => {
+  const log = [];
+  const board = new Board(fakeCanvas(), recordingCanvas(log));
+  board._makeCanvas = fakeCanvas;
+  board.reducedMotion = false;
+  board.resize(400, 800);
+  board.pieces.set('0,0', [{ player: 2, type: 'BEETLE' }]);
+  board.pieces.set('1,0', [{ player: 2, type: 'QUEEN' }]);
+  board.pieces.set('2,0', [{ player: 1, type: 'GRASSHOPPER' }]);
+  const p = board.animateMove({ path: ['-1,0', '2,0'], kind: 'hop', toKey: '2,0' });
+  board.draw(1000);
+  log.length = 0;
+  board.draw(1150); // mid-hop, over the hive
+  const cut = log.findIndex(e => e.op === 'fill' && e.gco === 'destination-out');
+  assert.ok(cut >= 0, 'the floating tile is cut out of #emoji-layer');
+  const glyphAfter = log.slice(cut + 1).some(e => e.gco === 'source-over' && ['fill', 'stroke', 'drawImage', 'fillText'].includes(e.op));
+  assert.ok(glyphAfter, 'its own glyph is drawn after the cut');
+  board.finishAnimations();
+  await p;
+});
+
+test('queen pips and selection rings are painted under a floating piece, not over it', async () => {
+  const board = boardWithMove();
+  const order = [];
+  for (const m of ['_drawQueenPips', '_drawSelectionRing', '_drawThrowPick', '_drawGhostPulses', '_drawFloating']) {
+    const orig = board[m].bind(board);
+    board[m] = (...a) => { order.push(m); return orig(...a); };
+  }
+  const p = board.animateMove({ path: ['-1,0', '2,0'], kind: 'hop', toKey: '2,0' });
+  board.draw(1000); board.draw(1100);
+  const fl = order.lastIndexOf('_drawFloating');
+  for (const m of ['_drawQueenPips', '_drawSelectionRing', '_drawThrowPick', '_drawGhostPulses']) {
+    assert.ok(order.lastIndexOf(m) < fl, `${m} before the floating piece`);
+  }
+  board.finishAnimations();
+  await p;
+});

@@ -927,14 +927,13 @@ export class Board {
     const S = dpr * this.scale;
     ctx.setTransform(S, 0, 0, S, this.tx * dpr, this.ty * dpr);
     const faces = new Map(layer.faces);
-    for (const lp of loose) {
-      if (lp.stack) this._drawStack(ctx, lp.key, lp.stack, lp.x, lp.y, lp.pop, faces);
-      else          this._drawFloating(ctx, lp, faces);
-    }
+    for (const lp of loose) if (lp.stack) this._drawStack(ctx, lp.key, lp.stack, lp.x, lp.y, lp.pop, faces);
+    // Marks on the hive go under anything in the air, so a flying piece covers them.
     this._drawQueenPips(ctx, t, faces);
     this._drawSelectionRing(ctx, t);
     this._drawThrowPick(ctx, t, faces);
     this._drawGhostPulses(ctx, t, faces);
+    for (const lp of loose) if (!lp.stack) this._drawFloating(ctx, lp, faces);
     this._drawFx(ctx, t);
     this._drawShockwaves(ctx, t);
 
@@ -1140,7 +1139,35 @@ export class Board {
       const x = Math.floor(cx - half), y = Math.floor(cy - half);
       this._liveRects.push({ x, y, w: Math.ceil(cx + half) - x, h: Math.ceil(cy + half) - y });
     }
-    this._drawGlyphs(ec, liveFaces);
+    // Settled pieces first; then each floating piece cuts its tile out of the
+    // glyphs beneath it (they sit on this canvas, above its tile on #board)
+    // before drawing its own glyph — so nothing below shows through it.
+    const settled = new Map(), airborne = [];
+    for (const [id, face] of liveFaces) {
+      if (face.sx !== undefined) airborne.push([id, face]);
+      else settled.set(id, face);
+    }
+    this._drawGlyphs(ec, settled);
+    for (const [id, face] of airborne) {
+      this._eraseTile(ec, face);
+      this._drawGlyphs(ec, new Map([[id, face]]));
+    }
+  }
+
+  /** Clear a floating tile's footprint (face and lip, squashed and faded like it) on a screen-px glyph context. */
+  _eraseTile(ec, face) {
+    const s = this.scale;
+    const r = face.r * s;
+    ec.save();
+    ec.translate(this.tx + face.x * s, this.ty + face.y * s);
+    ec.scale(face.sx ?? 1, face.sy ?? 1);
+    ec.globalAlpha = face.alpha ?? 1;
+    ec.globalCompositeOperation = 'destination-out';
+    this._hexPath(ec, 0, 0, r);
+    ec.fill();
+    this._hexPath(ec, 0, r * LIP, r);
+    ec.fill();
+    ec.restore();
   }
 
   // ── Private render helpers ─────────────────────────────
