@@ -215,6 +215,13 @@ export const SPRITES = {
     dot: [circle(46, 26.5, 2), circle(50.5, 31, 2), circle(46, 35.5, 2), circle(41.5, 31, 2)],
   },
 
+  // Result card emblem for a game lost on time
+  STOPWATCH: {
+    body: [circle(32, 37, 19)],                               // case
+    line: ['M27 10L37 10', 'M32 10L32 18', 'M45.5 21.5L49.5 17.5', 'M32 37L32 25', 'M32 37L40.5 42'], // crown, stem, side button, hands
+    dot: [circle(32, 37, 2.4)],
+  },
+
   // Tournament-rule toggle
   CROWN: {
     body: ['M10 46L13 20L24 33L32 13L40 33L51 20L54 46Z'],

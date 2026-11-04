@@ -37,7 +37,7 @@ test('drawSprite reports false when Path2D is unavailable so callers can fall ba
 });
 
 test('menu icons follow the same three-layer recipe as the pieces', () => {
-  for (const type of ['CROWN', 'HOUSE', 'SIGNAL', 'GAMEPAD']) {
+  for (const type of ['CROWN', 'HOUSE', 'SIGNAL', 'GAMEPAD', 'STOPWATCH']) {
     const sprite = SPRITES[type];
     assert.ok(sprite, `${type} exists`);
     assert.ok(sprite.body.length > 0, `${type} has body shapes`);
@@ -96,7 +96,7 @@ test('spriteSVG paints pieces in their species colour', () => {
 test('spriteSVG leaves colour to CSS for mono sprites and menu icons', () => {
   assert.doesNotMatch(spriteSVG(PieceType.QUEEN, 'mono'), /style=/);
   assert.match(spriteSVG(PieceType.QUEEN, 'mono'), /^<svg class="sprite mono"/);
-  for (const icon of ['CROWN', 'HOUSE', 'SIGNAL', 'GAMEPAD']) assert.doesNotMatch(spriteSVG(icon), /style=/, icon);
+  for (const icon of ['CROWN', 'HOUSE', 'SIGNAL', 'GAMEPAD', 'STOPWATCH']) assert.doesNotMatch(spriteSVG(icon), /style=/, icon);
 });
 
 test('bodyFill mixes 40% of the ink over the dark page, like the CSS body fill', () => {

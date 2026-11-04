@@ -4,7 +4,7 @@
  * the new worker installs beside the old one, the page offers a RELOAD toast, and the
  * old cache is deleted once the new worker takes over. Online play needs the network;
  * the WebSocket never passes through here. */
-const CACHE = 'hive-v3';
+const CACHE = 'hive-v16';
 
 const PRECACHE = [
   '/',
@@ -14,6 +14,7 @@ const PRECACHE = [
   '/js/app.js',
   '/js/audio.js',
   '/js/board.js',
+  '/js/clock.js',
   '/js/game.js',
   '/js/hex.js',
   '/js/hints.js',
@@ -22,7 +23,9 @@ const PRECACHE = [
   '/js/net.js',
   '/js/notation.js',
   '/js/replay.js',
+  '/js/review.js',
   '/js/sprites.js',
+  '/js/win-fx.js',
   '/assets/icons/icon.svg',
   '/assets/icons/icon-192.png',
   '/assets/icons/icon-512.png',

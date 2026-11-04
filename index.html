@@ -41,6 +41,11 @@
         <p id="menu-subtitle">SURROUND THE QUEEN. RULE THE HIVE.</p>
       </div>
 
+      <div id="menu-update" role="status" hidden>
+        <span>NEW VERSION READY</span>
+        <button id="btn-menu-reload" class="toast-action" type="button">RELOAD</button>
+      </div>
+
       <section id="menu-card" aria-label="Game setup">
         <button id="btn-continue" class="continue-card" type="button" hidden>
           <span class="continue-icon" aria-hidden="true">▶</span>
@@ -159,14 +164,21 @@
       </span>
     </div>
     <div id="queen-meters">
-      <span class="qm p1" id="qm-1" role="img" aria-label="Player 1 queen not placed"></span>
-      <span class="qm p2" id="qm-2" role="img" aria-label="Player 2 queen not placed"></span>
+      <div class="plate p1" id="plate-1">
+        <span class="qm p1" id="qm-1" role="img" aria-label="Player 1 queen not placed"></span>
+        <span class="clock" id="clock-1" role="timer" hidden></span>
+      </div>
+      <div class="plate p2" id="plate-2">
+        <span class="qm p2" id="qm-2" role="img" aria-label="Player 2 queen not placed"></span>
+        <span class="clock" id="clock-2" role="timer" hidden></span>
+      </div>
     </div>
     <div id="hud-center">
       <div id="status-text" aria-live="polite">SELECT A PIECE</div>
       <div id="piece-desc" aria-live="polite"></div>
     </div>
     <div id="hud-actions">
+      <span id="spectator-count" class="spectator-count" role="status" hidden><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg><span id="spectator-n">0</span></span>
       <button class="hud-btn hud-action hidden" id="btn-pass" type="button">PASS</button>
       <button class="hud-btn hidden" id="btn-undo" type="button" aria-label="Undo last move" title="Undo (Z)"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 7H4V2"/><path d="M4.5 7A8 8 0 1 1 5 16"/></svg></button>
       <button class="hud-btn hidden" id="btn-cancel" type="button" aria-label="Cancel selection" title="Cancel (Esc)"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
@@ -194,6 +206,7 @@
   <canvas id="emoji-layer" aria-hidden="true"></canvas>
   <div id="board-dim" aria-hidden="true"></div>
   <div id="board-hint" aria-hidden="true">DRAG TO PAN · PINCH OR SCROLL TO ZOOM</div>
+  <div id="edge-hints" role="group" aria-label="Targets off screen"></div>
 
   <div id="turn-banner" aria-hidden="true">
     <span class="banner-hex" id="banner-emoji"></span>
@@ -208,6 +221,10 @@
     <div id="reserve-row" aria-label="Opponent's remaining pieces">
       <span id="reserve-label"></span>
       <span id="reserve-pieces"></span>
+    </div>
+    <div id="reserve-row-b" aria-label="Player 2's remaining pieces">
+      <span id="reserve-label-b"></span>
+      <span id="reserve-pieces-b"></span>
     </div>
     <div id="tray-pieces" role="toolbar" aria-label="Your pieces"></div>
   </footer>

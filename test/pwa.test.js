@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { resolveStaticPath } from '../server/static.js';
-import { readSw, precacheHash } from '../scripts/sw-hash.mjs';
+import { readSw, precacheHash, isMainModule } from '../scripts/sw-hash.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = rel => readFile(path.join(ROOT, rel), 'utf8');
@@ -133,4 +133,42 @@ test('precached files only change together with a CACHE bump (sw-manifest.json)'
     'A precached file changed: bump CACHE in sw.js, then run `npm run sw:stamp` to record the new hash.',
   );
   assert.equal(rec.cache, cache, 'sw.js CACHE differs from sw-manifest.json: run `npm run sw:stamp`.');
+});
+
+test('sw-hash: CRLF and LF checkouts of a text file hash the same; binary bytes are hashed as-is', async () => {
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const hashOf = async (js, png) => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'hive-sw-'));
+    try {
+      await writeFile(path.join(dir, 'a.js'), js);
+      await writeFile(path.join(dir, 'b.png'), png);
+      return await precacheHash(['/a.js', '/b.png'], dir);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  };
+  const png = Buffer.from([0x89, 0x50, 0x0d, 0x0a, 0x1a]);
+  assert.equal(await hashOf('a\r\nb\r\n', png), await hashOf('a\nb\n', png));
+  assert.notEqual(await hashOf('a\nb\n', png), await hashOf('a\nc\n', png));
+  assert.notEqual(await hashOf('a\n', png), await hashOf('a\n', Buffer.from([0x89, 0x50, 0x0a, 0x1a])), 'binary CRLF kept');
+});
+
+test('sw-hash: runs as a script through a symlinked path (realpath-safe main-module check)', async () => {
+  const { mkdtemp, symlink, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { pathToFileURL } = await import('node:url');
+  const real = path.join(ROOT, 'scripts/sw-hash.mjs');
+  const dir = await mkdtemp(path.join(tmpdir(), 'hive-swlink-'));
+  try {
+    const link = path.join(dir, 'checkout');
+    await symlink(ROOT, link);
+    const url = pathToFileURL(real).href;
+    assert.equal(isMainModule(url, real), true);
+    assert.equal(isMainModule(url, path.join(link, 'scripts/sw-hash.mjs')), true, 'through the symlink');
+    assert.equal(isMainModule(url, path.join(ROOT, 'test/pwa.test.js')), false);
+    assert.equal(isMainModule(url, undefined), false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

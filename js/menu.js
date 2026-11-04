@@ -4,6 +4,7 @@
 
 import * as net from './net.js';
 import { spriteSVG } from './sprites.js';
+import { CLOCK_PRESETS, presetSettings, presetIdOf, normalizeClockSettings } from './clock.js';
 
 // ── Default settings ────────────────────────────────────
 
@@ -16,6 +17,7 @@ const DEFAULT_SETTINGS = {
 
 const SETTINGS_KEY = 'hiveSettings';
 const SESSION_KEY  = 'hiveSession';
+const WATCH_KEY    = 'hiveWatch'; // sessionStorage: the room a spectator is watching (survives a reload of the tab)
 const CODE_CHARS   = /[^BCDFGHJKLMNPQRSTVWXYZ2-9]/g;
 
 let _settings      = deepClone(DEFAULT_SETTINGS);
@@ -24,7 +26,8 @@ let _joinCode      = '';
 
 // Room state (for HOST/JOIN flow)
 let _roomCode      = null; // code we're hosting/joining
-let _myPlayer      = null; // 1 or 2
+let _myPlayer      = null; // 1 or 2 (null while spectating)
+let _spectating    = false; // joined a full room: re-JOIN by code (no token) after a drop
 let _playerToken   = null;
 let _onlinePending = false; // true from CREATE/JOIN until the game starts or is cancelled
 let _rulesPreviousFocus = null;
@@ -32,6 +35,14 @@ let _inertedForRules = [];
 
 function deepClone(obj) { return JSON.parse(JSON.stringify(obj)); }
 const $ = id => document.getElementById(id);
+
+/** The room being watched, kept for this tab only: a reload re-joins it as a spectator. */
+function watchSet(code) {
+  try { if (code) sessionStorage.setItem(WATCH_KEY, code); else sessionStorage.removeItem(WATCH_KEY); } catch { /* blocked storage */ }
+}
+function watchGet() {
+  try { return String(sessionStorage.getItem(WATCH_KEY) ?? '').toUpperCase().replace(CODE_CHARS, '').slice(0, 4); } catch { return ''; }
+}
 
 function storageGet(key) {
   try { return localStorage.getItem(key); } catch { return null; }
@@ -66,6 +77,7 @@ export function showMenu({ notice } = {}) {
   _roomCode    = null;
   _myPlayer    = null;
   _playerToken = null;
+  _spectating  = false;
   _onlinePending = false;
   _resetOnlinePanel();
   if (notice) _showError(notice);
@@ -90,6 +102,8 @@ export function leaveOnlineSession({ keepSaved = false } = {}) {
   _roomCode = null;
   _myPlayer = null;
   _playerToken = null;
+  _spectating = false;
+  watchSet(null); // leaving, a closed room or a fatal error: do not re-join on the next load
   _onlinePending = false;
   if (!keepSaved) storageSet(SESSION_KEY, null);
 }
@@ -234,6 +248,7 @@ function _handleRulesKeydown(event) {
 
 function _handleStart() {
   _clearError();
+  watchSet(null); // starting anything else ends a remembered watch
   const mode = _settings.mode;
   if (mode === 'LOCAL') {
     hideMenu();
@@ -294,7 +309,9 @@ function _startJoinFlow() {
 
   net.on('_connected', () => {
     if (_playerToken) net.send('RESUME_ROOM', { code: _roomCode, token: _playerToken });
-    else net.send('JOIN_ROOM', { code: _roomCode });
+    // A spectator has no seat to reclaim: it re-joins by code, and `spectate` keeps a seat that
+    // happens to be free from ever being handed to it.
+    else net.send('JOIN_ROOM', _spectating ? { code: _roomCode, spectate: true } : { code: _roomCode });
   });
 
   _attachOnlineGameHandlers();
@@ -310,12 +327,23 @@ function _attachOnlineGameHandlers() {
     _saveSession();
   });
 
-  net.on('GAME_START', ({ gameState, settings, history }) => {
+  net.on('GAME_START', ({ gameState, settings, history, clock, serverNow }) => {
     _onlinePending = false;
     // Wire up in-game net handlers before handing off
     _callbacks.onNetReady();
     hideMenu();
-    _callbacks.onOnlineStart(settings, _myPlayer, gameState, null, history ?? []);
+    _callbacks.onOnlineStart(settings, _myPlayer, gameState, null, history ?? [], { clock, serverNow });
+  });
+
+  // The room was full (or its game under way): this connection watches. No token, nothing saved.
+  net.on('SPECTATING', ({ gameState, settings, endReason, history, clock, serverNow, away }) => {
+    _spectating = true;
+    _myPlayer = null;
+    watchSet(_roomCode);
+    _onlinePending = false;
+    _callbacks.onNetReady();
+    hideMenu();
+    _callbacks.onOnlineStart(settings, null, gameState, endReason ?? null, history ?? [], { clock, serverNow, away });
   });
 
   net.on('_disconnected', () => {
@@ -327,7 +355,7 @@ function _attachOnlineGameHandlers() {
 
   net.on('WAITING_FOR_OPPONENT', ({ code }) => _showRoom(code));
 
-  net.on('ROOM_RESUMED', ({ player, token, gameState, settings, endReason, history }) => {
+  net.on('ROOM_RESUMED', ({ player, token, gameState, settings, endReason, history, clock, serverNow }) => {
     _myPlayer = player;
     _playerToken = token;
     _saveSession();
@@ -335,7 +363,7 @@ function _attachOnlineGameHandlers() {
       _onlinePending = false;
       _callbacks.onNetReady();
       hideMenu();
-      _callbacks.onOnlineStart(settings, player, gameState, endReason ?? null, history ?? []);
+      _callbacks.onOnlineStart(settings, player, gameState, endReason ?? null, history ?? [], { clock, serverNow });
     } else {
       _showRoom(_roomCode);
     }
@@ -480,6 +508,7 @@ function _loadSavedSettings() {
         pillbug:  !!saved.expansions?.pillbug,
       },
       tournamentRule: !!saved.tournamentRule,
+      clock: normalizeClockSettings(saved.clock),
     };
   } catch {
     return {};
@@ -490,6 +519,7 @@ function _persistSettings() {
   storageSet(SETTINGS_KEY, JSON.stringify({
     expansions: _settings.expansions,
     tournamentRule: _settings.tournamentRule,
+    clock: _settings.clock,
   }));
 }
 
@@ -498,10 +528,23 @@ function _saveSession() {
   storageSet(SESSION_KEY, JSON.stringify({ code: _roomCode, token: _playerToken, player: _myPlayer }));
 }
 
+/** A reloaded spectator tab: re-join the room it was watching (no seat, no token). */
+function _tryRejoinWatch() {
+  const code = watchGet();
+  if (code.length !== 4 || _joinCode) return; // an invite link in the URL wins
+  if (_offline()) return;
+  _roomCode = code;
+  _spectating = true;
+  _beginOnline('REJOINING…');
+  _attachOnlineGameHandlers();
+  net.on('_connected', () => net.send('JOIN_ROOM', { code: _roomCode, spectate: true }));
+  net.connect();
+}
+
 function _tryResumeSavedSession() {
   let saved;
-  try { saved = JSON.parse(storageGet(SESSION_KEY)); } catch { return; }
-  if (!saved?.code || !saved?.token) return;
+  try { saved = JSON.parse(storageGet(SESSION_KEY)); } catch { saved = null; }
+  if (!saved?.code || !saved?.token) { _tryRejoinWatch(); return; }
   if (_offline()) return; // keep the saved seat for when the network is back
 
   _roomCode = String(saved.code).toUpperCase().replace(CODE_CHARS, '').slice(0, 4);
@@ -530,7 +573,7 @@ function _applyRoomLink() {
 function _friendlyError(reason) {
   const messages = {
     ROOM_NOT_FOUND:       'Room not found. Check the code and try again.',
-    ROOM_FULL:            'That room already has two players.',
+    ROOM_FULL:            'That room is full — 16 spectators are already watching.',
     INVALID_RESUME_TOKEN: 'Your saved seat is no longer valid.',
     ALREADY_IN_ROOM:      'You are already in a room — leave it first.',
     NO_ACTIVE_GAME:       'That game is no longer active.',
@@ -551,7 +594,7 @@ function _buildSettingsHTML() {
                type="text" maxlength="4" placeholder="ABCD" inputmode="text"
                autocomplete="off" autocapitalize="characters" spellcheck="false"
                enterkeyhint="go" value="${_joinCode}">
-        <p class="settings-hint">Ask the host for their 4-character code. The host picks the rules.</p>
+        <p class="settings-hint">Ask the host for their 4-character code. The host picks the rules. A game already under way? You'll watch it.</p>
       </div>`;
   }
 
@@ -569,7 +612,29 @@ function _buildSettingsHTML() {
       <div class="settings-row">
         ${_toggle('tournament', 'CROWN', 'TOURNAMENT OPENING', s.tournamentRule)}
       </div>
+    </div>
+    <div class="settings-group">
+      <div class="settings-label" id="clock-label">CLOCK</div>
+      <div class="clock-row" role="radiogroup" aria-labelledby="clock-label" aria-describedby="clock-hint">
+        ${CLOCK_PRESETS.map(p => _clockChip(p, presetIdOf(s.clock) === p.id)).join('')}
+      </div>
+      <p class="settings-hint clock-hint" id="clock-hint">${_clockHint(s.clock)}</p>
     </div>`;
+}
+
+/** One clock preset chip (a radio in the CLOCK group). */
+function _clockChip(preset, checked) {
+  const off = preset.id === 'OFF';
+  const aria = off ? 'No clock' : `${preset.time / 60_000} minutes plus ${preset.increment / 1000} seconds per move`;
+  return `
+    <button class="clock-chip${checked ? ' on' : ''}${off ? ' off' : ''}" data-clock="${preset.id}" type="button"
+            role="radio" aria-checked="${checked}" aria-label="${aria}" tabindex="${checked ? 0 : -1}">${preset.label}</button>`;
+}
+
+function _clockHint(clock) {
+  if (!clock?.enabled) return 'Untimed. Pick minutes + seconds added per move.';
+  const min = clock.time / 60_000, inc = clock.increment / 1000;
+  return `${min} minutes each${inc ? `, +${inc} s after every move` : ', no increment'}. Run out and you lose.`;
 }
 
 function _buildGameSettings() {
@@ -606,6 +671,30 @@ function _bindSettingsEvents() {
       btn.setAttribute('aria-pressed', val);
       btn.querySelector('.toggle-pill').textContent = val ? 'ON' : 'OFF';
       _persistSettings();
+    });
+  });
+
+  const chips = [...document.querySelectorAll('.clock-chip')];
+  const pick = chip => {
+    _settings.clock = presetSettings(chip.dataset.clock);
+    for (const c of chips) {
+      const on = c === chip;
+      c.classList.toggle('on', on);
+      c.setAttribute('aria-checked', String(on));
+      c.tabIndex = on ? 0 : -1;
+    }
+    $('clock-hint').textContent = _clockHint(_settings.clock);
+    _persistSettings();
+  };
+  chips.forEach((chip, i) => {
+    chip.addEventListener('click', () => pick(chip));
+    chip.addEventListener('keydown', event => { // radio-group arrows
+      const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
+      if (!step) return;
+      event.preventDefault();
+      const next = chips[(i + step + chips.length) % chips.length];
+      pick(next);
+      next.focus();
     });
   });
 

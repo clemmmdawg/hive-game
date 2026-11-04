@@ -119,6 +119,69 @@ export function badgeLayout(r) {
   };
 }
 
+export const OFFSCREEN_INSET = 26; // off-screen chevron centre: px inside the playable rect's edge
+const OFFSCREEN_GAP    = 96;      // targets further apart than this along one edge get their own chevron…
+const OFFSCREEN_SPAN   = 0.3;     // …and never closer than this fraction of the edge (≤ ~3 chevrons per edge)
+const OFFSCREEN_CORNER = 56;      // chevrons keep this far from the rect's corners (and from each other there)
+const OFFSCREEN_SLACK  = 0.4;     // a target whose centre is within this × tile radius of the rect still shows enough to tap
+
+/**
+ * Edge chevrons for legal targets outside the playable area. `points` are screen
+ * positions ({key, x, y, kind: 'ghost'|'throw'}); `rect` is the playable area
+ * between the insets. Each off-screen point is assigned to the edge a ray from
+ * the rect's centre crosses first, placed level with it along that edge (clamped
+ * clear of the corners), and points close together on one edge share a chevron.
+ * Points within `slack` px outside the rect count as on screen (part of the hex shows).
+ * `cornerBR` (default `corner`) widens the bottom-right keep-out (the floating recenter button).
+ * @returns {{edge:'top'|'right'|'bottom'|'left', x:number, y:number, angle:number,
+ *            count:number, keys:string[], kind:'ghost'|'throw'}[]} angle: radians toward the targets
+ */
+export function offscreenTargets(points, rect, { inset = OFFSCREEN_INSET, gap = OFFSCREEN_GAP, corner = OFFSCREEN_CORNER, slack = 0, cornerBR = corner } = {}) {
+  const ix0 = rect.x0 + inset, ix1 = rect.x1 - inset, iy0 = rect.y0 + inset, iy1 = rect.y1 - inset;
+  const cx = (rect.x0 + rect.x1) / 2, cy = (rect.y0 + rect.y1) / 2;
+  const edge = Math.max(corner, inset);
+  const edgeBR = Math.max(cornerBR, inset);
+  const clamp = (v, lo, hi) => (lo > hi ? (lo + hi) / 2 : Math.min(hi, Math.max(lo, v)));
+  const groups = { top: [], right: [], bottom: [], left: [] };
+  for (const p of points) {
+    if (p.x >= rect.x0 - slack && p.x <= rect.x1 + slack && p.y >= rect.y0 - slack && p.y <= rect.y1 + slack) continue;
+    const dx = p.x - cx, dy = p.y - cy;
+    const tx = dx > 0 ? (ix1 - cx) / dx : dx < 0 ? (ix0 - cx) / dx : Infinity;
+    const ty = dy > 0 ? (iy1 - cy) / dy : dy < 0 ? (iy0 - cy) / dy : Infinity;
+    const side = tx < ty ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'bottom' : 'top');
+    const along = side === 'top' || side === 'bottom'
+      ? clamp(p.x, rect.x0 + edge, rect.x1 - (side === 'bottom' ? edgeBR : edge))
+      : clamp(p.y, rect.y0 + edge, rect.y1 - (side === 'right' ? edgeBR : edge));
+    groups[side].push({ p, along });
+  }
+  const out = [];
+  for (const [side, members] of Object.entries(groups)) {
+    members.sort((a, b) => a.along - b.along);
+    const span = side === 'top' || side === 'bottom' ? rect.x1 - rect.x0 : rect.y1 - rect.y0;
+    const split = Math.max(gap, span * OFFSCREEN_SPAN);
+    let run = [];
+    const flush = () => {
+      if (!run.length) return;
+      const along = run.reduce((a, m) => a + m.along, 0) / run.length;
+      const x = side === 'left' ? ix0 : side === 'right' ? ix1 : along;
+      const y = side === 'top' ? iy0 : side === 'bottom' ? iy1 : along;
+      const tx = run.reduce((a, m) => a + m.p.x, 0) / run.length;
+      const ty = run.reduce((a, m) => a + m.p.y, 0) / run.length;
+      out.push({
+        edge: side, x, y, angle: Math.atan2(ty - y, tx - x), count: run.length,
+        keys: run.map(m => m.p.key), kind: run.every(m => m.p.kind === 'throw') ? 'throw' : 'ghost',
+      });
+      run = [];
+    };
+    for (const m of members) {
+      if (run.length && m.along - run.at(-1).along > split) flush();
+      run.push(m);
+    }
+    flush();
+  }
+  return out;
+}
+
 /** Glow rings blitted every frame from pre-rendered sprites (no per-frame shadowBlur). R in board units. */
 const RINGS = {
   ghost:    { R: 48, lw: 1.5, color: GHOST, blur: 16 },
@@ -306,6 +369,9 @@ export class Board {
     this.dpr = 1;
     /** Screen space covered by the HUD (top) and tray (bottom); recenter avoids it. */
     this.insets = { top: 0, bottom: 0 };
+    /** Insets for the off-screen chevrons when more chrome covers the board: { top, bottom, cornerBR? }
+     *  (the piece bar under the HUD; the recenter button's bottom-right keep-out); null = insets. */
+    this.overlayInsets = null;
 
     // Viewport transform: board-space → screen-space (CSS px)
     this.tx    = 0;
@@ -383,6 +449,11 @@ export class Board {
     this.onViewChange = null;
     /** Fired at touchdown of an animateMove flight: (kind, player) => void. */
     this.onLand = null;
+    /** Fired when the off-screen target chevrons change: (offscreenTargets() list) => void. See _updateIndicators. */
+    this.onIndicators = null;
+    /** Current off-screen target chevrons (screen px), as last passed to onIndicators. */
+    this.indicators = [];
+    this._indicatorSig = '';
 
     this._bindEvents();
   }
@@ -467,6 +538,15 @@ export class Board {
       this._camera = { from: { tx: this.tx, ty: this.ty, scale: this.scale }, to: { tx: target.tx, ty: target.ty, scale: target.scale }, start: null };
     }
     return true;
+  }
+
+  /**
+   * reveal() on the player's request (an off-screen chevron was tapped): runs even right after a
+   * user pan, which reveal() otherwise leaves alone. Instant under reduced motion.
+   */
+  showTargets(keys, context = [], opts = {}) {
+    this._userCameraAt = -Infinity;
+    return this.reveal(keys, context, opts);
   }
 
   /** The key in `keys` whose centre is nearest the middle of the playable area under camera `cam`. */
@@ -965,6 +1045,30 @@ export class Board {
     } finally {
       this.ty -= nudge;
     }
+    this._updateIndicators();
+  }
+
+  /**
+   * Off-screen target chevrons: a live overlay (app.js draws them as DOM buttons), computed from
+   * the camera each frame — never part of the cached hive layer, and passed to onIndicators only
+   * when they change. Hidden while the camera animates (a reveal is bringing targets in anyway).
+   */
+  _updateIndicators() {
+    if (!this.onIndicators) return;
+    let list = [];
+    if ((this.ghosts.size || this.throwTargets.size) && !this._camera) {
+      const points = [];
+      for (const key of this.ghosts) points.push({ key, kind: 'ghost', ...this.hexToScreen(key) });
+      for (const key of this.throwTargets) points.push({ key, kind: 'throw', ...this.hexToScreen(key) });
+      const { top, bottom } = this.overlayInsets ?? this.insets;
+      list = offscreenTargets(points, { x0: 0, y0: top, x1: this.W, y1: this.H - bottom },
+        { slack: this.SIZE * this.scale * OFFSCREEN_SLACK, cornerBR: this.overlayInsets?.cornerBR });
+    }
+    const sig = list.map(c => `${c.edge}${Math.round(c.x)},${Math.round(c.y)},${Math.round(c.angle * 40)},${c.count},${c.kind}`).join('|');
+    if (sig === this._indicatorSig) return;
+    this._indicatorSig = sig;
+    this.indicators = list;
+    this.onIndicators(list);
   }
 
   _drawFrame(t) {

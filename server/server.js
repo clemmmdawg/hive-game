@@ -32,22 +32,21 @@ import {
   createRoom,
   getRoom,
   joinRoom,
+  joinSpectator,
   resumeRoom,
   removeSocket,
   broadcast,
+  broadcastSpectators,
   sendTo,
   touchActivity,
 } from './rooms.js';
 
 import { logEntry } from '../js/notation.js';
+import {
+  normalizeClockSettings, createClock, startTurn, endTurn, pause, flag, isFlagged, remainingFor,
+} from '../js/clock.js';
 import { validateAction, resolveResign } from './validator.js';
 import { resolveStaticPath } from './static.js';
-
-const DEFAULT_SETTINGS = Object.freeze({
-  expansions: { mosquito: false, ladybug: false, pillbug: false },
-  tournamentRule: false,
-  clock: { enabled: false },
-});
 
 // ── Paths ────────────────────────────────────────────────────────────────────
 
@@ -95,8 +94,11 @@ function serveStatic(req, res) {
  * Build the HTTP + WebSocket servers (not yet listening). A heartbeat pings
  * every client each `heartbeatMs`; a client that has not answered the previous
  * ping is terminated so half-open TCP connections free their seat.
+ * `clockOverride` ({ time, increment } ms) is a test hook: rooms created with a
+ * clock preset get these numbers instead (short clocks for tests); never set in production.
  */
-export function createHiveServer({ heartbeatMs = HEARTBEAT_MS } = {}) {
+export function createHiveServer({ heartbeatMs = HEARTBEAT_MS, clockOverride = null } = {}) {
+  const options = { clockOverride };
   const httpServer = createServer(serveStatic);
   const wss = new WebSocketServer({ server: httpServer, maxPayload: MAX_PAYLOAD });
 
@@ -108,23 +110,14 @@ export function createHiveServer({ heartbeatMs = HEARTBEAT_MS } = {}) {
       let msg;
       try { msg = JSON.parse(raw.toString()); } catch { try { socket.send(err('INVALID_MESSAGE')); } catch {} return; }
       try {
-        handleMessage(socket, msg);
+        handleMessage(socket, msg, options);
       } catch (e) {
         console.error('[server] handler error:', e);
         try { socket.send(err('INVALID_MESSAGE')); } catch {}
       }
     });
 
-    socket.on('close', () => {
-      // A socket superseded by RESUME_ROOM has been detached (_hiveRoom null).
-      const room = getRoom(socket._hiveRoom);
-      if (room) {
-        const playerNum  = socket._hivePlayer;
-        const opponent   = playerNum === 1 ? 2 : 1;
-        removeSocket(socket);
-        sendTo(room, opponent, { type: 'OPPONENT_DISCONNECTED' });
-      }
-    });
+    socket.on('close', () => handleClose(socket));
 
     socket.on('error', () => {}); // suppress uncaught errors; 'close' fires after
   });
@@ -143,9 +136,30 @@ export function createHiveServer({ heartbeatMs = HEARTBEAT_MS } = {}) {
   return { httpServer, wss };
 }
 
+/** A socket closed: free its seat (and tell the others), or drop it from the spectators. */
+export function handleClose(socket) {
+  // A socket superseded by RESUME_ROOM has been detached (_hiveRoom null).
+  const room = getRoom(socket._hiveRoom);
+  if (!room) return;
+  if (socket._hiveSpectator) {
+    removeSocket(socket);
+    broadcast(room, { type: 'SPECTATORS', count: room.spectators.size });
+    return;
+  }
+  const playerNum = socket._hivePlayer;
+  const opponent  = playerNum === 1 ? 2 : 1;
+  removeSocket(socket);
+  const gone = { type: 'OPPONENT_DISCONNECTED', player: playerNum };
+  sendTo(room, opponent, gone);
+  broadcastSpectators(room, gone);
+}
+
 // ── Message dispatch ─────────────────────────────────────────────────────────
 
-export function handleMessage(socket, msg) {
+/**
+ * @param {object} [options] server options (see createHiveServer: `clockOverride`)
+ */
+export function handleMessage(socket, msg, options = {}) {
   if (!msg || typeof msg !== 'object' || typeof msg.type !== 'string') {
     socket.send(err('INVALID_MESSAGE'));
     return;
@@ -155,7 +169,7 @@ export function handleMessage(socket, msg) {
     // ── Host creates a new room ────────────────────────────────────────────
     case 'CREATE_ROOM': {
       if (socket._hiveRoom) { socket.send(err('ALREADY_IN_ROOM')); return; }
-      const settings = normalizeSettings(msg.settings);
+      const settings = normalizeSettings(msg.settings, options);
       const room     = createRoom(settings);
 
       const result = joinRoom(room.code, socket);
@@ -186,6 +200,18 @@ export function handleMessage(socket, msg) {
         return;
       }
 
+      // Both seats taken: the game is on, so this socket watches. `spectate` (a watcher re-joining
+      // after a drop) never takes a seat, whatever is free.
+      if (msg.spectate === true || room.tokens.every(Boolean)) {
+        if (!room.gameState) { socket.send(err('NO_ACTIVE_GAME')); return; }
+        const watch = joinSpectator(code, socket);
+        if (watch.error) { socket.send(err(watch.error)); return; }
+        const away = [1, 2].filter(p => !room.sockets[p - 1]); // seats whose player is currently disconnected
+        socket.send(JSON.stringify({ type: 'SPECTATING', code, ...roomSnapshot(room), away }));
+        broadcast(room, { type: 'SPECTATORS', count: room.spectators.size });
+        return;
+      }
+
       const result = joinRoom(code, socket);
       if (result.error) {
         socket.send(err(result.error));
@@ -200,17 +226,19 @@ export function handleMessage(socket, msg) {
         return;
       }
 
-      // Both players present — start the game
+      // Both players present — start the game. The side to move's clock runs from now.
       room.gameState = createGame(room.settings);
       room.history   = [];
-      const snap     = serializeState(room.gameState);
+      room.clock     = startTurn(createClock(room.settings.clock), Date.now());
+      scheduleFlag(room);
+      touchActivity(room); // the idle deadline now covers the running clock
 
       // Tell each player their assigned number
       sendTo(room, 1, { type: 'PLAYER_ASSIGNMENT', player: 1, token: room.tokens[0] });
       sendTo(room, 2, { type: 'PLAYER_ASSIGNMENT', player: 2, token: room.tokens[1] });
 
       // Broadcast the initial game state to both
-      broadcast(room, { type: 'GAME_START', gameState: snap, settings: room.settings, history: [] });
+      broadcast(room, { type: 'GAME_START', ...roomSnapshot(room) });
 
       console.log(`[server] Room ${room.code} game started`);
       break;
@@ -232,15 +260,15 @@ export function handleMessage(socket, msg) {
         code,
         player: result.playerNum,
         token: result.token,
-        gameState: result.room.gameState ? serializeState(result.room.gameState) : null,
-        settings: result.room.settings,
-        history: result.room.history,
-        ...(result.room.endReason ? { endReason: result.room.endReason } : {}),
+        ...roomSnapshot(result.room),
       }));
 
       console.log(`[server] Room ${code} player ${result.playerNum} resumed`);
       const opponent = result.playerNum === 1 ? 2 : 1;
-      sendTo(result.room, opponent, { type: 'OPPONENT_RECONNECTED' });
+      const back = { type: 'OPPONENT_RECONNECTED', player: result.playerNum };
+      sendTo(result.room, opponent, back);
+      broadcastSpectators(result.room, back);
+      socket.send(JSON.stringify({ type: 'SPECTATORS', count: result.room.spectators.size })); // always, 0 included: clears a stale 👁
       break;
     }
 
@@ -249,11 +277,19 @@ export function handleMessage(socket, msg) {
     case 'MOVE_PIECE':
     case 'THROW_PIECE':
     case 'PASS_TURN': {
+      if (socket._hiveSpectator) { socket.send(err('NOT_A_PLAYER')); return; }
       const room = getRoom(socket._hiveRoom);
       if (!room?.gameState) { socket.send(err('NO_ACTIVE_GAME')); return; }
 
       const action = msgToAction(msg);
       if (!action) { socket.send(err('INVALID_MESSAGE')); return; }
+
+      // The clock may have run out before its timer fired: that ends the game, not this move.
+      const now = Date.now();
+      if (!room.gameState.winner && isFlagged(room.clock, room.gameState.turn, now)) {
+        flagRoom(room, now);
+        return;
+      }
 
       const { valid, reason } = validateAction(room.gameState, action, socket._hivePlayer);
       if (!valid) {
@@ -263,14 +299,16 @@ export function handleMessage(socket, msg) {
 
       room.history.push(logEntry(room.gameState, action));
       room.gameState = applyAction(room.gameState, action);
+      if (room.clock) room.clock = endTurn(room.clock, socket._hivePlayer, now);
+      if (room.gameState.winner) stopClock(room, now);
+      else scheduleFlag(room);
       touchActivity(room);
 
-      const snap = serializeState(room.gameState);
-      broadcast(room, { type: 'GAME_STATE', gameState: snap, history: room.history });
+      broadcast(room, { type: 'GAME_STATE', ...stateFields(room, now) });
 
       if (room.gameState.winner) {
         const winner = room.gameState.winner;
-        room.endReason = winner === 'DRAW' ? 'DRAW' : 'QUEEN';
+        room.endReason = winner !== 'DRAW' ? 'QUEEN' : room.gameState.drawReason === 'REPETITION' ? 'REPETITION' : 'DRAW';
         broadcast(room, { type: 'GAME_OVER', winner, reason: room.endReason });
         console.log(`[server] Room ${room.code} game over — winner: ${room.gameState.winner}`);
       }
@@ -279,13 +317,20 @@ export function handleMessage(socket, msg) {
 
     // ── Resign ─────────────────────────────────────────────────────────────
     case 'RESIGN': {
+      if (socket._hiveSpectator) { socket.send(err('NOT_A_PLAYER')); return; }
       const room = getRoom(socket._hiveRoom);
+      // A flag that fell before this message (its timer not yet run) decides the game first.
+      if (room?.gameState && !room.gameState.winner && isFlagged(room.clock, room.gameState.turn, Date.now())) {
+        flagRoom(room, Date.now());
+        return;
+      }
       const resign = resolveResign(room?.gameState ?? null, socket._hivePlayer);
       if (!resign.valid) { socket.send(err(resign.reason)); return; }
 
       const winner = resign.winner;
       room.gameState = { ...room.gameState, winner };
       room.endReason = 'RESIGN';
+      stopClock(room, Date.now());
       touchActivity(room);
 
       broadcast(room, { type: 'GAME_OVER', winner, reason: 'RESIGN' });
@@ -320,9 +365,15 @@ function err(reason) {
   return JSON.stringify({ type: 'ERROR', reason });
 }
 
-function normalizeSettings(raw) {
+/**
+ * Room settings from a client's CREATE_ROOM: booleans coerced, the clock limited to the presets
+ * (js/clock.js). `options.clockOverride` (test hook) replaces an enabled preset's numbers.
+ */
+export function normalizeSettings(raw, { clockOverride = null } = {}) {
   const input = raw && typeof raw === 'object' ? raw : {};
   const expansions = input.expansions && typeof input.expansions === 'object' ? input.expansions : {};
+  let clock = normalizeClockSettings(input.clock);
+  if (clock.enabled && clockOverride) clock = { ...clock, time: clockOverride.time, increment: clockOverride.increment };
   return {
     expansions: {
       mosquito: !!expansions.mosquito,
@@ -330,7 +381,71 @@ function normalizeSettings(raw) {
       pillbug:  !!expansions.pillbug,
     },
     tournamentRule: !!input.tournamentRule,
-    // Clocks are not implemented yet; never trust arbitrary client shapes.
-    clock: { ...DEFAULT_SETTINGS.clock },
+    clock,
   };
+}
+
+// ── Clock + snapshots ────────────────────────────────────────────────────────
+
+/** `clock` + `serverNow` for a timed room (clients rebase the countdown onto their own time); {} otherwise. */
+function clockFields(room, now = Date.now()) {
+  return room.clock ? { clock: room.clock, serverNow: now } : {};
+}
+
+/** GAME_STATE body: the canonical state, the move log and the clock. */
+function stateFields(room, now = Date.now()) {
+  return { gameState: serializeState(room.gameState), history: room.history, ...clockFields(room, now) };
+}
+
+/**
+ * Everything a client needs to show the room's game from scratch: GAME_START, ROOM_RESUMED (and
+ * any later "join a game in progress" message). gameState is null before the game starts.
+ */
+export function roomSnapshot(room, now = Date.now()) {
+  return {
+    gameState: room.gameState ? serializeState(room.gameState) : null,
+    settings:  room.settings,
+    history:   room.history,
+    ...clockFields(room, now),
+    ...(room.endReason ? { endReason: room.endReason } : {}),
+  };
+}
+
+function clearFlagTimer(room) {
+  if (room.clockTimer) clearTimeout(room.clockTimer);
+  room.clockTimer = null;
+}
+
+/** Arm the timeout for the side to move (re-armed after every move). Disconnects do not stop it. */
+function scheduleFlag(room) {
+  clearFlagTimer(room);
+  if (!room.clock?.running || room.gameState?.winner) return;
+  const left = remainingFor(room.clock, room.clock.active, Date.now());
+  room.clockTimer = setTimeout(() => {
+    room.clockTimer = null;
+    const now = Date.now();
+    if (room.gameState.winner) return;
+    if (isFlagged(room.clock, room.clock.active, now)) flagRoom(room, now);
+    else scheduleFlag(room); // fired a hair early
+  }, left);
+  room.clockTimer.unref?.();
+}
+
+/** The game ended some other way: freeze the clock where it stands. */
+function stopClock(room, now) {
+  clearFlagTimer(room);
+  if (room.clock) room.clock = pause(room.clock, now);
+}
+
+/** The side to move ran out of time: the other side wins (reason TIMEOUT). */
+function flagRoom(room, now) {
+  clearFlagTimer(room);
+  const loser  = room.clock.active;
+  const winner = loser === 1 ? 2 : 1;
+  room.clock     = flag(room.clock, now);
+  room.gameState = { ...room.gameState, winner };
+  room.endReason = 'TIMEOUT';
+  touchActivity(room);
+  broadcast(room, { type: 'GAME_OVER', winner, reason: 'TIMEOUT', ...clockFields(room, now) });
+  console.log(`[server] Room ${room.code} — player ${loser} ran out of time`);
 }

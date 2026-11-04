@@ -16,7 +16,7 @@ Run with `npm start` (starts `server/index.js`; port 3000), `npm start -- 3001`,
 - Freedom to Move / gate check (height-aware for beetle stacks)
 - Forced queen placement by turn 4 (gold-pulsing queen in the tray + HUD warning)
 - Tournament opening rule (optional toggle)
-- Win/draw detection
+- Win/draw detection, including automatic threefold-repetition draw (status line shows `REPETITION 2/3` once a position has occurred twice; draw copy "DRAW — THREEFOLD REPETITION")
 - Must-pass turn handling (auto-pass banner locally; explicit PASS button online; mutual no-move = draw locally)
 - Pan and pinch-zoom on the board canvas
 - Per-player piece tray with legal-placement gating
@@ -31,6 +31,7 @@ Run with `npm start` (starts `server/index.js`; port 3000), `npm start -- 3001`,
 - Last-move marker (gold corner ticks on the destination, dashed outline on the source)
 - Move animation: pieces fly along their real route (`getMovePath`) — slides glide, hops/climbs/throws arc, placements drop in with squash; landing ripple (player colour), species-colour sparks, camera nudge on climbs/throws. Opponent moves animate online (`inferAction`). Undo and reduced motion are instant
 - Gentle camera follow (`board.reveal`): pans (zooms out only if needed) to show off-screen move targets and the moved piece, never while the user is panning. Zoom-out floor: tiles never below `REVEAL_MIN_TILE_PX` (17 px) and never below an already smaller zoom; a pinch/wheel/key zoom is kept until the next recenter. Targets that don't fit are framed nearest-first around the selected/moved piece
+- Off-screen target chevrons: legal targets (green ghosts, amber throw targets) outside the playable area get a neon edge chevron per edge cluster (count badge, arrow toward them, the halo breathes three times when one appears; `offscreenTargets` in board.js, DOM buttons in `#edge-hints`); tapping one pans them into view (`board.showTargets`, instant under reduced motion). The buttons are `pointer-events: none` so a drag starting on one still pans: `board.onTap` hit-tests them first (`tapEdgeHint`, 24 px), keyboard Enter/Space clicks them. Clear of the piece bar and the recenter button
 - Airborne pieces occlude the hive: each floating tile cuts its footprint out of `#emoji-layer` before its own glyph is drawn; pips and rings are painted under floating pieces
 - Landscape phones (`max-height: 500px` + landscape): 44 px HUD with the piece description inline under the status line, single-row 64 px tray with the opponent's reserve beside your pieces
 - HiDPI canvas rendering, animated recenter/fit (⌖ button, `C` key), piece pop-in animation
@@ -40,11 +41,14 @@ Run with `npm start` (starts `server/index.js`; port 3000), `npm start -- 3001`,
 - Win screen with reason, species-colour sprite confetti, Rematch (local) / View Board / Main Menu
 - Queen danger meter: six pips on each queen's rim (lit per occupied side; gold, amber pulse at 4, red pulse + halo + face wash at 5), mirrored by two HUD meters (`#queen-meters`); stepping up to 5 plays `danger` once at touchdown (from `board.onLand`, or when the flight is snapped home) with a red banner — the 12 ms landing buzz is skipped whenever an alarm (danger or win) fires on that landing — and the endangered mover's status reads "P1 QUEEN IN DANGER"
 - Win sequence: the winning move flies at 0.4× (capped at 1 s), a white shockwave + camera punch at touchdown, the board dims 45% round the fallen queen (`#board-dim`; an even dim when no queen is surrounded), then confetti + card — card ≤ 1.6 s (`winTiming`); the HUD holds the result until impact. Reduced motion: card after 300 ms, no slow-mo/shockwave. A finished game opened by reload/resume shows the card calmly (no sting, no confetti). If ☰ is open when the card is due, the card waits until it closes
-- Settings (expansions, tournament rule) remembered in localStorage
+- Settings (expansions, tournament rule, clock preset) remembered in localStorage
+- Game clock (Fischer): menu CLOCK chips OFF / 5+0 / 10+5 / 15+10 / 30+0 (minutes + seconds per move). Each HUD queen meter becomes a player plate (meter + time, `#plate-N` / `#clock-N`; stacked P1-over-P2 on phones and landscape phones, side by side on wider screens); mm:ss, tenths (`09.4`) under 10 s; the side to move is lit in its colour; under 10 s the plate pulses red (none under reduced motion) and a soft `tick` plays once a second (online: only your own clock). Flag → the win sequence with "P1 RAN OUT OF TIME" (online "YOU / OPPONENT RAN OUT OF TIME"); the card's emblem is a red `STOPWATCH` sprite (menu-icon recipe). A local forced pass is charged only up to its banner (`announcedPass`), and the frame-loop flag check is skipped while the pass banner is pending (`passTimer`). Local: the clock runs once the game screen shows and pauses while ☰, How to Play, a confirm dialog, the move sheet, a review/replay or a hidden page covers it (`clockHeld`, MutationObserver + visibilitychange); undo restores the clock snapshot kept with each history entry; autosave keeps the (paused) clock. Online: server-authoritative (see Multiplayer). Clock OFF → no clock UI. The display is written from the RAF loop only when its text/class changes (never touches the board layer)
+- The REPETITION 2/3 banner shows once per game (`repetitionWarned`, reset on new game / rematch / continue / online start)
 - Room share: COPY CODE + SHARE/COPY LINK; `?room=CODE` opens JOIN with the code filled in
 - Main menu with mode selection, expansion toggles, tournament rule toggle
 - Server-authoritative online multiplayer with room codes
-- Token-based seat recovery after transient disconnects
+- Spectators: a third JOIN_ROOM watches live (see Spectators below) — read-only, animated moves, clocks, danger meters, win sequence/card with neutral copy, moves sheet/previews/replay; HUD chip "WATCHING", 👁 N pill for everyone
+- Token-based seat recovery after transient disconnects; after ROOM_RESUMED the turn banner says whose move it is (`resumeBanner` in hints.js)
 - Responsive refined-neon UI with reduced-motion and focus-visible support
 - Move list + game review: ☰ MOVES opens a slide-up sheet (numbered rounds, sprite + notation, COPY MOVES); tapping a move previews that position read-only (BACK TO GAME pill); REPLAY on the win card (or the sheet, mid-game) holds the empty board ~600 ms then autoplays the game (900 ms/move, steps fly along getMovePath routes) with a scrubber bar (⏮ ◀ ▶/❚❚ ▶ ⏭, slider); Esc / ✕ returns to where review began. The HUD chip reads PREVIEW for a tapped move and REPLAY once autoplay has run; the sheet hides its REPLAY button while reviewing; a throw reads "P2 THREW P1 BEETLE"; the landscape replay bar shows a compact "19/38" so the full notation fits. Logs that do not rebuild the live game (resumed v1 saves) are listed but not previewable
 - ☰ game menu: Moves, How to Play, Recenter, Restart/Rematch (local), Quit (local, keeps save) / Resign (online)
@@ -61,10 +65,8 @@ Run with `npm start` (starts `server/index.js`; port 3000), `npm start -- 3001`,
 - Static server serves only an allowlist (`index.html`, `styles.css`, `js/`, `assets/`, PWA files)
 
 ### Known Limitations / Not Yet Built
-- No clock/timer (designed in settings, not implemented)
 - No AI opponent
 - No persistent online rooms (room pause/resume deferred to v2); local games autosave
-- No spectator mode
 - Mosquito throw (mosquito adjacent to pillbug) UI not fully tested
 - Online play needs the network: offline, HOST/JOIN show "OFFLINE — LOCAL PLAY ONLY" (local play, CONTINUE and the pixel font work from cache)
 
@@ -80,13 +82,16 @@ Run with `npm start` (starts `server/index.js`; port 3000), `npm start -- 3001`,
 │   ├── hex.js          — Pure hex math (axial coords, neighbors, pixel conversion)
 │   ├── game.js         — Pure game logic (no DOM). Safe to import on the Node server (ESM)
 │   ├── board.js        — Canvas renderer + pointer/touch input (Board class)
-│   ├── app.js          — Application state machine, UI wiring, tray, HUD, undo, autosave
+│   ├── app.js          — Application state machine, UI wiring, tray, HUD, undo, autosave; creates winFx + reviewer
+│   ├── win-fx.js       — createWinFx(ctx): win sequence (impact, board dim, confetti) + result card + deferred card; pure winCopy / surroundedQueens
+│   ├── review.js       — createReview(ctx): game review (preview / replay bar / autoplay) + move-list sheet; pure reviewStatusText / sheetRounds / returnLabel
 │   ├── menu.js         — Main menu, settings panel, rules dialog, confirm dialog
 │   ├── sprites.js      — Insect sprite path data + spriteSVG() (DOM) / drawSprite() (canvas)
-│   ├── hints.js        — Pure: HUD status copy (statusText, dangerText, newDangers) + last-move diff (describeLastMove, inferAction)
+│   ├── hints.js        — Pure: HUD status copy (statusText, dangerText, newDangers, resumeBanner) + last-move diff (describeLastMove, inferAction)
 │   ├── notation.js     — Pure: toNotation / pieceIds / logEntry / undoLogEntry; BoardSpace-style move text and move-log entries, imports only game.js
 │   ├── replay.js       — Pure: createReplay / replayForGame / sameBoard / plyInfo (player, owner, type) / movesText / notationHTML; rebuilds positions from the move log (game review), imports only game.js
-│   ├── local-save.js   — Pure: encode/decode the local game + undo history + move log for localStorage (save VERSION 2; v1 loads with an empty log)
+│   ├── local-save.js   — Pure: encode/decode the local game + undo history + move log + clock (and a clock snapshot per undo step) for localStorage (save VERSION 3; v1 loads with an empty log, v1/v2 as clock-off games)
+│   ├── clock.js        — Pure Fischer clock (injected `now`; server-importable): presets, createClock/startTurn/endTurn/remainingFor/isFlagged/pause/resume/flag, rebaseClock (server → local time), restoreClock, formatClock
 │   ├── audio.js        — WebAudio synth sound effects + haptics + persisted mute (`sfx`)
 │   └── net.js          — WebSocket client (see Multiplayer)
 ├── assets/fonts/       — press-start-2p-latin.woff2 (self-hosted, precached) + OFL.txt (its SIL OFL 1.1 licence)
@@ -95,16 +100,16 @@ Run with `npm start` (starts `server/index.js`; port 3000), `npm start -- 3001`,
 ├── scripts/sw-hash.mjs — Hashes the sw.js PRECACHE files into sw-manifest.json (`npm run sw:stamp`)
 ├── sw-manifest.json    — Recorded CACHE name + precache content hash (checked by test/pwa.test.js)
 ├── server/             — see Multiplayer
-└── test/               — node --test suites (rules, game, board, net, ui-logic, multiplayer, audio, history, pwa, boot)
+└── test/               — node --test suites (rules, game, board, net, ui-logic, multiplayer, audio, history, review-winfx, offscreen, pwa, boot)
 ```
 
 ---
 
 ## PWA / service worker
 
-`sw.js` precaches the shell (`PRECACHE`: `/`, `index.html`, `styles.css`, `manifest.json`, every `js/*.js`, icons, the self-hosted font) into cache `hive-vN` and serves it cache-first (query strings ignored, so `/?room=CODE` works offline). There are no third-party requests (the font is an `@font-face` in styles.css, preloaded by index.html). It never touches non-GET requests or `/ws`. A new worker waits; `app.js` shows a persistent toast with RELOAD (`pendingUpdate`: a transient `toast()` replaces it only until `clearToast()`, which re-shows the offer). RELOAD sets `reloadRequested`, posts `SKIP_WAITING` and reloads on `controllerchange` (also in the session that first installed the worker). The toast pill is `pointer-events: none`; only its button takes taps. Over the main menu it hangs from the top, clear of START.
+`sw.js` precaches the shell (`PRECACHE`: `/`, `index.html`, `styles.css`, `manifest.json`, every `js/*.js`, icons, the self-hosted font) into cache `hive-vN` and serves it cache-first (query strings ignored, so `/?room=CODE` works offline). There are no third-party requests (the font is an `@font-face` in styles.css, preloaded by index.html). It never touches non-GET requests or `/ws`. A new worker waits; `app.js` shows a persistent toast with RELOAD (`pendingUpdate`: a transient `toast()` replaces it only until `clearToast()`, which re-shows the offer). RELOAD sets `reloadRequested`, posts `SKIP_WAITING` and reloads on `controllerchange` (also in the session that first installed the worker). The toast pill is `pointer-events: none`; only its button takes taps. On the main menu the offer is shown in the menu's own layout instead (`#menu-update`, between the tagline and the setup card, pushing the card down), and the floating toast with the action is hidden there, so it never covers the logo, CONTINUE or START; it floats again only while How to Play covers the menu. Other toasts over the menu dock at the bottom. While reviewing with the move sheet open it sits under the exit pill (beside it on landscape phones).
 
-**Every deploy that changes a precached file must bump `CACHE` in `sw.js` (`hive-v3` -> `hive-v4`) and then run `npm run sw:stamp`**, which records a content hash of all `PRECACHE` files in `sw-manifest.json` (and refuses if files changed but `CACHE` did not). `test/pwa.test.js` fails when the precached files no longer match the recorded hash, so a forgotten bump is caught; otherwise returning visitors keep the old files. **When adding a runtime module, add it to `PRECACHE`** (`test/pwa.test.js` fails if a module reachable from `index.html` is missing). Optional `assets/pieces/*.png` art is not precached.
+**Every deploy that changes a precached file must bump `CACHE` in `sw.js` (`hive-v4` -> `hive-v5`) and then run `npm run sw:stamp`**, which records a content hash of all `PRECACHE` files in `sw-manifest.json` (and refuses if files changed but `CACHE` did not). Text files are hashed with CRLF normalised to LF (a Windows checkout stamps the same hash); the script's main-module check is realpath-based, so it also runs through a symlinked checkout. `test/pwa.test.js` fails when the precached files no longer match the recorded hash, so a forgotten bump is caught; otherwise returning visitors keep the old files. **When adding a runtime module, add it to `PRECACHE`** (`test/pwa.test.js` fails if a module reachable from `index.html` is missing). Optional `assets/pieces/*.png` art is not precached.
 
 ## Architecture
 
@@ -114,6 +119,10 @@ Run with `npm start` (starts `server/index.js`; port 3000), `npm start -- 3001`,
 `board.js` knows nothing about game rules. It receives `pieces`, `ghosts`, `throwTargets`, and `selectedHex` from `app.js` and renders them. It fires `onTap(q, r)` callbacks upward.
 
 `app.js` is the glue layer. It owns `gameState` (a `game.js` GameState object) and `uiState` (interaction phase machine). Every action goes through `act()` → `applyAction()` (or the server) → `onStateChanged()`, which updates the renderer and last-move marker, autosaves local games, and shows the turn banner or win screen.
+
+**app.js seams (win-fx.js, review.js).** Both modules export a factory that takes an explicit context object — getters for live state (`state()`, `mode()`, `myPlayer()`, `moveLog()`, `reason()`) plus callbacks into app.js (`syncUI`, `toast`, `clearSelection`, …) — and keep only their own state; no module-level globals touch the DOM, so their pure helpers import in node tests (`test/review-winfx.test.js`). app.js creates `winFx = createWinFx({...})` (section "Win sequence + result card") and `reviewer = createReview({...})` (section "Game review + move list sheet"); the context literal there is the full list of what each module may reach. Add new win/draw reasons to `winCopy` (it reads app's `winReason` via `reason()`), new live timers that must not fire inside a review to `holdLive()`, and new pieces of live UI that the review must hide to `reviewer.sync()`'s caller (`syncUI`).
+- `winFx`: `play(move)` (slow-mo impact → card), `showCard({calm})`, `scheduleCard(ms, opts)`, `cardPending`, `presented`, `reset()` (new game/undo), `cancel()` (drop timers/touchdown/deferred), `settle()`, `openCard()`, `hide()`, `hideDim()`, `flushDeferred()` (call when something that covered the board closes), `touchdown` (board.onLand runs it), `holdResult` (get/set: HUD blank while the winning piece flies). `covered()` in its context decides deferral (☰ menu, sheet, review).
+- `reviewer`: `enter(index, {returnTo})`, `exit()`, `end()`, `leaveForLive()`, `seek(i)`, `startAutoplay({hold})`, `handleKey(event)` (false when not reviewing), `openSheet()`, `closeSheet({restoreFocus})`, `sheetOpen()`, `sync()`, `active`, `shownState` (what `syncBoardRenderer` draws while reviewing).
 
 ### Canvas architecture
 Two stacked canvases share the same fixed inset:
@@ -149,7 +158,7 @@ createGame(settings) → GameState
 {
   expansions:     { mosquito: bool, ladybug: bool, pillbug: bool },
   tournamentRule: bool,
-  clock:          { enabled: bool, type: 'ABSOLUTE'|'FISCHER'|'BRONSTEIN', time: number, increment: number }
+  clock:          { enabled: false } | { enabled: true, type: 'FISCHER', time: ms, increment: ms }  // only CLOCK_PRESETS (js/clock.js)
 }
 
 // Query legal actions
@@ -176,6 +185,8 @@ applyAction(state, action) → GameState
 
 // Check win condition
 checkWin(state) → null | 1 | 2 | 'DRAW'
+positionKey(state) → string                       // board stacks (no ids) + side to move + both supplies (+ the pillbug throw restrictions when the pillbug is on); REPETITION_LIMIT = 3
+positionHash(state) → string                      // 11-char base36 cyrb53 of positionKey: the positionCounts key (hints.js repetitionCount uses it)
 queenPressure(state) → { 1: n|null, 2: n|null }   // occupied sides of each queen (null = not placed)
 queenSides(board, isOccupied?) → [{ key, player, sides[6], lit[6] }] // per-queen side occupancy in neighbors() order — the one source for queenPressure and board queenPips
 
@@ -193,7 +204,7 @@ Pieces placed via `applyAction` carry a stable `id` (`wA1`, `bQ`; `w`=P1, `b`=P2
 
 **Notation markers:** the `MARKERS` table in notation.js is a deliberate fixed rotation/reflection of BoardSpace's pointy-top orientation onto this game's flat-top grid. Hive positions are invariant under rotation and reflection, so exported games replay as equivalent games elsewhere; do not "fix" the table to match one tool's orientation without changing `MARKERS` and its tests together.
 
-**Game review (replay.js + app.js "Game review"):** `createReplay(settings, actions, {index}) → { states, index, state, atEnd, step(±n), seek(i) }` (states[0] = empty board, N actions → N+1 states, clamped). `replayForGame(moveLog, liveState)` returns a replay only when re-applying the log from `createGame(liveState.settings)` reproduces the live board and turnNumber (else null — the UI shows "history unavailable"). app.js `review` state: `enterReview(index, {returnTo:'game'|'board'|'card'})`, `exitReview()`, `endReview()` (teardown, restores the live board/lastMove and recenters). While reviewing, `syncBoardRenderer` draws the reviewed position, taps/hover/undo/pass/keys that act are ignored, nothing autosaves or is sent, and any live state change (`onStateChanged`, ROOM_RESUMED, GAME_OVER) leaves the review first. The result card and the ☰ menu/sheet defer each other via `winDeferred` + `flushDeferredWin()`.
+**Game review (replay.js + review.js):** `createReplay(settings, actions, {index}) → { states, index, state, atEnd, step(±n), seek(i) }` (states[0] = empty board, N actions → N+1 states, clamped). `replayForGame(moveLog, liveState)` returns a replay only when re-applying the log from `createGame(liveState.settings)` reproduces the live board and turnNumber (else null — the UI shows "history unavailable"). review.js `review` state: `reviewer.enter(index, {returnTo:'game'|'board'|'card'})`, `reviewer.exit()`, `reviewer.end()` (teardown, restores the live board/lastMove and recenters). While reviewing, `syncBoardRenderer` draws the reviewed position, taps/hover/undo/pass/keys that act are ignored, nothing autosaves or is sent, and any live state change (`onStateChanged`, ROOM_RESUMED, GAME_OVER) leaves the review first. The result card and the ☰ menu/sheet defer each other via win-fx's `deferred` + `winFx.flushDeferred()`.
 
 ### GameState shape
 ```js
@@ -207,6 +218,8 @@ Pieces placed via `applyAction` carry a stable `id` (`wA1`, `bQ`; `w`=P1, `b`=P2
   lastOpponentMovedHex: string | null,   // pillbug cannot throw this hex
   pillbugThrewHex:      string | null,   // this hex cannot move next turn
   winner:               null | 1 | 2 | 'DRAW',
+  positionCounts:       { [positionHash]: n },  // maintained by applyAction (incl. PASS/THROW); created by createGame; old saves and long-key (pre-hash) saves are rebuilt as {current: 1}
+  drawReason:           null | 'REPETITION',    // set with winner 'DRAW' when a position is reached the 3rd time (a queen surround on that move wins instead)
   settings:             { expansions, tournamentRule, clock }
 }
 ```
@@ -220,16 +233,16 @@ sfx.unlock();               // create/resume the AudioContext — app.js calls i
 sfx.resume();               // resume an existing suspended context only (never creates one) — app.js calls it on visibilitychange → visible
 sfx.play(name, { haptic, duration }?) // no-op before unlock, while muted, for unknown names, or the same name again within 30 ms; duration (ms) holds the slide whoosh for the flight
 sfx.setMuted(bool); sfx.toggle() → muted; sfx.muted   // persisted under localStorage `hiveMuted`; mutes haptics too
-SOUND_NAMES                 // select deselect invalid place slide hop climb throw turn danger win lose draw
+SOUND_NAMES                 // select deselect invalid place slide hop climb throw tick turn danger win lose draw
 ```
 
-Voices are synthesised per play (oscillators + gain envelopes + filtered noise) into a bus: lowpass 8 kHz + a small convolver plate send → master gain `MASTER_GAIN` 0.35 → `softClip` WaveShaper (linear to 0.7, ceiling −1 dBFS). Per-voice `TRIM_DB` balances loudness. Do not put a DynamicsCompressor back in: Chrome ducks short transients by ~10 dB. Haptics: 12 ms for place/slide/hop/climb/throw, `[30,40,30]` danger, `[40,60,80]` win.
+Voices are synthesised per play (oscillators + gain envelopes + filtered noise) into a bus: lowpass 8 kHz + a small convolver plate send → master gain `MASTER_GAIN` 0.35 → `softClip` WaveShaper (linear to 0.7, ceiling −1 dBFS). Per-voice `TRIM_DB` balances loudness. Do not put a DynamicsCompressor back in: Chrome ducks short transients by ~10 dB. Haptics: 12 ms for place/slide/hop/climb/throw, `[30,40,30]` danger, `[40,60,80]` win, `[30,30]` draw.
 
 How app.js uses it: selecting a piece plays `select`; a piece with no moves plays `invalid`, and so does a disabled tray slot or a server rejection. Backing out plays `deselect`. A flying move plays its kind (`slide`/`hop`/`climb`/`throw`, with no haptic; the slide stretched to `board.flightMs()`) at departure, and `board.onLand` plays `place` with the haptic at touchdown (no haptic when the landing raises the danger alarm or the win impact). A move that does not fly (reduced motion) plays `place` straight away. `turn` plays online when it becomes your turn, after the opponent's piece lands, and locally on a forced pass. The win card plays `win`, `lose` (the online loser) or `draw`. `danger` is for the queen-danger meter.
 
 ## Sprites (sprites.js)
 
-All eight insects (plus menu icons `HOUSE`, `SIGNAL`, `GAMEPAD` for the mode buttons and `CROWN` for the tournament toggle) are SVG path data on a 64×64 grid. Pieces are top-down with the head up, except the grasshopper, ant and mosquito, which are side-on with the head left. Each has three layers drawn in order — `body` (fill = 40% ink over the dark page + ink outline), `line` (open strokes), `dot` (ink fills, `evenodd`, so a shape inside another in the same path is a hole — the ladybug's spots) — at one stroke width (`STROKE = 2.6`). Keep new art to that recipe so the set stays consistent; `pair()` mirrors left/right limbs across x = 32.
+All eight insects (plus menu icons `HOUSE`, `SIGNAL`, `GAMEPAD` for the mode buttons, `CROWN` for the tournament toggle and `STOPWATCH` for the lost-on-time card) are SVG path data on a 64×64 grid. Pieces are top-down with the head up, except the grasshopper, ant and mosquito, which are side-on with the head left. Each has three layers drawn in order — `body` (fill = 40% ink over the dark page + ink outline), `line` (open strokes), `dot` (ink fills, `evenodd`, so a shape inside another in the same path is a hole — the ladybug's spots) — at one stroke width (`STROKE = 2.6`). Keep new art to that recipe so the set stays consistent; `pair()` mirrors left/right limbs across x = 32.
 
 Every species has a glyph colour, `SPECIES_COLOR[type]` (mirrored as `--sp-queen` … `--sp-pillbug` in CSS): Queen `#ffd23f`, Beetle `#b07cff`, Grasshopper `#a6ff3d`, Ant `#4d8dff`, Spider `#ff7a3d`, Mosquito `#d8dcef`, Ladybug `#ff4040`, Pillbug `#2fe0a8`. Player ownership is shown by rims/frames/glow, never by recolouring the glyph.
 
@@ -259,7 +272,15 @@ board.flightMs();          // tween duration (ms) of the running flight, 0 when 
 board.animateMove({ path, kind, piece?, player?, toKey?, speed? }) → Promise // fly the top piece of toKey along a getMovePath route, then landing FX; speed < 1 = slow motion (win)
 board.shockwave(keys);    // win: white flash, expanding hex rings, sparks and a camera punch from each queen key
 board.finishAnimations({ clearFx? }); // snap running flights home (act/undo/new GAME_STATE); clearFx also drops sparks/ripples/nudge/shockwaves
-board.reducedMotion       // true → animateMove/markArrival/recenter are instant, no FX, no shockwave
+board.reducedMotion       // true → animateMove/markArrival/recenter/reveal/showTargets are instant, no FX, no shockwave
+board.showTargets(keys, context?, opts?); // reveal() on the player's request (an off-screen chevron): runs even right after a user pan
+// Off-screen target chevrons: a live overlay, never in the cached layer. Each frame (after drawing) the board
+// computes offscreenTargets() for ghosts + throwTargets from the camera (none while the camera animates) and calls
+// onIndicators(list) only when the list changes; app.js renders them as buttons in #edge-hints.
+board.onIndicators = list => {};  // list = offscreenTargets() result (screen px)
+board.indicators                  // the last list passed to onIndicators (buttons index into it)
+board.overlayInsets               // { top, bottom, cornerBR? } | null — chevron area when more chrome covers the board
+                                  // (app.js: piece bar under the HUD, recenter button keep-out); null = insets
 // Queen danger pips are drawn every frame as a live overlay (never in the cached layer).
 board.draw(t);            // call every RAF frame with DOMHighResTimeStamp
 
@@ -268,6 +289,10 @@ stackLayers(height, size) → [{ dx, dy, scale, shade }]
 queenPips(pieces, hidden?) → [{ key, player, count, lit[6], dirs[6], height }] // danger-meter geometry (counts via game.js queenSides); hexes in `hidden` (in flight) don't count yet
 pipPulse(count, t, reducedMotion?) → 0..1    // pip pulse; steady under reduced motion
 REVEAL_MIN_TILE_PX, PIP_DIST                 // reveal zoom floor (17 px tile radius); pip centre 0.72 × face radius
+offscreenTargets(points, rect, { inset, gap, corner, slack, cornerBR }?) → [{ edge, x, y, angle, count, keys, kind }]
+  // points [{key, x, y, kind:'ghost'|'throw'}] in screen px; rect = playable area. Edge = where a ray from the rect
+  // centre exits; chevron level with the targets along that edge (OFFSCREEN_INSET px in, clear of corners); targets
+  // within `slack` px of the rect count as visible; clusters split when > max(gap, 30% of the edge) apart
 winTiming(kind, steps, { reducedMotion }?) → { flightMs, landMs, cardMs }      // win-sequence timeline; cardMs ≤ WIN_REVEAL_MAX_MS (1600)
 
 // Written by app.js each frame/action:
@@ -335,13 +360,14 @@ Buttons share `.btn` + `.btn-primary | .btn-ghost | .btn-danger | .btn-small`; i
 | 1 | `#board` canvas | Main render surface |
 | 2 | `#emoji-layer` canvas | Isolated emoji rendering |
 | 3 | `#board-dim` | Win-sequence dim with a spotlight on the fallen queen, pointer-events: none |
+| 15 | `#edge-hints` | Off-screen target chevrons (focusable buttons, pointer-events: none — taps are hit-tested in board.onTap) |
 | 18 | `#board-hint`, `#btn-recenter` | First-run hint, floating recenter button |
 | 20 | `#piece-desc` | Inside `#hud` (its stacking context); hangs below it, inline on landscape phones |
 | 20 | `#hud`, `#tray` | Game chrome; hidden until game starts |
 | 25 | `#turn-banner` | Non-blocking turn announcement, pointer-events: none |
 | 20–21 | `#replay-bar`, `#review-pill` | Review controls (replace the tray) and exit pill |
 | 30 | `#game-menu` | ☰ popover |
-| 45 | `#moves-sheet` | Move list sheet; other body children `inert` while open |
+| 45 | `#moves-sheet` | Move list sheet (opaque footer); other body children `inert` while open |
 | 50 | `#crt` | Scanline overlay, pointer-events: none |
 | 60 | `#piece-tooltip` | Piece tooltip / stack inspector |
 | 95 | `#win-screen` | Result card: rematch / view board / menu |
@@ -387,34 +413,50 @@ CLIENT → SERVER:
   THROW_PIECE { pillbugHex, from, to }
   PASS_TURN   {}
   RESIGN      {}
+  (JOIN_ROOM also takes { spectate: true }: watch only — never seated, even if a seat were free; NO_ACTIVE_GAME if the room has none yet)
 
 SERVER → CLIENT:
   ROOM_CREATED        { code, player, token }
-  ROOM_RESUMED        { code, player, token, gameState, settings, endReason?, history }  — endReason 'QUEEN'|'RESIGN'|'DRAW' if finished
+  ROOM_RESUMED        { code, player, token, gameState, settings, endReason?, history, clock?, serverNow? }  — endReason 'QUEEN'|'RESIGN'|'DRAW'|'REPETITION'|'TIMEOUT' if finished
   PLAYER_ASSIGNMENT   { player, token }
-  GAME_START          { gameState, settings, history: [] }
-  GAME_STATE          { gameState, history }  — after every valid action; history = full move log so far
+  GAME_START          { gameState, settings, history: [], clock?, serverNow? }
+  GAME_STATE          { gameState, history, clock?, serverNow? }  — after every valid action; history = full move log so far
                         (entries { notation, player, turnNumber, action }, PASS included, appended server-side)
   INVALID_MOVE        { reason }
   ERROR               { reason }              — e.g. INVALID_MESSAGE; SEAT_TAKEN (+ close code 4001) when a newer
                                                 connection resumed your seat: net.js does not reconnect, the app
-                                                shows GAME OPENED IN ANOTHER TAB and keeps the saved token
-  GAME_OVER           { winner, reason }      — reason 'QUEEN'|'RESIGN'|'DRAW'
-  OPPONENT_DISCONNECTED {}
-  OPPONENT_RECONNECTED  {}
-  ROOM_CLOSED         {}                      — room expired or was closed; the server then closes the socket
+                                                shows GAME OPENED IN ANOTHER TAB and keeps the saved token;
+                                                NOT_A_PLAYER (a spectator sent an action); ROOM_FULL (16 spectators watching)
+  SPECTATING          { code, gameState, settings, history, clock?, serverNow?, endReason? } — JOIN_ROOM to a room whose seats are taken
+  SPECTATORS          { count }               — to everyone in the room when a spectator joins/leaves (and always to a resuming player, 0 included, which clears a stale count)
+  GAME_OVER           { winner, reason, clock?, serverNow? } — reason 'QUEEN'|'RESIGN'|'DRAW'|'REPETITION'|'TIMEOUT'  (REPETITION = automatic threefold draw; TIMEOUT = the side to move's clock ran out, carries the final clock)
+
+  clock (timed rooms only) = js/clock.js clock in server time; clients rebaseClock(clock, serverNow, Date.now()).
+  Body built by server.js roomSnapshot(room) (GAME_START / ROOM_RESUMED; reusable for any full-state message) / stateFields (GAME_STATE).
+  OPPONENT_DISCONNECTED { player }            — `player` = the seat that dropped (a spectator reads "PLAYER N DISCONNECTED")
+  OPPONENT_RECONNECTED  { player }
+  ROOM_CLOSED         { reason: 'IDLE'|'PLAYERS_LEFT' } — room expired or was closed; the server then closes the socket
   WAITING_FOR_OPPONENT {}
 ```
 
 ### Client behavior
 `app.js` uses a mode flag (`'LOCAL'` vs `'ONLINE'`). All actions go through `act()`: online they are sent via `net.js` and the server broadcasts canonical state; locally they are applied and pushed onto the undo history. A player with no legal action gets an explicit PASS control online. `net.on()` keeps one handler per message type — menu.js registers the pre-game handlers and app.js (`initNetHandlers`) replaces them at game start. Fatal in-game `ERROR`s (room gone, seat invalid) return to the menu with a notice. `net.js` ignores events from superseded sockets and cancels pending reconnect timers on `disconnect()`.
 
+### Spectators
+- `JOIN_ROOM` to a room with both seats taken (or `{spectate:true}`) → `SPECTATING` snapshot (same builder as ROOM_RESUMED: `roomSnapshot()`), then `SPECTATORS {count}` to everyone. At most `MAX_SPECTATORS` (16, rooms.js) per room, else `ERROR ROOM_FULL`. Spectators have no token and no seat (a seat never frees: tokens are permanent), receive every broadcast (`broadcast()` covers `room.spectators`), and every action message (PLACE/MOVE/THROW/PASS/RESIGN) gets `ERROR NOT_A_PLAYER`. They never touch `touchActivity`, so they cannot keep a room alive; cleanup sends them `ROOM_CLOSED`. `handleClose(socket)` (server.js, exported for tests) frees a seat or drops a spectator and rebroadcasts the count.
+- Client: `myPlayer === null` in ONLINE mode means spectator (`isSpectator(mode, myPlayer)`, hints.js; `watching()` in app.js). The pure copy helpers (`statusText`, `turnChipText`, `dangerText`, `resumeBanner`, `winCopy`, review `playerName`) fall back to the neutral local wording ("P1 TO MOVE", "PLAYER 1 WINS!", "Player 2 resigned."); the result card plays the `draw` sting (never `lose`) and offers REPLAY / VIEW BOARD / MAIN MENU. `body.spectating` hides the tray pieces and shows both reserve strips (`#reserve-row`, `#reserve-row-b`); the chip sub-line reads WATCHING; `#spectator-count` (👁 N, hidden at 0) is shown to every participant; ☰ has no Restart/Resign (quit = LEAVE ROOM, no confirm); board taps only inspect; `act()` is a no-op.
+- Reconnect: menu.js sets `_spectating` on SPECTATING and its `_connected` handler re-sends `JOIN_ROOM {code, spectate:true}` (no token is stored; the room code is kept in sessionStorage `hiveWatch`, so a page reload re-joins as a spectator via menu.js `_tryRejoinWatch`; leaving, a closed room or a fatal error clears it). app.js's SPECTATING handler re-applies the snapshot like ROOM_RESUMED (`resumeFromSnapshot`).
+
 ### Reconnection
 The server pings every 30 s and terminates silent sockets; `RESUME_ROOM` with a valid token replaces a still-open old socket (no `SEAT_OCCUPIED`). A seated socket sending CREATE/JOIN gets `ERROR ALREADY_IN_ROOM`. `server.js` exports `createHiveServer()` and never listens by itself; `server/index.js` is the entry point (a "run directly" guard in server.js silently exited 0 through symlinked paths).
-Room code and player token are stored in `localStorage`. If the socket drops, `RESUME_ROOM` reclaims the reserved seat and returns the authoritative state. Persistence across a server restart is not supported.
+Room code and player token are stored in `localStorage`. If the socket drops, `RESUME_ROOM` reclaims the reserved seat and returns the authoritative state; the client then shows RECONNECTED and the turn banner (`resumeBanner`: YOUR TURN / OPPONENT'S TURN / NO MOVES — TAP PASS; none if the game is over or a review is open). Persistence across a server restart is not supported.
+
+### Game clock (server)
+`normalizeSettings` (exported) accepts only the clock presets. The room's clock starts when GAME_START is sent; each valid action applies `endTurn` (client clock values are never read) and re-arms `room.clockTimer` for the side to move; it keeps running while a player is disconnected. On expiry (or any action or RESIGN arriving after the deadline, before the timer ran) → `GAME_OVER {reason:'TIMEOUT'}`, `endReason 'TIMEOUT'`. Win / resign stop it; room cleanup clears the timer. While a timed game runs, `touchActivity` (rooms.js) keeps the idle deadline at ≥ the side to move's remaining time + `CLOCK_GRACE` (60 s), so a 30+0 turn or banked increments flag instead of being idle-closed. Test hook: `createHiveServer({ clockOverride: { time, increment } })` swaps an enabled preset's numbers for short ones (never set by `server/index.js`).
 
 ### Room lifecycle
 - Rooms expire after 30 minutes of inactivity
+- Spectators neither refresh the idle timer nor delay cleanup (both players gone → still cleaned after 30 s)
 - A room with one player waits up to 10 minutes (absolute from creation; resuming does not extend it) for the second to join
 - WebSocket frames are capped at 64 KB; non-JSON frames get ERROR INVALID_MESSAGE
 
@@ -423,8 +465,8 @@ Room code and player token are stored in `localStorage`. If the socket drops, `R
 ## Planned Features (Backlog)
 
 ### v1.1
-- [ ] Clock/timer (Absolute, Fischer, Bronstein) — UI already in settings, needs `clock.js` and HUD display
-- [ ] Spectator mode — broadcast game state to extra room sockets read-only
+- [x] Clock/timer — Fischer presets (`js/clock.js`, HUD player plates, server-authoritative online)
+- [x] Spectator mode — extra room sockets watch read-only (max 16)
 - [x] PWA install — `sw.js` + `manifest.json`
 
 ### v2
@@ -446,4 +488,4 @@ Room code and player token are stored in `localStorage`. If the socket drops, `R
 - **Mosquito-as-pillbug throw UI** — the throw flow works logically but the mosquito's amber highlight only appears if `getLegalThrows` finds it adjacent to a pillbug. Needs testing with real game positions.
 - **Beetle gate check** — `canSlide` blocks a move only when both gate stacks reach `max(fromH, toH + 1)` (fromH includes the moving piece). A ground beetle can climb onto a piece between two single pieces; two height-2 stacks block it. Pillbug throws apply the same rule to the lift and the drop. Ground-to-ground slides into an empty hex additionally require at least one occupied gate (hive contact); the ladybug applies `canSlide` at each step using its level (stack height + 1).
 - **Spider backtrack prevention** — DFS uses a visited set per path, correctly prevents revisiting. However the spider cannot end on its starting hex even if 3 steps would bring it back; this is enforced but worth an explicit test.
-- **Draw by repetition** — not implemented. Official rules allow agreeing to a draw if both players are stuck in a forced repetition loop. Low priority.
+- **Draw by repetition** — automatic threefold draw (`positionKey` / `positionCounts` / `drawReason`). The key ignores piece ids; with the pillbug expansion on it also includes the throw restrictions (`lastOpponentMovedHex`, `pillbugThrewHex`), since they change the legal moves; `positionCounts` is keyed by `positionHash`.

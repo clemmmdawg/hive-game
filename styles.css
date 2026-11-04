@@ -303,6 +303,26 @@ kbd {
   margin-top: 14px;
 }
 
+/* Update offer on the main menu: in the layout flow between the tagline and the setup card. */
+#menu-update {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  max-width: 100%;
+  padding: 8px 8px 8px 16px;
+  border: 1px solid rgba(57,255,20,.45);
+  border-radius: 999px;
+  background: rgba(10,11,27,.96);
+  box-shadow: 0 0 18px rgba(57,255,20,.12);
+  color: var(--ghost);
+  font-size: 7px;
+  letter-spacing: 1px;
+  line-height: 1.6;
+}
+#menu-update[hidden] { display: none; }
+#menu-update .toast-action { pointer-events: auto; }
+
 #menu-card {
   width: min(100%, 520px);
   display: flex;
@@ -521,6 +541,42 @@ kbd {
   background: var(--p1);
   color: #05050f;
 }
+
+/* Clock presets: one segmented row of chips (a radio group) */
+.clock-row {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+}
+.clock-chip {
+  min-height: 44px;
+  padding: 0 2px;
+  border-radius: var(--radius-sm);
+  background: rgba(255,255,255,.04);
+  border: 1px solid rgba(255,255,255,.10);
+  color: rgba(255,255,255,.62);
+  font-family: var(--font);
+  font-size: 8px;
+  letter-spacing: .5px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background .15s, border-color .15s, box-shadow .15s, color .15s;
+  -webkit-tap-highlight-color: transparent;
+}
+.clock-chip:hover { background: rgba(255,255,255,.07); }
+.clock-chip.off { color: rgba(255,255,255,.42); }
+.clock-chip.on {
+  background: var(--p1-dim);
+  border-color: rgba(255,45,120,.55);
+  box-shadow: 0 0 14px rgba(255,45,120,.14), inset 0 -2px 0 var(--p1);
+  color: #fff;
+}
+.clock-chip.off.on {
+  background: rgba(255,255,255,.08);
+  border-color: rgba(255,255,255,.3);
+  box-shadow: inset 0 -2px 0 rgba(255,255,255,.45);
+}
+.clock-hint { min-height: 1.4em; }
 
 /* ── Start button ───────────────────────────────────── */
 #btn-start {
@@ -915,6 +971,45 @@ kbd {
 
 #hud-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 
+/* 👁 N — spectator count (everyone in the room). A small glass pill with an eye in the species-neutral gold. */
+.spectator-count {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 26px; padding: 0 8px 0 6px;
+  border: 1px solid rgba(255,215,0,.35);
+  border-radius: 13px;
+  background: rgba(255,215,0,.07);
+  color: var(--gold);
+  font-size: 8px; letter-spacing: .5px; line-height: 1;
+  white-space: nowrap;
+  cursor: default;
+}
+.spectator-count[hidden] { display: none; }
+.spectator-count .icon { width: 14px; height: 14px; stroke-width: 1.8; filter: drop-shadow(0 0 3px rgba(255,215,0,.6)); }
+.spectator-count.bump { animation: spec-bump .45s var(--ease-out); }
+@keyframes spec-bump { 0% { transform: scale(1); } 30% { transform: scale(1.22); } 100% { transform: none; } }
+
+/* Spectating: the chip says WATCHING at every width (the usual ROUND line hides on phones), no
+   pieces to pick, and both reserves instead of the tray. */
+#turn-chip.watching #chip-label { color: var(--gold); text-shadow: 0 0 6px rgba(255,215,0,.45); }
+#turn-chip.watching #chip-sub { display: block; }
+@media (max-width: 360px) { #turn-chip.watching #chip-sub { display: none; } .spectator-count { padding: 0 6px 0 4px; } }
+@media (max-width: 430px) { #turn-chip.watching #chip-label { font-size: 7px; letter-spacing: .5px; } }
+body.spectating #tray-pieces { display: none; }
+body.spectating #tray { min-height: 0; gap: 4px; padding-top: 8px; }
+body.spectating #reserve-row-b { display: flex; }
+#reserve-row-b {
+  display: none; align-items: center; justify-content: center; gap: 10px; min-height: 16px;
+  font-size: 5px; letter-spacing: 1.2px; color: var(--ui-dim);
+}
+#reserve-label-b { white-space: nowrap; }
+#reserve-label-b.p1 { color: color-mix(in srgb, var(--p1) 75%, transparent); }
+#reserve-label-b.p2 { color: color-mix(in srgb, var(--p2) 75%, transparent); }
+#reserve-pieces-b { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+#reserve-pieces-b.p1 .reserve-item { border-color: var(--p1-mid); }
+#reserve-pieces-b.p2 .reserve-item { border-color: var(--p2-mid); }
+body.spectating #reserve-row, body.spectating #reserve-row-b { font-size: 6px; letter-spacing: 1.4px; }
+body.spectating #reserve-label, body.spectating #reserve-label-b { min-width: 34px; text-align: right; }
+
 /* Queen danger meters: one per player, pips lit per occupied side of the queen */
 #queen-meters { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
 .qm {
@@ -958,6 +1053,53 @@ kbd {
   36%  { transform: scale(1.2) rotate(6deg); }
   54%  { transform: scale(1.3) rotate(-4deg); }
   100% { transform: none; }
+}
+
+/* Game clock: with a clock each queen meter becomes a player plate — meter + time. Untimed, the
+   plates are layout-transparent and the meters sit exactly as before. */
+.plate { display: contents; }
+.clock[hidden] { display: none; }
+#queen-meters.timed { gap: 6px; }
+#queen-meters.timed .plate {
+  --pc: var(--p1);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 30px;
+  padding: 0 9px 0 2px;
+  border-radius: 15px;
+  border: 1px solid rgba(255,255,255,.09);
+  background: rgba(255,255,255,.025);
+  transition: border-color .25s, background .25s, box-shadow .25s;
+}
+#queen-meters.timed .plate.p2 { --pc: var(--p2); }
+#queen-meters.timed .qm { width: 26px; height: 26px; }
+.clock {
+  width: 5em;               /* Press Start 2P is monospaced: "05:00" and "09.4" share one box, nothing shifts */
+  font-size: 9px;
+  line-height: 1;
+  letter-spacing: 0;
+  text-align: center;
+  color: rgba(255,255,255,.42);
+  contain: layout paint;
+  transition: color .25s, text-shadow .25s;
+}
+#queen-meters.timed .plate.active {
+  border-color: color-mix(in srgb, var(--pc) 75%, transparent);
+  background: color-mix(in srgb, var(--pc) 13%, rgba(5,5,15,.6));
+  box-shadow: 0 0 12px color-mix(in srgb, var(--pc) 32%, transparent), inset 0 0 10px color-mix(in srgb, var(--pc) 12%, transparent);
+}
+.plate.active .clock { color: #fff; text-shadow: 0 0 6px var(--pc); }
+/* Local clock held (☰, How to Play, review, hidden page): the running side's time breathes */
+.plate.active.paused .clock { animation: clock-held 1.6s ease-in-out infinite; }
+/* Under 10 s: red, with a pulse once a second */
+#queen-meters.timed .plate.low { --pc: #ff3048; animation: clock-low 1s ease-out infinite; }
+.plate.low .clock { color: #ffd0d5; text-shadow: 0 0 8px #ff3048; }
+.plate.flagged .clock { color: #ff3048; text-shadow: 0 0 8px rgba(255,48,72,.7); }
+@keyframes clock-held { 50% { opacity: .35; } }
+@keyframes clock-low {
+  0%   { box-shadow: 0 0 18px rgba(255,48,72,.85), inset 0 0 12px rgba(255,48,72,.45); background: rgba(255,48,72,.32); }
+  100% { box-shadow: 0 0 8px rgba(255,48,72,.25), inset 0 0 6px rgba(255,48,72,.1); background: rgba(255,48,72,.1); }
 }
 
 /* The win sequence dims the board round the fallen queen(s) */
@@ -1227,6 +1369,76 @@ kbd {
 }
 #board-hint.visible { opacity: 1; }
 
+/* ── Off-screen target chevrons (board.onIndicators → app.js) ──
+   One per edge cluster of legal targets outside the playable area: a dark disc with a neon rim,
+   a chevron turned toward the targets (--a) and a count. Tapping pans them into view. */
+#edge-hints { position: fixed; inset: 0; z-index: 15; pointer-events: none; }
+.edge-hint {
+  --c: var(--ghost);
+  --c-glow: rgba(57, 255, 20, .45);
+  position: absolute;
+  left: 0; top: 0;
+  width: 44px; height: 44px;
+  margin: -22px 0 0 -22px;           /* (x, y) from the transform is the centre */
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--c);
+  pointer-events: none; /* taps reach the board (onTap hit-tests the chevrons), so a drag from one still pans */
+  animation: edge-hint-in .22s var(--ease-out) both;
+  -webkit-tap-highlight-color: transparent;
+}
+.edge-hint.throw { --c: var(--amber); --c-glow: rgba(255, 179, 0, .45); }
+.edge-hint::before {                  /* the disc */
+  content: '';
+  position: absolute;
+  inset: 8px;
+  border-radius: 50%;
+  background: rgba(5, 5, 15, .82);
+  border: 1.5px solid var(--c);
+  box-shadow: 0 0 6px var(--c-glow), inset 0 0 5px var(--c-glow);
+}
+.edge-hint::after {                   /* halo: breathes three times when a chevron appears, then rests */
+  content: '';
+  position: absolute;
+  inset: 8px;
+  border-radius: 50%;
+  box-shadow: 0 0 14px 2px var(--c-glow);
+  opacity: 0;
+  animation: edge-hint-pulse 1.6s ease-in-out 3;
+  will-change: opacity;
+}
+.edge-hint .eh-chevron {
+  position: absolute;
+  left: 50%; top: 50%;
+  width: 16px; height: 16px;
+  margin: -8px 0 0 -8px;
+  transform: rotate(var(--a, 0rad)) translateX(1px);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 0 3px var(--c-glow));
+}
+.edge-hint .eh-count {
+  position: absolute;
+  right: 1px; top: 2px;
+  min-width: 15px; height: 15px;
+  padding: 0 3px;
+  border-radius: 8px;
+  background: var(--c);
+  color: #05050f;
+  font: 7px/15px var(--font);
+  text-align: center;
+  box-shadow: 0 0 6px var(--c-glow);
+}
+.edge-hint.hover::before { background: rgba(5, 5, 15, .95); box-shadow: 0 0 12px var(--c-glow), inset 0 0 8px var(--c-glow); }
+.edge-hint:focus-visible { outline: none; }
+.edge-hint:focus-visible::before { outline: 2px solid #fff; outline-offset: 3px; }
+@keyframes edge-hint-in { from { opacity: 0; scale: .6; } to { opacity: 1; scale: 1; } }
+@keyframes edge-hint-pulse { 50% { opacity: 1; } }
+
 .float-btn {
   position: fixed;
   z-index: 18;
@@ -1273,9 +1485,12 @@ kbd {
 #toast.visible { opacity: 1; transform: translate(-50%, 0); }
 #toast.has-action { display: flex; align-items: center; gap: 12px; }
 #toast.has-action .toast-action { pointer-events: auto; } /* only the button takes taps; the pill never blocks */
-/* Over the main menu the bottom is START / CONTINUE: hang the toast from the top instead. */
-body:has(#menu-screen.active) #toast { top: calc(var(--safe-top) + 12px); bottom: auto; transform: translate(-50%, -10px); }
-body:has(#menu-screen.active) #toast.visible { transform: translate(-50%, 0); }
+/* Over the main menu: dock at the very bottom, under START and clear of the HIVE logo; while it shows,
+   the menu gains room below so START (and HOW TO PLAY) can always scroll out from under it. */
+body:has(#menu-screen.active) #toast { bottom: calc(var(--safe-bottom) + 12px); }
+/* The update offer itself is shown in the menu's own flow (#menu-update), never over the logo or START;
+   the floating copy only stays while How to Play covers the menu (everything else is inert then). */
+body:has(#menu-screen.active):not(:has(#rules-overlay.active)) #toast.has-action { display: none; }
 .toast-action {
   min-height: 32px;
   padding: 0 12px;
@@ -1303,6 +1518,9 @@ body:has(#menu-screen.active) #toast.visible { transform: translate(-50%, 0); }
   align-items: center;
   gap: 12px;
   padding: 10px 20px 10px 12px;
+  width: max-content;
+  max-width: calc(100vw - 32px); /* never wider than the screen minus a 16px gutter: long copy wraps */
+  box-sizing: border-box;
   border: 1.5px solid var(--banner-color, var(--p1));
   border-radius: 999px;
   background: rgba(5,5,15,.92);
@@ -1340,8 +1558,12 @@ body:has(#menu-screen.active) #toast.visible { transform: translate(-50%, 0); }
   letter-spacing: 2px;
   color: var(--banner-color, var(--p1));
   text-shadow: 0 0 14px var(--banner-color, var(--p1));
-  white-space: nowrap;
+  min-width: 0;
+  text-align: center;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
+@media (max-width: 430px) { #turn-banner { padding: 8px 16px 8px 10px; gap: 9px; border-radius: 26px; } }
 
 /* ── Tray ────────────────────────────────────────────────── */
 #tray {
@@ -1564,6 +1786,8 @@ body:has(#menu-screen.active) #toast.visible { transform: translate(-50%, 0); }
   filter: drop-shadow(0 0 6px var(--rim)) drop-shadow(0 0 18px color-mix(in srgb, var(--rim) 45%, transparent));
 }
 #win-emblem .sprite { width: 72%; height: 72%; }
+/* Lost on time: a stopwatch in the danger red (menu-icon sprites take their colour from CSS) */
+#win-emblem.icon-emblem .sprite { width: 64%; height: 64%; color: #ff6170; filter: drop-shadow(0 0 4px rgba(255,48,72,.8)); }
 #win-kicker { font-size: 6px; letter-spacing: 3px; color: var(--ui-dim); }
 #win-headline {
   font-size: clamp(16px, 5.5vw, 26px);
@@ -1601,6 +1825,7 @@ body.reviewing #tray { opacity: 0; pointer-events: none; transform: translateY(8
 body.reviewing #btn-recenter { bottom: calc(var(--rb-h, 150px) + 12px); }
 body.reviewing #toast { bottom: calc(var(--rb-h, 150px) + 14px); }
 body.sheet-open #toast { top: calc(var(--hud-h) + var(--safe-top) + 10px); bottom: auto; } /* clear of the move rows */
+body.reviewing.sheet-open #toast { top: calc(var(--hud-h) + var(--safe-top) + 60px); } /* …and of the review exit pill */
 #hud.reviewing::after { background: linear-gradient(90deg, transparent, var(--gold), transparent); }
 #hud.reviewing #turn-chip { border-style: dashed; }
 
@@ -1853,6 +2078,7 @@ body.sheet-open #toast { top: calc(var(--hud-h) + var(--safe-top) + 10px); botto
   gap: 10px;
   padding: 12px 16px calc(12px + var(--safe-bottom));
   border-top: 1px solid var(--ui-border);
+  background: rgb(14, 15, 34); /* opaque: the replay bar / tray never shows through the buttons */
 }
 #moves-actions .btn { flex: 1 1 0; min-height: 42px; }
 #moves-actions .icon { width: 14px; height: 14px; }
@@ -1913,6 +2139,11 @@ input:focus-visible {
   .qm { width: 24px; height: 24px; }
   #queen-meters { gap: 0; }
   #chip-sub { display: none; }
+  /* Timed: the two plates stack into a small scoreboard (P1 over P2) */
+  #queen-meters.timed { flex-direction: column; align-items: stretch; gap: 3px; }
+  #queen-meters.timed .plate { height: 21px; padding: 0 7px 0 1px; gap: 2px; border-radius: 11px; }
+  #queen-meters.timed .qm { width: 20px; height: 20px; }
+  .clock { font-size: 8px; }
   #status-text { font-size: 8px; letter-spacing: .6px; line-height: 1.6; }
   #hud-actions { gap: 4px; }
   .hud-btn { width: 38px; height: 38px; }
@@ -1979,8 +2210,16 @@ input:focus-visible {
    opponent's reserve folded in beside your pieces. */
 @media (max-height: 500px) and (orientation: landscape) {
   :root { --hud-h: 44px; --tray-h: 64px; }
+  /* Short screens: the sheet starts right under the exit pill, so a toast sits beside the pill instead. */
+  body.reviewing.sheet-open #toast { top: calc(var(--hud-h) + var(--safe-top) + 10px); left: auto; right: 16px; }
+  body.reviewing.sheet-open #toast, body.reviewing.sheet-open #toast.visible { transform: none; }
   #hud-center { align-items: stretch; }
   #status-text { line-height: 1.5; }
+  /* Timed: stacked like on portrait phones, so the status + description line keeps its width */
+  #queen-meters.timed { flex-direction: column; align-items: stretch; gap: 2px; }
+  #queen-meters.timed .plate { height: 19px; padding: 0 7px 0 1px; gap: 2px; border-radius: 10px; }
+  #queen-meters.timed .qm { width: 18px; height: 18px; }
+  .clock { font-size: 8px; }
   #piece-desc {
     position: static;
     padding: 0;
@@ -2012,6 +2251,9 @@ input:focus-visible {
   .reserve-item .sprite { width: 13px; height: 13px; }
   #tray-pieces { flex: 1 1 auto; align-items: center; gap: 6px; }
   .piece-slot { flex-basis: 50px; gap: 1px; padding-top: 2px; }
+  body.spectating #tray { flex-direction: row; justify-content: center; gap: 18px; padding: 4px 12px calc(4px + var(--safe-bottom)); }
+  body.spectating #reserve-row, body.spectating #reserve-row-b { flex: 1 1 0; flex-direction: row; justify-content: center; gap: 6px; }
+  body.spectating .spectator-count { height: 24px; }
   #replay-bar {
     /* The label sizes to its content (the full notation; 160px fits the usual ones, so the slider
        holds still while stepping); the slider takes what is left. */
@@ -2044,4 +2286,6 @@ input:focus-visible {
     transition-duration: .01ms !important;
   }
   #crt { display: none; }
+  .plate.low, .plate.active.paused .clock { animation: none !important; }
+  #queen-meters.timed .plate.low { background: rgba(255,48,72,.22); }
 }

@@ -1,6 +1,6 @@
 // hints.js — Status-line copy for the HUD. Pure; no DOM.
 
-import { ActionType, getAllLegalActions, getLegalPlacements, getLegalMoves, getLegalThrows, queenPressure } from './game.js';
+import { ActionType, getAllLegalActions, getLegalPlacements, getLegalMoves, getLegalThrows, queenPressure, positionHash, REPETITION_LIMIT } from './game.js';
 
 const BLOCKER_TEXT = {
   NOT_YOUR_PIECE:   "THAT'S NOT YOUR PIECE",
@@ -25,15 +25,28 @@ function placedCount(board, player) {
  * @param {string|null} [ctx.blocker]  getMoveBlocker() result for the selected piece
  * @param {number} [ctx.throwCount] throwable neighbours of the selected piece
  * @param {string} [ctx.pieceName]  display name of the selected tray piece
- * @param {string|null} [ctx.winReason] 'QUEEN' | 'STALEMATE' | 'RESIGN' | null — why the game ended
+ * @param {string|null} [ctx.winReason] 'QUEEN' | 'STALEMATE' | 'REPETITION' | 'RESIGN' | 'TIMEOUT' | null — why the game ended
  */
+/** Times the current position has occurred (0 when unknown). */
+export function repetitionCount(state) {
+  return state.positionCounts?.[positionHash(state)] ?? 0;
+}
+
 export function statusText({ state, phase = 'IDLE', mode = 'LOCAL', myPlayer = 1, blocker = null, throwCount = 0, pieceName = 'PIECE', winReason = null }) {
-  const online = mode === 'ONLINE';
+  const watching = isSpectator(mode, myPlayer);
+  const online = mode === 'ONLINE' && !watching; // a spectator reads like a local game: neutral "PLAYER N" copy
 
   if (state.winner === 'DRAW') {
-    return winReason === 'STALEMATE' ? 'DRAW — NO MOVES LEFT' : 'DRAW — BOTH QUEENS SURROUNDED';
+    if (winReason === 'STALEMATE') return 'DRAW — NO MOVES LEFT';
+    if (winReason === 'REPETITION' || state.drawReason === 'REPETITION') return 'DRAW — THREEFOLD REPETITION';
+    return 'DRAW — BOTH QUEENS SURROUNDED';
   }
   if (state.winner) {
+    if (winReason === 'TIMEOUT') {
+      const loser = state.winner === 1 ? 2 : 1;
+      if (online) return loser === myPlayer ? 'YOU RAN OUT OF TIME' : 'OPPONENT RAN OUT OF TIME';
+      return `P${loser} RAN OUT OF TIME`;
+    }
     if (winReason === 'RESIGN') {
       const loser = state.winner === 1 ? 2 : 1;
       if (online) return loser === myPlayer ? 'YOU RESIGNED' : 'OPPONENT RESIGNED — YOU WIN';
@@ -42,7 +55,14 @@ export function statusText({ state, phase = 'IDLE', mode = 'LOCAL', myPlayer = 1
     if (online) return state.winner === myPlayer ? 'YOU WIN' : 'YOU LOSE';
     return `PLAYER ${state.winner} WINS`;
   }
-  if (online && state.turn !== myPlayer) return "OPPONENT'S TURN…";
+  const repeated = repetitionCount(state) === REPETITION_LIMIT - 1
+    ? `REPETITION ${REPETITION_LIMIT - 1}/${REPETITION_LIMIT}` : null;
+  if (online && state.turn !== myPlayer) return repeated ?? "OPPONENT'S TURN…"; // both seats see the warning
+  if (watching) {
+    if (queenPressure(state)[state.turn] === DANGER_AT) return dangerText(state.turn, { mode, myPlayer });
+    if (repeated) return repeated;
+    return getAllLegalActions(state).mustPass ? `P${state.turn} HAS NO MOVES` : `P${state.turn}\u00a0TO\u00a0MOVE`;
+  }
   if (getAllLegalActions(state).mustPass) return 'NO LEGAL MOVES — YOU MUST PASS';
 
   if (phase === 'TRAY')  return `TAP A GREEN HEX TO PLACE ${pieceName}`;
@@ -56,6 +76,8 @@ export function statusText({ state, phase = 'IDLE', mode = 'LOCAL', myPlayer = 1
 
   if (queenPressure(state)[state.turn] === DANGER_AT) return dangerText(state.turn, { mode, myPlayer });
 
+  if (repeated) return repeated;
+
   const placed = placedCount(state.board, state.turn);
   if (placed === 0) return 'PLACE YOUR FIRST PIECE';
   if (!state.queenPlaced[state.turn]) {
@@ -67,9 +89,12 @@ export function statusText({ state, phase = 'IDLE', mode = 'LOCAL', myPlayer = 1
 /** Occupied sides at which a queen is one move from being surrounded. */
 export const DANGER_AT = 5;
 
+/** An online viewer with no seat (`myPlayer` null): watching the room, never acting. */
+export const isSpectator = (mode, myPlayer) => mode === 'ONLINE' && myPlayer == null;
+
 /** "P1 QUEEN IN DANGER" — online, from the viewer's side ("YOUR" / "ENEMY"). */
 export function dangerText(player, { mode = 'LOCAL', myPlayer = 1 } = {}) {
-  if (mode !== 'ONLINE') return `P${player} QUEEN IN DANGER`;
+  if (mode !== 'ONLINE' || myPlayer == null) return `P${player} QUEEN IN DANGER`;
   return `${player === myPlayer ? 'YOUR' : 'ENEMY'} QUEEN IN DANGER`;
 }
 
@@ -88,10 +113,12 @@ export function newDangers(prev, next) {
 /**
  * Map a server end reason (GAME_OVER.reason / ROOM_RESUMED.endReason) onto the
  * client's winReason. A server 'DRAW' means both queens fell together.
- * @returns {'QUEEN'|'RESIGN'|null}
+ * @returns {'QUEEN'|'REPETITION'|'RESIGN'|'TIMEOUT'|null}
  */
 export function winReasonFromServer(reason) {
   if (reason === 'RESIGN') return 'RESIGN';
+  if (reason === 'TIMEOUT') return 'TIMEOUT';
+  if (reason === 'REPETITION') return 'REPETITION';
   if (reason === 'QUEEN' || reason === 'DRAW') return 'QUEEN';
   return null;
 }
@@ -103,13 +130,25 @@ export function resumedWinReason(state, endReason) {
 
 /** Label for the HUD turn chip: whose turn it is, or the result once the game is over. */
 export function turnChipText({ state, mode = 'LOCAL', myPlayer = 1 }) {
-  const online = mode === 'ONLINE';
+  const online = mode === 'ONLINE' && !isSpectator(mode, myPlayer);
   if (state.winner === 'DRAW') return 'DRAW';
   if (state.winner) {
     if (online) return state.winner === myPlayer ? 'YOU WIN' : 'YOU LOSE';
     return `P${state.winner} WINS`;
   }
   return online ? (state.turn === myPlayer ? 'YOU' : 'OPP') : `P${state.turn}`;
+}
+
+/**
+ * Turn banner after an online reconnect (ROOM_RESUMED): whose move it is now.
+ * Colour is the mover's (`p1`/`p2`), or `gold` when you have no legal move and must tap PASS.
+ * @returns {{text:string, color:string}|null} null once the game is over (the result card speaks)
+ */
+export function resumeBanner({ state, myPlayer, mustPass = false }) {
+  if (state.winner) return null;
+  if (myPlayer == null) return { text: `PLAYER ${state.turn}'S TURN`, color: `p${state.turn}` }; // spectator
+  if (state.turn !== myPlayer) return { text: "OPPONENT'S TURN", color: `p${state.turn}` };
+  return mustPass ? { text: 'NO MOVES — TAP PASS', color: 'gold' } : { text: 'YOUR TURN', color: `p${state.turn}` };
 }
 
 /**

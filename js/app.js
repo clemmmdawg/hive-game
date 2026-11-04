@@ -1,6 +1,6 @@
 // app.js — Game state machine + UI
 import { hexKey, hexToPixel } from './hex.js';
-import { Board, moveDuration, winTiming, queenPips } from './board.js';
+import { Board, moveDuration, queenPips } from './board.js';
 import {
   PieceType, ActionType,
   createGame, applyAction,
@@ -9,15 +9,20 @@ import {
 } from './game.js';
 import { initMenu, showMenu, showConfirm, showRules, leaveOnlineSession, isOverlayOpen, copyText } from './menu.js';
 import {
-  statusText, describeLastMove, inferAction, winReasonFromServer, resumedWinReason, turnChipText,
-  dangerText, newDangers,
+  statusText, repetitionCount, describeLastMove, inferAction, winReasonFromServer, resumedWinReason, turnChipText,
+  dangerText, newDangers, resumeBanner, isSpectator,
 } from './hints.js';
 import { logEntry, undoLogEntry } from './notation.js';
-import { replayForGame, plyInfo, movesText, notationHTML, escapeHTML } from './replay.js';
 import { encodeLocalSave, decodeLocalSave, MAX_UNDO } from './local-save.js';
-import { spriteSVG, drawSprite, SPECIES_COLOR, bodyFill } from './sprites.js';
+import { spriteSVG } from './sprites.js';
+import { createWinFx } from './win-fx.js';
+import { createReview } from './review.js';
 import * as net from './net.js';
 import { sfx } from './audio.js';
+import {
+  createClock, endTurn, remainingFor, isFlagged, pause as pauseClock, resume as resumeClock, flag as flagClock,
+  rebaseClock, formatClock, LOW_TIME_MS, announcedPass,
+} from './clock.js';
 
 // ── Piece display definitions ──────────────────────────
 
@@ -106,8 +111,25 @@ function updateInsets() {
   const bar = $('replay-bar').offsetHeight;
   document.documentElement.style.setProperty('--rb-h', `${bar}px`);
   board.insets = !gameState ? { top: 0, bottom: 0 }
-    : review ? { top: Math.round($('review-pill').getBoundingClientRect().bottom), bottom: bar }
+    : reviewer.active ? { top: Math.round($('review-pill').getBoundingClientRect().bottom), bottom: bar }
     : { top: $('hud').offsetHeight, bottom: $('tray').offsetHeight };
+  updateOverlayInsets();
+}
+
+/**
+ * The off-screen chevrons also keep clear of the piece bar hanging under the HUD (inline on
+ * landscape phones) and of the floating recenter button in the bottom-right corner.
+ */
+function updateOverlayInsets() {
+  const desc = $('piece-desc');
+  const hangs = !!gameState && desc.classList.contains('visible') && getComputedStyle(desc).position === 'absolute';
+  const { top, bottom } = board.insets;
+  // scrollHeight is the bar's full content height even mid slide-in; + its padding.
+  const overlayTop = hangs ? top + desc.scrollHeight + 12 : top;
+  const btn = $('btn-recenter').getBoundingClientRect();
+  // A 44 px chevron centred this far from the corner clears the button by ~6 px.
+  const cornerBR = btn.width ? Math.max(window.innerWidth - btn.left, window.innerHeight - bottom - btn.top) + 28 : undefined;
+  board.overlayInsets = { top: overlayTop, bottom, cornerBR };
 }
 
 board.resize(window.innerWidth, window.innerHeight);
@@ -117,7 +139,8 @@ window.addEventListener('resize', () => {
 });
 
 // Request the next frame first: an exception in a landing callback must not freeze the board.
-(function loop(t) { requestAnimationFrame(loop); board.draw(t); })(0);
+// (Started on the first frame: renderClocks reads game state declared further down.)
+requestAnimationFrame(function loop(t) { requestAnimationFrame(loop); board.draw(t); renderClocks(); });
 
 // The ×N stack badges use the pixel font: re-render the cached layer once it has
 // loaded, or a cold start keeps the fallback face in the cache.
@@ -128,23 +151,22 @@ document.fonts?.ready.then(() => board.invalidate());
 let gameState    = null;
 let gameSettings = null;   // saved so "rematch" can reuse them
 let gameMode     = 'LOCAL'; // 'LOCAL' | 'ONLINE'
-let myPlayer     = 1;       // 1 or 2 — only meaningful in ONLINE mode
+let myPlayer     = 1;       // 1 or 2 — only meaningful in ONLINE mode; null = a spectator (watching, never acting)
 let history      = [];      // LOCAL only: states before each action, for undo
 let moveLog      = [];      // { notation, player, turnNumber, action } per move: local = recorded here, online = the server's history
-let winPresented = false;
-let winReason    = null;    // null | 'QUEEN' | 'RESIGN' | 'STALEMATE'
+let winReason    = null;    // null | 'QUEEN' | 'RESIGN' | 'STALEMATE' | 'REPETITION' | 'TIMEOUT'
 let passTimer    = null;    // pending automatic pass in LOCAL mode
-let winTimer     = null;
-let winFxTimer   = null;   // shockwave + dim when the winning move did not fly
-let winTouchdown = null;   // …or run by board.onLand when the winning piece touches down
-let winDeferred  = null;   // card options while the ☰ menu held the result card back
-let holdResult   = false;  // the winning piece is still in the air: the HUD keeps the result for the impact
 let dangerTimer  = null;   // queen-in-danger alarm for a move that did not fly
 let landingAlarm = null;   // …or raised by board.onLand when the piece that caused it touches down
 let turnSoundTimer = null; // "your turn" chime, held back until the opponent's piece lands
 let connectionNotice = null; // shown in place of the status line while offline
 let opponentAway = false;
-let review = null;           // game review (move preview / replay) — see "Game review" below
+let awayPlayers  = new Set(); // spectator view: which players' sockets are down
+let spectatorCount = 0;     // 👁 N: watchers in the room (ONLINE)
+let repetitionWarned = false; // the REPETITION 2/3 banner fires once per game
+let clock        = null;    // js/clock.js clock, null = untimed. LOCAL: owned here (Date.now() time base);
+                            // ONLINE: the server's, rebased onto Date.now() (display only — the server flags)
+let clockHistory = [];      // LOCAL only: the clock (paused) before each `history` entry, for undo
 
 const uiState = {
   phase:           'IDLE',
@@ -228,7 +250,18 @@ function toast(text, kind = '', ms = 2200) {
   toastTimer = ms ? setTimeout(clearToast, ms) : null;
 }
 
-/** Offer a freshly installed service worker: a persistent toast with RELOAD (re-shown after other toasts). */
+/** RELOAD (toast or menu banner): activate the waiting worker; controllerchange then reloads. */
+function requestReload(worker) {
+  reloadRequested = true;
+  for (const b of document.querySelectorAll('#toast .toast-action, #btn-menu-reload')) b.disabled = true;
+  worker.postMessage('SKIP_WAITING');
+}
+
+/**
+ * Offer a freshly installed service worker: a persistent toast with RELOAD (re-shown after other
+ * toasts) in game, and the same offer in the main menu's own layout (#menu-update; the floating
+ * toast is hidden there so it never covers the logo or START).
+ */
 function showUpdateToast(worker) {
   pendingUpdate = worker;
   toast('NEW VERSION READY', 'good', 0);
@@ -238,13 +271,14 @@ function showUpdateToast(worker) {
   btn.className = 'toast-action';
   btn.textContent = 'RELOAD';
   btn.disabled = reloadRequested;
-  btn.addEventListener('click', () => {
-    reloadRequested = btn.disabled = true;
-    worker.postMessage('SKIP_WAITING');
-  });
+  btn.addEventListener('click', () => requestReload(worker));
   el.append(btn);
   el.classList.add('has-action');
+  $('menu-update').hidden = false;
+  $('btn-menu-reload').disabled = reloadRequested;
 }
+
+$('btn-menu-reload').addEventListener('click', () => { if (pendingUpdate) requestReload(pendingUpdate); });
 
 /** Register the offline worker; a waiting update is offered, never forced (a game may be in progress). */
 function initServiceWorker() {
@@ -291,11 +325,17 @@ function hideBanner() {
 
 // ── Game screen visibility ─────────────────────────────
 
+/** Online and without a seat: the viewer watches the room and can never act. */
+const watching = () => isSpectator(gameMode, myPlayer);
+
+
 function showGame() {
+  document.body.classList.toggle('spectating', watching()); // the tray's height depends on it: set before measuring insets
   for (const id of ['hud', 'tray', 'btn-recenter']) $(id).classList.add('game-visible');
   updateInsets();
   board.recenter(false);
   showBoardHintOnce();
+  syncClockRun(); // a local clock starts (or a continued one resumes) once the game is on screen
 }
 
 function hideGame() {
@@ -305,17 +345,15 @@ function hideGame() {
   clearToast();
   for (const id of ['hud', 'tray', 'btn-recenter']) $(id).classList.remove('game-visible');
   $('board-hint').classList.remove('visible');
-  hideWinScreen();
+  winFx.hide();
 }
 
 function cancelTimers() {
   if (passTimer) clearTimeout(passTimer);
-  if (winTimer) clearTimeout(winTimer);
   if (turnSoundTimer) clearTimeout(turnSoundTimer);
-  if (winFxTimer) clearTimeout(winFxTimer);
   if (dangerTimer) clearTimeout(dangerTimer);
-  passTimer = winTimer = turnSoundTimer = winFxTimer = dangerTimer = winTouchdown = landingAlarm = winDeferred = null;
-  holdResult = false;
+  passTimer = turnSoundTimer = dangerTimer = landingAlarm = null;
+  winFx.cancel();
 }
 
 function resetBoardView() {
@@ -331,16 +369,21 @@ function resetBoardView() {
 /** Tear down the current game and return to the main menu. */
 function exitToMenu({ notice, keepSaved = false } = {}) {
   cancelTimers();
-  endReview();
-  closeMovesSheet({ restoreFocus: false });
+  reviewer.end();
+  reviewer.closeSheet({ restoreFocus: false });
   hideGame();
   resetBoardView();
   if (gameMode === 'ONLINE') leaveOnlineSession({ keepSaved });
   gameState = null;
   history = [];
   moveLog = [];
+  clock = null;
+  clockHistory = [];
   connectionNotice = null;
   opponentAway = false;
+  awayPlayers.clear();
+  spectatorCount = 0;
+  document.body.classList.remove('spectating');
   updateInsets();
   board.recenter(false);
   showMenu({ notice });
@@ -359,6 +402,9 @@ function startGame(settings, restore = null) {
   gameSettings = settings;
   history      = restore?.history ?? [];
   moveLog      = restore?.moveLog ?? [];
+  // A new clock stands still until the game screen shows; a continued one comes back paused.
+  clock        = restore ? restore.clock : createClock(settings.clock);
+  clockHistory = restore?.clockHistory ?? [];
   gameState    = restore?.state ?? createGame({
     expansions:     settings.expansions,
     tournamentRule: settings.tournamentRule,
@@ -372,39 +418,58 @@ function startGame(settings, restore = null) {
 /**
  * Start an online game received from the server.
  * @param {object} settings        - Game settings (from GAME_START)
- * @param {number} playerNum       - 1 or 2
+ * @param {number|null} playerNum  - 1 or 2; null = join as a spectator (SPECTATING)
  * @param {object} serializedState - JSON-safe state from serializeState()
  * @param {string|null} [endReason] - server end reason when resuming a finished game
  * @param {object[]} [serverHistory] - the room's move log so far (GAME_START: [], ROOM_RESUMED: all of it)
+ * @param {{clock?: object, serverNow?: number}} [clockInfo] - the room's clock (timed games) and the server time it was sent at
  */
-export function startOnlineGame(settings, playerNum, serializedState, endReason = null, serverHistory = []) {
+export function startOnlineGame(settings, playerNum, serializedState, endReason = null, serverHistory = [], clockInfo = {}) {
   cancelTimers();
   gameMode     = 'ONLINE';
   myPlayer     = playerNum;
   gameSettings = settings;
   history      = [];
+  clockHistory = [];
+  setServerClock(clockInfo);
   moveLog      = serverHistory ?? [];
   gameState    = deserializeState(serializedState);
   connectionNotice = null;
   opponentAway = false;
+  awayPlayers.clear();
+  spectatorCount = 0;
   beginGameSession(describeLastMove(null, gameState));
   winReason = resumedWinReason(gameState, endReason);
   if (gameState.winner) {
     syncUI();
     // Reloaded into a finished game: the result, without replaying the fanfare.
-    winTimer = setTimeout(() => showWinScreen({ calm: true }), 300);
+    winFx.scheduleCard(300, { calm: true });
+  } else if (watching()) {
+    showBanner(`WATCHING · P${gameState.turn} TO MOVE`, `p${gameState.turn}`, PieceType.QUEEN, 1800);
+    for (const p of clockInfo.away ?? []) awayPlayers.add(p); // a player already disconnected when we joined
+    const [gone] = awayPlayers;
+    if (gone) toast(`PLAYER ${gone} DISCONNECTED`, 'warn', 0);
   } else {
     showBanner(`YOU ARE PLAYER ${myPlayer}`, `p${myPlayer}`, PieceType.QUEEN, 1800);
   }
 }
 
+// The persistent "away" notices (opponent / spectated player disconnected) are moot once the game is over.
+function clearAwayToast() {
+  if (opponentAway || awayPlayers.size) clearToast();
+  opponentAway = false;
+  awayPlayers.clear();
+}
+
 function beginGameSession(lastMove) {
-  endReview();
-  closeMovesSheet({ restoreFocus: false });
+  repetitionWarned = false;
+  lowTickAt = null;
+  reviewer.end();
+  reviewer.closeSheet({ restoreFocus: false });
   board.finishAnimations({ clearFx: true });
-  winPresented = false;
+  winFx.reset();
   winReason    = null;
-  hideWinScreen();
+  winFx.hide();
   clearSelection(false);
   board.lastMove = lastMove;
   syncBoardRenderer();
@@ -417,7 +482,10 @@ function beginGameSession(lastMove) {
 function saveLocal() {
   if (gameMode !== 'LOCAL' || !gameState) return;
   if (gameState.winner) { storageSet(LOCAL_SAVE_KEY, null); return; }
-  storageSet(LOCAL_SAVE_KEY, encodeLocalSave({ settings: gameSettings, state: gameState, history, moveLog }));
+  storageSet(LOCAL_SAVE_KEY, encodeLocalSave({
+    settings: gameSettings, state: gameState, history, moveLog,
+    clock: pauseClock(clock, Date.now()), clockHistory, // the time spent so far is saved, even mid-turn
+  }));
 }
 
 function loadLocalSave() {
@@ -430,7 +498,8 @@ function localSaveSummary() {
   const round = Math.ceil(saved.state.turnNumber / 2);
   const exps  = Object.entries(saved.state.settings.expansions ?? {}).filter(([, on]) => on)
     .map(([name]) => name.toUpperCase());
-  return `ROUND ${round} · PLAYER ${saved.state.turn} TO MOVE${exps.length ? ` · +${exps.join(' +')}` : ''}`;
+  const timed = saved.clock ? ` · ${formatClock(remainingFor(saved.clock, saved.state.turn, 0))} LEFT` : '';
+  return `ROUND ${round} · PLAYER ${saved.state.turn} TO MOVE${timed}${exps.length ? ` · +${exps.join(' +')}` : ''}`;
 }
 
 function continueLocal() {
@@ -444,7 +513,7 @@ function continueLocal() {
 /** Show the live game — or, while reviewing, the position under review — on the board. */
 function syncBoardRenderer() {
   board.pieces.clear();
-  const shown = review?.replay.state ?? gameState;
+  const shown = reviewer.shownState ?? gameState;
   if (!shown) return;
   for (const [key, stack] of shown.board.entries()) {
     board.pieces.set(key, stack.map(p => ({
@@ -551,6 +620,7 @@ function selectThrowPiece(fromKey, pillbugKey) {
 
 /** Route an action to the server (ONLINE) or apply it locally. */
 function act(action) {
+  if (watching()) return; // the server would refuse it anyway (NOT_A_PLAYER)
   board.finishAnimations(); // a new action completes any running tween
   if (gameMode === 'ONLINE') {
     if (!net.isConnected()) {
@@ -569,11 +639,16 @@ function act(action) {
   }
 
   const prev = gameState;
+  const now  = Date.now();
+  if (isFlagged(clock, prev.turn, now)) { flagLocal(now); return; } // the flag fell before this frame noticed
   const move = getMovePath(prev, action);
   history.push(prev);
+  clockHistory.push(pauseClock(clock, now));
   moveLog.push(logEntry(prev, action));
-  if (history.length > MAX_UNDO) history.shift();
+  if (history.length > MAX_UNDO) { history.shift(); clockHistory.shift(); }
   gameState = applyAction(prev, action);
+  clock = endTurn(clock, prev.turn, now);
+  if (gameState.winner) clock = pauseClock(clock, now);
   onStateChanged(prev, { move });
 }
 
@@ -597,7 +672,7 @@ function doThrow(toKey) {
  * one the arriving piece just pops in.
  */
 function onStateChanged(prev, { animate = true, move = null } = {}) {
-  leaveReviewForLive();
+  reviewer.leaveForLive();
   clearSelection(false);
   const lastMove = describeLastMove(prev, gameState);
   if (lastMove) board.lastMove = lastMove;
@@ -610,67 +685,22 @@ function onStateChanged(prev, { animate = true, move = null } = {}) {
   if (!flying && lastMove && animate) board.markArrival(lastMove.to);
   if (lastMove && animate) playMoveSound(move?.kind, board.hiddenTop.has(lastMove.to), { alarm: dangers.length > 0 });
   board.reveal(board.pieces.keys(), [], { anchor: lastMove?.to });
-  holdResult = won && flying;
+  winFx.holdResult = won && flying;
   syncUI();
   saveLocal();
 
   if (won) {
     hideBanner();
-    playWinSequence(flying ? move : null);
+    winFx.play(flying ? move : null);
     return;
   }
   const landingMs = flying ? moveDuration(move.kind, move.path.length - 1) : 0;
   announceTurn(landingMs, dangers, landed);
-}
-
-/**
- * The climax: the winning move flies in slow motion; at touchdown a white
- * shockwave rings out of the surrounded queen(s) and the board dims round
- * them; then confetti and the result card. Reduced motion: no slow-mo, no
- * shockwave, the card after 300 ms.
- * @param {{kind:string, path:string[]}|null} move the flown route, if any
- */
-function playWinSequence(move) {
-  if (winTimer) clearTimeout(winTimer);
-  if (winFxTimer) clearTimeout(winFxTimer);
-  const timing = winTiming(move?.kind ?? null, (move?.path.length ?? 1) - 1, { reducedMotion: board.reducedMotion });
-  const queens = surroundedQueens(gameState);
-  const impact = () => {
-    winFxTimer = winTouchdown = null;
-    holdResult = false;
-    board.shockwave(queens);
-    showBoardDim(queens);
-    syncUI();
-  };
-  // Synced to the actual touchdown (frames can lag the clock); the card keeps to the clock.
-  if (timing.flightMs) winTouchdown = impact;
-  else winFxTimer = setTimeout(impact, 0);
-  winTimer = setTimeout(showWinScreen, timing.cardMs);
-}
-
-/** Hex keys of every queen with all six sides occupied. */
-function surroundedQueens(state) {
-  return queenPips(state.board).filter(m => m.count === 6).map(m => m.key);
-}
-
-/** Dim the board round the fallen queen(s): a spotlight on them, the rest 45% darker (evenly with no fallen queen). */
-function showBoardDim(keys) {
-  const el = $('board-dim');
-  const spots = keys.map(k => board.hexToScreen(k));
-  el.classList.toggle('plain', !spots.length);
-  if (spots.length) {
-    const x = spots.reduce((a, p) => a + p.x, 0) / spots.length;
-    const y = spots.reduce((a, p) => a + p.y, 0) / spots.length;
-    const spread = Math.max(0, ...spots.map(p => Math.hypot(p.x - x, p.y - y)));
-    el.style.setProperty('--dim-x', `${x}px`);
-    el.style.setProperty('--dim-y', `${y}px`);
-    el.style.setProperty('--dim-r', `${Math.round(spread + board.SIZE * board.scale * 0.95)}px`);
+  // The position just reached has now occurred twice (the count only passes 2 once): say so (replaces the turn banner for both seats).
+  if (animate && !repetitionWarned && repetitionCount(gameState) === 2) {
+    repetitionWarned = true;
+    showBanner('REPETITION 2/3 — A THIRD TIME DRAWS', 'gold', PieceType.QUEEN, 2200);
   }
-  el.classList.add('visible');
-}
-
-function hideBoardDim() {
-  $('board-dim').classList.remove('visible');
 }
 
 /**
@@ -690,8 +720,8 @@ function playMoveSound(kind, inFlight, { alarm = false } = {}) {
  * landing buzz steps aside rather than cutting the alarm's pattern short.
  */
 board.onLand = () => {
-  if (review) { sfx.play('place'); return; } // a replayed move: nothing live waits on it
-  const alarms = [winTouchdown, landingAlarm].filter(Boolean);
+  if (reviewer.active) { sfx.play('place'); return; } // a replayed move: nothing live waits on it
+  const alarms = [winFx.touchdown, landingAlarm].filter(Boolean);
   landingAlarm = null;
   sfx.play('place', { haptic: !alarms.length });
   for (const fire of alarms) fire();
@@ -706,6 +736,14 @@ board.onLand = () => {
 function announceTurn(landingMs = 0, dangers = [], landed = null) {
   if (!gameState || gameState.winner) return;
   const turn = gameState.turn;
+
+  if (watching()) {
+    // No chime, no "your turn": just whose move it is (an alarm replaces the banner).
+    if (dangers.length) raiseDangerAlarm(dangers, landed);
+    else showBanner(getAllLegalActions(gameState).mustPass ? `P${turn} HAS NO MOVES` : `PLAYER ${turn}'S TURN`,
+      getAllLegalActions(gameState).mustPass ? 'gold' : `p${turn}`, PieceType.QUEEN, 1100);
+    return;
+  }
 
   if (gameMode === 'ONLINE') {
     const mustPass = turn === myPlayer && getAllLegalActions(gameState).mustPass;
@@ -722,15 +760,21 @@ function announceTurn(landingMs = 0, dangers = [], landed = null) {
     if (dangers.length) raiseDangerAlarm(dangers, landed, { banner: false });
     else playTurnChime(landingMs);
     const stuck = gameState;
+    // The pass counts from the moment the banner goes up: the ~1.7 s announcement is nobody's time.
+    const passAt = Date.now();
     passTimer = setTimeout(() => {
       passTimer = null;
       if (gameState !== stuck) return; // undone or quit meanwhile
+      const now = Date.now();
+      if (isFlagged(clock, stuck.turn, passAt)) { flagLocal(passAt); return; }
       moveLog.push(logEntry(stuck, { type: ActionType.PASS }));
       gameState = applyAction(stuck, { type: ActionType.PASS });
+      clock = announcedPass(clock, stuck.turn, passAt, now);
       if (getAllLegalActions(gameState).mustPass) {
         // Neither side can act: the game can never progress.
         gameState = { ...gameState, winner: 'DRAW' };
         winReason = 'STALEMATE';
+        clock = pauseClock(clock, now);
       }
       onStateChanged(stuck, { animate: false });
     }, 1700);
@@ -754,7 +798,7 @@ function raiseDangerAlarm(players, landed, { banner = true } = {}) {
     if (dangerTimer) clearTimeout(dangerTimer);
     dangerTimer = null;
     if (landingAlarm === fire) landingAlarm = null;
-    if (!gameState || gameState.winner || review) return; // nothing live sounds over a review
+    if (!gameState || gameState.winner || reviewer.active) return; // nothing live sounds over a review
     sfx.play('danger');
     if (banner) {
       const text = players.length > 1 ? 'BOTH QUEENS IN DANGER' : dangerText(players[0], { mode: gameMode, myPlayer });
@@ -782,221 +826,160 @@ function playTurnChime(landingMs) {
 }
 
 function undo() {
-  if (gameMode !== 'LOCAL' || !history.length || !gameState || review) return;
+  if (gameMode !== 'LOCAL' || !history.length || !gameState || reviewer.active) return;
   board.finishAnimations({ clearFx: true }); // no animation, and nothing left mid-air
   cancelTimers();
   const restored = history.pop();
+  const restoredClock = clockHistory.pop();
   moveLog = undoLogEntry(moveLog); // the move, plus any forced pass that followed it
   gameState    = restored;
-  winPresented = false;
+  // The clock as it stood when that move was made (paused; syncClockRun restarts it below).
+  if (restoredClock) clock = restoredClock;
+  winFx.reset();
   winReason    = null;
-  hideWinScreen();
+  winFx.hide();
   hideBanner();
   clearSelection(false);
   board.lastMove = describeLastMove(history.at(-1) ?? null, restored);
   if (!history.length && !restored.lastMovedHex) board.lastMove = null;
   syncBoardRenderer();
   syncUI();
+  syncClockRun();
   saveLocal();
   sfx.play('deselect');
   toast(`UNDONE · PLAYER ${restored.turn} TO MOVE`, '', 1400);
 }
 
-// ── Confetti ───────────────────────────────────────────
+// ── Game clock (js/clock.js) ───────────────────────────
 
-// Pre-render each bug sprite once (species colour, with each player's glow) to a small
-// offscreen canvas. drawImage() is a fast GPU blit; re-drawing paths every frame is not.
-const SPRITE_SIZE  = 36;
-const CONFETTI_GLOW = ['#ff2d78', '#00f5ff'];
-const bugSprites   = TRAY_ORDER.flatMap(type => CONFETTI_GLOW.map(glow => {
-  const colors = { ink: SPECIES_COLOR[type], fill: bodyFill(SPECIES_COLOR[type]), glow };
-  const px  = SPRITE_SIZE * 3; // enough backing pixels for the largest particle at dpr 2
-  const oc  = document.createElement('canvas');
-  oc.width  = px;
-  oc.height = px;
-  const octx = oc.getContext('2d');
-  if (!drawSprite(octx, type, px / 2, px / 2, px, colors)) {
-    octx.font         = `${px - 12}px serif`;
-    octx.textAlign    = 'center';
-    octx.textBaseline = 'middle';
-    octx.fillText(PIECE_UI[type].emoji, px / 2, px / 2);
-  }
-  return oc;
-}));
+const clockEls  = { 1: $('clock-1'), 2: $('clock-2') };
+const plateEls  = { 1: $('plate-1'), 2: $('plate-2') };
+const clockText = { 1: '', 2: '' };   // what each display shows (written only when it changes)
+const plateCls  = { 1: '', 2: '' };
+let clockUiOn   = false;
+let lowTickAt   = null;               // whole second of the last low-time tick
 
-let confettiRaf = null; // handle so we can cancel a running loop
-
-function stopConfetti() {
-  if (confettiRaf !== null) cancelAnimationFrame(confettiRaf);
-  confettiRaf = null;
-  const cv = $('confetti-layer');
-  cv.style.display = 'none';
+/** An online clock from the server: rebased onto our Date.now() (skew-free). Untimed → null. */
+function setServerClock({ clock: serverClock, serverNow } = {}) {
+  const now = Date.now();
+  clock = serverClock ? rebaseClock(serverClock, typeof serverNow === 'number' ? serverNow : now, now) : null;
 }
 
-function launchConfetti() {
-  stopConfetti();
-  if (board.reducedMotion) return;
-
-  const cv  = $('confetti-layer');
-  const ctx = cv.getContext('2d');
-  const dpr = Math.min(2, window.devicePixelRatio || 1);
-  const W = window.innerWidth, H = window.innerHeight; // particles live in CSS px
-  cv.width  = Math.round(W * dpr);
-  cv.height = Math.round(H * dpr);
-  cv.style.width  = `${W}px`;
-  cv.style.height = `${H}px`;
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  cv.style.display = 'block';
-
-  // No respawn: particles start above the screen and fall through once.
-  // Stagger start Y so they don't all arrive at once.
-  const pts = Array.from({ length: 52 }, () => ({
-    x:      Math.random() * W,
-    y:      -SPRITE_SIZE - Math.random() * H * 0.9,
-    vx:     (Math.random() - 0.5) * 2.2,
-    vy:     1.6 + Math.random() * 3.2,
-    sprite: bugSprites[Math.floor(Math.random() * bugSprites.length)],
-    scale:  0.55 + Math.random() * 0.7,
-    rot:    Math.random() * Math.PI * 2,
-    vr:     (Math.random() - 0.5) * 0.10,
-  }));
-
-  const DUR   = 4000;
-  const start = performance.now();
-
-  function tick(now) {
-    const elapsed = now - start;
-
-    if (elapsed > DUR) {
-      ctx.clearRect(0, 0, W, H);
-      stopConfetti();
-      return;
-    }
-
-    ctx.clearRect(0, 0, W, H);
-    ctx.globalAlpha = elapsed > DUR - 800
-      ? 1 - (elapsed - (DUR - 800)) / 800
-      : 1;
-
-    for (const p of pts) {
-      if (p.y > H + SPRITE_SIZE) continue; // already off screen, skip
-
-      p.x   += p.vx;
-      p.y   += p.vy;
-      p.vy  += 0.06; // gentle gravity
-      p.rot += p.vr;
-
-      const sz = SPRITE_SIZE * p.scale;
-      ctx.save();
-      ctx.translate(p.x, p.y);
-      ctx.rotate(p.rot);
-      ctx.drawImage(p.sprite, -sz / 2, -sz / 2, sz, sz);
-      ctx.restore();
-    }
-
-    ctx.globalAlpha = 1;
-    confettiRaf = requestAnimationFrame(tick);
-  }
-
-  confettiRaf = requestAnimationFrame(tick);
+/** LOCAL: the clock stands still while something covers the game or the page is hidden. */
+function clockHeld() {
+  return document.hidden || !gameMenu.hidden || isOverlayOpen() || reviewer.active || reviewer.sheetOpen()
+    || !$('hud').classList.contains('game-visible');
 }
 
-// ── Win screen ─────────────────────────────────────────
-
-function winCopy() {
-  const winner = gameState.winner;
-  const rounds = Math.max(1, Math.ceil((gameState.turnNumber - 1) / 2));
-  const online = gameMode === 'ONLINE';
-  const name   = p => (online ? (p === myPlayer ? 'YOU' : 'OPPONENT') : `PLAYER ${p}`);
-
-  if (winner === 'DRAW') {
-    return {
-      headline: "IT'S A DRAW",
-      reason: winReason === 'STALEMATE'
-        ? 'Neither player has a legal move left.'
-        : 'Both queens were surrounded on the same move.',
-      emblem: PieceType.QUEEN,
-    };
+/** Pause or resume a local clock to match clockHeld() (online the server's clock never pauses). */
+function syncClockRun() {
+  if (gameMode !== 'LOCAL' || !clock || !gameState || gameState.winner) return;
+  const now = Date.now();
+  if (clockHeld()) {
+    if (clock.running) { clock = pauseClock(clock, now); saveLocal(); }
+  } else if (!clock.running) {
+    clock = resumeClock(clock, now);
   }
-
-  const loser = other(winner);
-  const headline = online ? (winner === myPlayer ? 'YOU WIN!' : 'YOU LOSE') : `PLAYER ${winner} WINS!`;
-  if (winReason === 'RESIGN') {
-    return {
-      headline,
-      reason: online && loser === myPlayer ? 'You resigned the game.' : `${online ? 'Your opponent' : `Player ${loser}`} resigned.`,
-      emblem: PieceType.QUEEN,
-    };
-  }
-  const whose = online ? (loser === myPlayer ? 'Your' : "Your opponent's") : `${name(loser)[0]}${name(loser).slice(1).toLowerCase()}'s`;
-  return { headline, reason: `${whose} queen was surrounded after ${rounds} round${rounds === 1 ? '' : 's'}.`, emblem: PieceType.QUEEN };
 }
 
-/** @param {{calm?: boolean}} [opts] calm: a game that was already over (resume) — no sting, no confetti */
-function showWinScreen({ calm = false } = {}) {
-  winTimer = null;
-  if (winPresented || !gameState?.winner) return;
-  // The player opened ☰ (or the move list) during the sequence: leave it be; the card follows when it closes.
-  if (!gameMenu.hidden || movesSheetOpen() || review) { winDeferred = { calm }; return; }
-  settleWinSequence();
+// The ☰ menu, How to Play, the confirm dialog and the move sheet open and close in several places
+// (menu.js included): watch them rather than hooking each one.
+const clockObserver = new MutationObserver(() => syncClockRun());
+for (const id of ['game-menu', 'rules-overlay', 'resign-confirm', 'moves-sheet']) {
+  clockObserver.observe($(id), { attributes: true, attributeFilter: ['class', 'hidden'] });
+}
+document.addEventListener('visibilitychange', () => syncClockRun());
+window.addEventListener('pagehide', () => saveLocal()); // keep the time spent this turn
+
+/** LOCAL: the side to move ran out of time — the other side wins through the usual win sequence. */
+function flagLocal(now) {
+  if (!gameState || gameState.winner || !clock) return;
+  board.finishAnimations();
+  cancelTimers(); // a pending forced pass, alarms, the chime
+  const loser = clock.active;
+  clock = flagClock(clock, now);
+  gameState = { ...gameState, winner: other(loser) };
+  winReason = 'TIMEOUT';
+  clearSelection(false);
   hidePieceTooltip();
-  openWinCard();
-  ($('btn-rematch').hidden ? $('btn-view-board') : $('btn-rematch')).focus();
-  const winner = gameState.winner;
-  const lost = gameMode === 'ONLINE' && winner !== myPlayer && winner !== 'DRAW';
-  if (!calm) {
-    sfx.play(winner === 'DRAW' ? 'draw' : lost ? 'lose' : 'win');
-    if (!lost) launchConfetti();
-  }
+  hideBanner();
   syncUI();
+  saveLocal();
+  winFx.play(null);
 }
 
-/** The result is shown (or skipped to): nothing from the win sequence may fire after this. */
-function settleWinSequence() {
-  winPresented = true;
-  holdResult = false;
-  // A touchdown that never came (stalled frames, a snapped flight) must not fire over the card.
-  if (winTimer) clearTimeout(winTimer);
-  if (winFxTimer) clearTimeout(winFxTimer);
-  winTimer = winFxTimer = winTouchdown = winDeferred = null;
+/**
+ * Per frame: the two HUD clocks. Text nodes and classes are written only when they change (once a
+ * second, ten times a second under 10 s), so nothing re-lays out the HUD or touches the board layer.
+ * Under 10 s the running side pulses red and ticks once a second (online: only your own clock).
+ */
+function renderClocks() {
+  const on = !!(clock && gameState);
+  if (on !== clockUiOn) {
+    clockUiOn = on;
+    $('queen-meters').classList.toggle('timed', on);
+    for (const p of [1, 2]) {
+      clockEls[p].hidden = !on;
+      clockText[p] = plateCls[p] = '';
+      plateEls[p].className = `plate p${p}`;
+      if (!on) clockEls[p].textContent = '';
+    }
+  }
+  if (!on) return;
+  const now = Date.now();
+  if (gameMode === 'LOCAL' && clock.running && !passTimer && !gameState.winner && isFlagged(clock, clock.active, now)) flagLocal(now);
+  const over = !!gameState.winner;
+  for (const p of [1, 2]) {
+    const ms   = remainingFor(clock, p, now);
+    const text = formatClock(ms);
+    if (text !== clockText[p]) {
+      clockText[p] = text;
+      clockEls[p].textContent = text;
+      const who = ownerLabel(p);
+      if (!clockEls[p].title.startsWith(who)) clockEls[p].title = `${who} time`;
+    }
+    const active = !over && clock.active === p;
+    const cls = `plate p${p}${active ? ' active' : ''}${active && !clock.running ? ' paused' : ''}`
+      + `${active && ms > 0 && ms < LOW_TIME_MS ? ' low' : ''}${ms <= 0 ? ' flagged' : ''}`;
+    if (cls !== plateCls[p]) { plateCls[p] = cls; plateEls[p].className = cls; }
+  }
+  const left = remainingFor(clock, clock.active, now);
+  const mine = gameMode === 'LOCAL' || (!watching() && clock.active === myPlayer); // a spectator hears no ticks
+  if (!over && clock.running && mine && left > 0 && left < LOW_TIME_MS && !reviewer.active) {
+    const sec = Math.ceil(left / 1000);
+    if (sec !== lowTickAt) { lowTickAt = sec; sfx.play('tick', { haptic: false }); }
+  } else {
+    lowTickAt = null;
+  }
 }
 
-/** Fill in and raise the result card (no sound, no confetti). */
-function openWinCard() {
-  const screen = $('win-screen');
-  const winner = gameState.winner;
-  const copy   = winCopy();
-  screen.className = winner === 'DRAW' ? 'draw' : `p${winner}`;
-  $('win-headline').textContent = copy.headline;
-  $('win-reason').textContent   = copy.reason;
-  $('win-emblem').innerHTML     = spriteSVG(copy.emblem); // on a .mini-tile in the winner's rim
-  $('btn-rematch').hidden       = gameMode !== 'LOCAL';
-  $('btn-replay').hidden        = !moveLog.length || !replayForGame(moveLog, gameState);
-  screen.setAttribute('aria-hidden', 'false');
-  screen.inert = false;
-  screen.classList.add('active');
-}
+// ── Win sequence + result card (js/win-fx.js) ─────────
 
-function hideWinScreen() {
-  const screen = $('win-screen');
-  screen.classList.remove('active');
-  screen.setAttribute('aria-hidden', 'true');
-  screen.inert = true;
-  stopConfetti();
-  hideBoardDim();
-}
+const winFx = createWinFx({
+  board,
+  state:    () => gameState,
+  mode:     () => gameMode,
+  myPlayer: () => myPlayer,
+  reason:   () => winReason,
+  moveLog:  () => moveLog,
+  covered:  () => !gameMenu.hidden || reviewer.sheetOpen() || reviewer.active,
+  beforeCard: hidePieceTooltip,
+  sync:     () => syncUI(),
+  confettiTypes: TRAY_ORDER,
+  fallbackEmoji: Object.fromEntries(Object.entries(PIECE_UI).map(([type, ui]) => [type, ui.emoji])),
+});
 
 function rematch() {
   if (gameMode !== 'LOCAL' || !gameSettings) return;
-  hideWinScreen();
+  winFx.hide();
   startGame(gameSettings);
 }
 
 $('btn-rematch').addEventListener('click', rematch);
-$('btn-replay').addEventListener('click', () => { if (enterReview(0, { returnTo: 'card' })) startAutoplay({ hold: true }); });
+$('btn-replay').addEventListener('click', () => { if (reviewer.enter(0, { returnTo: 'card' })) reviewer.startAutoplay({ hold: true }); });
 $('btn-to-menu').addEventListener('click', () => exitToMenu());
 $('btn-view-board').addEventListener('click', () => {
-  hideWinScreen();
+  winFx.hide();
   board.recenter(true);
   toast(gameMode === 'ONLINE' ? 'GAME OVER · ☰ FOR MENU' : 'GAME OVER · ☰ FOR REMATCH OR MENU', '', 2600);
   $('btn-menu').focus();
@@ -1006,7 +989,8 @@ $('btn-view-board').addEventListener('click', () => {
 
 board.onTap = (q, r, clientX, clientY) => {
   if (!gameState) return;
-  if (review) { closeGameMenu(); hidePieceTooltip(); return; } // read-only: the board only pans and zooms
+  if (tapEdgeHint(clientX, clientY)) return; // the chevrons let pointers through so a drag still pans
+  if (reviewer.active) { closeGameMenu(); hidePieceTooltip(); return; } // read-only: the board only pans and zooms
   closeGameMenu();
   const key      = hexKey(q, r);
   const stack    = gameState.board.get(key);
@@ -1051,7 +1035,8 @@ board.onTap = (q, r, clientX, clientY) => {
 };
 
 board.onHover = (q, r, clientX, clientY) => {
-  if (q == null || !gameState || review) { hidePieceTooltip(); return; }
+  hoverEdgeHint(q == null ? null : clientX, clientY);
+  if (q == null || !gameState || reviewer.active) { hidePieceTooltip(); return; }
   const key = hexKey(q, r);
   if (gameState.board.has(key)) showStackTooltip(key, clientX, clientY);
   else hidePieceTooltip();
@@ -1059,7 +1044,86 @@ board.onHover = (q, r, clientX, clientY) => {
 
 board.onViewChange = () => hideBoardHint();
 
+// ── Off-screen target chevrons ─────────────────────────
+
+// board.js works out where legal targets lie outside the playable area (offscreenTargets); these
+// are its chevrons as buttons: tapping one pans its targets into view. Buttons are reused while
+// the list changes (a pan moves them; only new ones fade in).
+const edgeHints = $('edge-hints');
+const CHEVRON = '<svg class="eh-chevron" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M5.5 3l5 5-5 5"/></svg>';
+
+board.onIndicators = list => {
+  const buttons = [...edgeHints.children];
+  list.forEach((c, i) => {
+    let btn = buttons[i];
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'edge-hint';
+      btn.innerHTML = `${CHEVRON}<span class="eh-count" aria-hidden="true"></span>`;
+      edgeHints.append(btn);
+    }
+    btn.dataset.index = String(i);
+    btn.classList.toggle('throw', c.kind === 'throw');
+    btn.style.transform = `translate(${c.x.toFixed(1)}px, ${c.y.toFixed(1)}px)`;
+    btn.style.setProperty('--a', `${c.angle.toFixed(3)}rad`);
+    btn.lastElementChild.textContent = String(c.count);
+    const what = c.kind === 'throw' ? 'piece to throw' : 'target';
+    btn.setAttribute('aria-label', `${c.count} ${what}${c.count === 1 ? '' : 's'} off screen (${c.edge}) — show`);
+  });
+  for (const extra of buttons.slice(list.length)) extra.remove();
+};
+
+const EDGE_HINT_HIT = 24; // px: the 44 px button, plus a little
+
+function showEdgeCluster(cluster) {
+  closeGameMenu(); // like any other board tap
+  hidePieceTooltip();
+  hideBoardHint();
+  // Keep the selected piece (and every other target) in frame too when it all fits.
+  board.showTargets(cluster.keys, [board.selectedHex, ...board.ghosts, ...board.throwTargets].filter(Boolean));
+}
+
+/**
+ * The chevron buttons are pointer-events: none, so touches and drags land on the board (a drag that
+ * starts on one pans as usual); a clean tap on one is caught here, before the board handles it.
+ */
+function edgeHintAt(x, y) {
+  let best = null, bestD = EDGE_HINT_HIT;
+  for (const c of board.indicators) {
+    const d = Math.hypot(c.x - x, c.y - y);
+    if (d <= bestD) { best = c; bestD = d; }
+  }
+  return best;
+}
+
+function tapEdgeHint(x, y) {
+  const best = edgeHintAt(x, y);
+  if (best) showEdgeCluster(best);
+  return !!best;
+}
+
+/** Desktop hover: the buttons let pointers through, so the board hit-tests them for the pointer cursor and .hover state. */
+function hoverEdgeHint(x, y) {
+  const hit = x == null ? null : edgeHintAt(x, y);
+  const index = hit ? board.indicators.indexOf(hit) : -1;
+  [...edgeHints.children].forEach((btn, i) => btn.classList.toggle('hover', i === index));
+  $('board').style.cursor = hit ? 'pointer' : '';
+}
+
+// Keyboard (Enter / Space on a focused chevron).
+edgeHints.addEventListener('click', event => {
+  const btn = event.target.closest('.edge-hint');
+  const cluster = btn && board.indicators[Number(btn.dataset.index)];
+  if (cluster) showEdgeCluster(cluster);
+});
+
 // ── Tray rendering ─────────────────────────────────────
+
+/** "Your" / "Opponent's" online, "Player N" locally and for a spectator (labels, titles). */
+function ownerLabel(player) {
+  return gameMode === 'ONLINE' && !watching() ? (player === myPlayer ? 'Your' : "Opponent's") : `Player ${player}`;
+}
 
 /** Whose pieces the tray shows: your own online, the player to move locally. */
 function trayPlayer() {
@@ -1069,6 +1133,12 @@ function trayPlayer() {
 function renderTray(actions) {
   const container = $('tray-pieces');
   if (!gameState) { container.replaceChildren(); return; }
+  if (watching()) { // no pieces to pick: both reserves instead
+    container.replaceChildren();
+    renderReserve(1);
+    renderReserve(2);
+    return;
+  }
   const owner     = trayPlayer();
   const supply    = gameState.supply[owner];
   const myTurn    = owner === gameState.turn && !gameState.winner;
@@ -1115,19 +1185,21 @@ function renderTray(actions) {
   renderReserve(other(owner));
 }
 
+/** The reserve strip: the opponent's (online), or — for a spectator — one strip per player (`-b` is player 2's). */
 function renderReserve(player) {
-  const label = $('reserve-label');
-  label.textContent = gameMode === 'ONLINE' ? 'OPPONENT HAS' : `P${player} HAS`;
+  const suffix = watching() && player === 2 ? '-b' : '';
+  const label = $(`reserve-label${suffix}`);
+  label.textContent = gameMode === 'ONLINE' && !watching() ? 'OPPONENT HAS' : `P${player} HAS`;
   label.className = `p${player}`;
   const supply = gameState.supply[player];
-  $('reserve-pieces').className = `p${player}`;
-  $('reserve-pieces').innerHTML = TRAY_ORDER
+  $(`reserve-pieces${suffix}`).className = `p${player}`;
+  $(`reserve-pieces${suffix}`).innerHTML = TRAY_ORDER
     .filter(type => type in supply)
     .map(type => `<span class="reserve-item${supply[type] ? '' : ' empty'}" title="${PIECE_NAMES[type]}">`
       + `${spriteSVG(type)}${supply[type]}</span>`)
     .join('');
-  $('reserve-row').setAttribute('aria-label',
-    `${gameMode === 'ONLINE' ? 'Opponent' : `Player ${player}`} still holds: ` +
+  $(`reserve-row${suffix}`).setAttribute('aria-label',
+    `${gameMode === 'ONLINE' && !watching() ? 'Opponent' : `Player ${player}`} still holds: ` +
     TRAY_ORDER.filter(type => supply[type]).map(type => `${supply[type]} ${PIECE_NAMES[type]}`).join(', '));
 }
 
@@ -1195,8 +1267,8 @@ function descOwner() {
 
 function syncUI() {
   if (!gameState) return;
-  if (holdResult) {
-    // Slow-motion winning move: no spoilers until it lands (playWinSequence).
+  if (winFx.holdResult) {
+    // Slow-motion winning move: no spoilers until it lands (winFx.play).
     $('status-text').textContent = '';
     $('piece-desc').classList.remove('visible');
     $('btn-cancel').classList.add('hidden');
@@ -1205,8 +1277,11 @@ function syncUI() {
   const turn    = gameState.turn;
   const actions = getAllLegalActions(gameState);
   const online  = gameMode === 'ONLINE';
-  const myTurn  = !online || turn === myPlayer;
+  const spectating = watching();
+  const myTurn  = !online || spectating || turn === myPlayer; // a spectator's chip is never dimmed as "waiting"
+  const canAct  = !online || turn === myPlayer;                // false for a spectator (myPlayer null)
   const over    = !!gameState.winner;
+  document.body.classList.toggle('spectating', spectating);
 
   // Turn chip + HUD accent
   $('hud').className = `game-visible turn-p${over && gameState.winner !== 'DRAW' ? gameState.winner : turn}`;
@@ -1214,7 +1289,11 @@ function syncUI() {
   const chipPlayer = over && gameState.winner !== 'DRAW' ? gameState.winner : turn;
   chip.className = `p${chipPlayer}${myTurn || over ? '' : ' waiting'}`;
   $('chip-label').textContent = turnChipText({ state: gameState, mode: gameMode, myPlayer });
+  // A spectator's chip says WATCHING (the side to move is the chip colour and the status line).
+  if (spectating && !over) $('chip-label').textContent = 'WATCHING';
   $('chip-sub').textContent   = over ? 'FINAL' : `ROUND ${Math.ceil(gameState.turnNumber / 2)}`;
+  $('turn-chip').classList.toggle('watching', spectating);
+  renderSpectators();
 
   renderQueenMeters();
 
@@ -1231,8 +1310,8 @@ function syncUI() {
       state: gameState, phase: uiState.phase, mode: gameMode, myPlayer,
       blocker, throwCount, pieceName: PIECE_NAMES[type] ?? 'PIECE', winReason,
     });
-    const warn = (blocker && !throwCount) || (myTurn && actions.mustPass)
-      || (myTurn && !over && uiState.phase === 'IDLE' && /QUEEN NOW/.test(status.textContent));
+    const warn = (blocker && !throwCount) || (canAct && actions.mustPass) || /^REPETITION/.test(status.textContent)
+      || (canAct && !over && uiState.phase === 'IDLE' && /QUEEN NOW/.test(status.textContent));
     const danger = /IN DANGER/.test(status.textContent);
     status.className = danger ? 'alert' : warn ? 'warn' : (uiState.phase !== 'IDLE' || over) ? 'active' : '';
   }
@@ -1258,20 +1337,39 @@ function syncUI() {
     desc.textContent = '';
     desc.classList.remove('visible');
   }
+  updateOverlayInsets();
 
   // Contextual buttons
-  $('btn-pass').classList.toggle('hidden', !(online && myTurn && actions.mustPass && !over));
+  $('btn-pass').classList.toggle('hidden', !(online && !spectating && myTurn && actions.mustPass && !over));
   $('btn-undo').classList.toggle('hidden', !(gameMode === 'LOCAL' && history.length));
   $('btn-cancel').classList.toggle('hidden', uiState.phase === 'IDLE');
 
   // Game menu entries
   document.querySelectorAll('#game-menu [data-local-only]').forEach(el => { el.hidden = online || over; });
   document.querySelector('#game-menu [data-finished-only]').hidden = online || !over;
-  $('menu-quit-label').textContent = over ? 'MAIN MENU' : online ? 'RESIGN GAME' : 'QUIT TO MENU';
+  $('menu-quit-label').textContent = over ? 'MAIN MENU' : spectating ? 'LEAVE ROOM' : online ? 'RESIGN GAME' : 'QUIT TO MENU';
 
   renderTray(actions);
-  if (review) syncReviewUI();
-  if (movesSheetOpen()) renderMovesSheet();
+  if (spectating) { // two reserve rows: if the tray's height changed, re-measure and keep the hive in frame
+    const h = $('tray').offsetHeight;
+    if (h !== lastTrayH) { lastTrayH = h; updateInsets(); board.reveal(board.pieces.keys(), []); }
+  }
+  reviewer.sync();
+  syncClockRun();
+}
+let lastTrayH = 0;
+
+/** 👁 N — how many are watching, shown to everyone in the room (hidden while nobody is). */
+function renderSpectators() {
+  const el = $('spectator-count');
+  const n = gameMode === 'ONLINE' ? spectatorCount : 0;
+  const changed = $('spectator-n').textContent !== String(n);
+  el.hidden = n === 0;
+  $('spectator-n').textContent = String(n);
+  if (changed && n > 0) { el.classList.remove('bump'); void el.offsetWidth; el.classList.add('bump'); }
+  const label = `${n} watching`;
+  el.title = label;
+  el.setAttribute('aria-label', label);
 }
 
 // ── HUD queen meters ───────────────────────────────────
@@ -1302,7 +1400,7 @@ function renderQueenMeters(state = gameState) {
     el.classList.toggle('unplaced', !m);
     for (const n of [4, 5, 6]) el.classList.toggle(`lvl-${n}`, level === n);
     el.querySelectorAll('.qm-pip').forEach((pip, i) => pip.classList.toggle('lit', !!m?.lit[i]));
-    const who = gameMode === 'ONLINE' ? (player === myPlayer ? 'Your' : "Opponent's") : `Player ${player}`;
+    const who = ownerLabel(player);
     el.setAttribute('aria-label', m ? `${who} queen: ${level} of 6 sides covered` : `${who} queen not placed`);
     el.title = el.getAttribute('aria-label');
   }
@@ -1325,17 +1423,7 @@ function closeGameMenu({ restoreFocus = false } = {}) {
   gameMenu.hidden = true;
   $('btn-menu').setAttribute('aria-expanded', 'false');
   if (restoreFocus) $('btn-menu').focus();
-  flushDeferredWin();
-}
-
-/** Show a result card that was held back (☰ menu or move list open) now that nothing covers it. */
-function flushDeferredWin() {
-  if (!winDeferred || !gameMenu.hidden || movesSheetOpen() || review) return;
-  // Shown a beat later, so a menu choice made in the same click (quit, rematch) cancels it first.
-  const opts = winDeferred;
-  winDeferred = null;
-  if (winTimer) clearTimeout(winTimer);
-  winTimer = setTimeout(() => showWinScreen(opts), 250);
+  winFx.flushDeferred();
 }
 
 $('btn-menu').addEventListener('click', () => (gameMenu.hidden ? openGameMenu() : closeGameMenu()));
@@ -1358,7 +1446,7 @@ gameMenu.addEventListener('click', event => {
   if (!action) return;
   if (action === 'sound') { toggleSound(); return; } // stays open so the new state is visible
   closeGameMenu();
-  if (action === 'moves')    openMovesSheet();
+  if (action === 'moves')    reviewer.openSheet();
   if (action === 'rules')    showRules();
   if (action === 'recenter') board.recenter(true);
   if (action === 'rematch')  rematch();
@@ -1374,7 +1462,7 @@ gameMenu.addEventListener('click', event => {
 
 function requestQuit() {
   if (!gameState) return;
-  if (gameState.winner) { exitToMenu(); return; }
+  if (gameState.winner || watching()) { exitToMenu(); return; } // a spectator just leaves
 
   if (gameMode === 'LOCAL') {
     showConfirm({
@@ -1401,465 +1489,44 @@ $('btn-cancel').addEventListener('click', () => cancelSelection());
 $('btn-undo').addEventListener('click', undo);
 $('btn-recenter').addEventListener('click', () => { board.recenter(true); hideBoardHint(); });
 $('btn-pass').addEventListener('click', () => {
-  if (gameMode !== 'ONLINE' || !gameState || gameState.turn !== myPlayer || review) return;
+  if (gameMode !== 'ONLINE' || watching() || !gameState || gameState.turn !== myPlayer || reviewer.active) return;
   if (!getAllLegalActions(gameState).mustPass) return;
   act({ type: ActionType.PASS });
 });
 
-// ── Game review: move list + replay ────────────────────
-//
-// One read-only mode serves both entries: tapping a move in the list mid-game (a preview, "BACK TO
-// GAME") and REPLAY on the result card (✕ / Esc returns to the card). The board shows a position
-// rebuilt from the move log (js/replay.js); the live gameState is never touched, nothing is saved or
-// sent, and leaving puts the live board back (selection cleared, cached layer re-rendered).
-// `review`: { replay, log, returnTo: 'game'|'board'|'card', liveLastMove, playing, played, playTimer }
-// (`played`: autoplay has run, so a mid-game preview is now a replay and the HUD chip says so)
+// ── Game review + move list sheet (js/review.js) ──────
 
-const AUTOPLAY_MS = 900;
-const REPLAY_HOLD_MS = 600; // a replay from the top lingers on the empty board before move 1
-const movesSheet  = $('moves-sheet');
-let sheetInerted  = [];
-let sheetReturnFocus = null;
-
-const playerName = p => (gameMode === 'ONLINE' ? (p === myPlayer ? 'YOU' : 'OPPONENT') : `P${p}`);
-const pieceOwnerName = p => (gameMode === 'ONLINE' ? (p === myPlayer ? 'YOUR' : 'OPPONENT\'S') : `P${p}`);
-
-/**
- * Enter the review at position `index` (0 = empty board, i = after the i-th move).
- * @returns {boolean} false when this game's log cannot rebuild it (toast says so)
- */
-function enterReview(index, { returnTo } = {}) {
-  if (!gameState) return false;
-  if (review) { seekReview(index); return true; }
-  const log = moveLog.slice();
-  const replay = replayForGame(log, gameState, { index });
-  if (!replay) { toast('HISTORY UNAVAILABLE FOR THIS GAME', 'warn'); return false; }
-  if (gameState.winner && !winPresented) {
-    // The win is still being revealed: skip to the result; leaving the review shows the card.
-    settleWinSequence();
-    hideBoardDim();
-    returnTo = 'card';
-  }
-  returnTo ??= $('win-screen').classList.contains('active') ? 'card' : gameState.winner ? 'board' : 'game';
-  if (passTimer) { clearTimeout(passTimer); passTimer = null; } // a forced pass waits for the live board
-  // Live alarms and chimes belong to the live board: none may go off inside the review.
-  if (dangerTimer) clearTimeout(dangerTimer);
-  if (turnSoundTimer) clearTimeout(turnSoundTimer);
-  dangerTimer = turnSoundTimer = landingAlarm = null;
-  closeGameMenu();
-  closeMovesSheet({ restoreFocus: false });
-  hidePieceTooltip();
-  hideBanner();
-  hideBoardHint();
-  hideWinScreen();
-  board.finishAnimations({ clearFx: true });
-  clearSelection(false);
-
-  review = { replay, log, returnTo, liveLastMove: board.lastMove, playing: false, played: false, playTimer: null };
-  document.body.classList.add('reviewing');
-  $('replay-bar').hidden = false;
-  $('review-pill').hidden = false;
-  $('review-pill-label').textContent = returnTo === 'game' ? 'BACK TO GAME' : returnTo === 'card' ? 'CLOSE REPLAY' : 'BACK TO BOARD';
-  $('tray').inert = true;
-  updateInsets();
-  fitReviewCamera();
-  showReviewPosition(replay.index);
-  syncUI();
-  $('rb-play').focus();
-  return true;
-}
-
-/** Leave the review for wherever it was entered from (Esc, ✕ pill). */
-function exitReview() {
-  if (!review) return;
-  const { returnTo } = review;
-  endReview();
-  if (returnTo === 'card' && gameState?.winner) {
-    openWinCard();
-    $('btn-replay').focus();
-  } else {
-    $('btn-menu').focus();
-    // A forced pass held back by the preview runs now.
-    if (returnTo === 'game' && gameMode === 'LOCAL' && getAllLegalActions(gameState).mustPass) announceTurn();
-  }
-  flushDeferredWin();
-}
-
-/** Tear the review down and put the live board back. Safe to call when not reviewing. */
-function endReview() {
-  if (!review) return;
-  stopAutoplay();
-  const { liveLastMove } = review;
-  review = null;
-  document.body.classList.remove('reviewing');
-  $('replay-bar').hidden = true;
-  $('review-pill').hidden = true;
-  $('tray').inert = false;
-  board.finishAnimations({ clearFx: true });
-  clearSelection(false);
-  board.lastMove = liveLastMove;
-  syncBoardRenderer();
-  board.invalidate();
-  updateInsets();
-  if (gameState) {
-    board.recenter(true);
-    syncUI();
-  }
-}
-
-/** The live game changed (an opponent's move, a reconnect, a forced pass): back to it. */
-function leaveReviewForLive() {
-  if (!review) return;
-  closeMovesSheet({ restoreFocus: false });
-  endReview();
-  $('btn-menu').focus();
-  toast('BACK TO THE LIVE GAME', '', 1600);
-}
-
-/** Frame every hex the game ever used, so the camera holds still while the review steps. */
-function fitReviewCamera() {
-  board.pieces.clear();
-  for (const state of review.replay.states) for (const key of state.board.keys()) board.pieces.set(key, []);
-  board.recenter(true);
-  syncBoardRenderer(); // the frame is computed; now the real position
-}
-
-/**
- * Show replay position `index`. One step forward flies the move along its getMovePath route (with
- * its sounds); anything else (back, jumps, scrubbing) snaps.
- */
-function showReviewPosition(index, { animate = false } = {}) {
-  const r = review.replay;
-  const from = r.index;
-  r.seek(index);
-  const prev = r.index > 0 ? r.states[r.index - 1] : null;
-  const forward = animate && prev && r.index === from + 1;
-  board.finishAnimations({ clearFx: !forward });
-  board.lastMove = prev ? describeLastMove(prev, r.state) : null;
-  syncBoardRenderer();
-  board.invalidate();
-  const to = board.lastMove?.to;
-  if (forward && to) {
-    const move = getMovePath(prev, review.log[r.index - 1].action);
-    if (move) board.animateMove({ ...move, toKey: to, player: board.lastMove.player });
-    else board.markArrival(to);
-    playMoveSound(move?.kind, board.hiddenTop.has(to));
-    board.reveal([to, ...(move?.path ?? [])], [], { anchor: to });
-  }
-  syncReviewUI();
-}
-
-/** A step, jump or scrub by the player: autoplay stops. */
-function seekReview(index, { animate = false } = {}) {
-  if (!review) return;
-  stopAutoplay();
-  showReviewPosition(index, { animate });
-}
-
-/** @param {{ hold?: boolean }} opts hold: stay on the current position for a beat before stepping */
-function startAutoplay({ hold = false } = {}) {
-  if (!review) return;
-  review.playing = review.played = true;
-  if (review.replay.atEnd) {
-    showReviewPosition(0); // from the top, like a video player
-    scheduleAutoplay();
-  } else if (hold) {
-    scheduleAutoplay(REPLAY_HOLD_MS);
-  } else {
-    autoplayStep();
-  }
-  syncReviewUI();
-}
-
-function autoplayStep() {
-  if (!review?.playing) return;
-  showReviewPosition(review.replay.index + 1, { animate: true });
-  if (review.replay.atEnd) stopAutoplay();
-  else scheduleAutoplay();
-}
-
-function scheduleAutoplay(ms = AUTOPLAY_MS) {
-  if (review.playTimer) clearTimeout(review.playTimer);
-  review.playTimer = setTimeout(autoplayStep, ms);
-}
-
-function stopAutoplay() {
-  if (!review) return;
-  if (review.playTimer) clearTimeout(review.playTimer);
-  review.playTimer = null;
-  review.playing = false;
-  syncPlayButton();
-}
-
-function toggleAutoplay() {
-  if (review?.playing) stopAutoplay();
-  else startAutoplay();
-}
-
-function syncPlayButton() {
-  const playing = !!review?.playing;
-  const btn = $('rb-play');
-  btn.classList.toggle('playing', playing);
-  btn.setAttribute('aria-label', playing ? 'Pause' : 'Play');
-}
-
-const VERB = { PLACE: 'PLACED', MOVE: 'MOVED' };
-
-/** Replay bar, HUD and exit pill for the position under review (syncUI calls this last). */
-function syncReviewUI() {
-  if (!review) return;
-  const r = review.replay;
-  const i = r.index, n = r.states.length - 1;
-  const entry = i ? review.log[i - 1] : null;
-  const info  = entry ? plyInfo(entry) : null;
-
-  // Replay bar
-  const bar = $('replay-bar');
-  bar.dataset.player = info ? String(info.player) : '';
-  // Long and compact forms; CSS shows the compact one where the one-row landscape bar is tight.
-  $('rb-count').innerHTML = i
-    ? `<span class="rb-long">MOVE ${i} / ${n}</span><span class="rb-short">${i}/${n}</span>`
-    : `<span class="rb-long">START · ${n} MOVE${n === 1 ? '' : 'S'}</span><span class="rb-short">START</span>`;
-  $('rb-notation').innerHTML = info ? notationHTML(info.text) : 'EMPTY BOARD';
-  $('rb-tile').innerHTML = info?.type ? spriteSVG(info.type) : '';
-  $('rb-tile').classList.toggle('blank', !info?.type);
-  const slider = $('rb-slider');
-  slider.max = String(n);
-  slider.value = String(i);
-  slider.style.setProperty('--pct', `${n ? (i / n) * 100 : 0}%`);
-  slider.setAttribute('aria-valuetext', i ? `Move ${i} of ${n}${info ? `, ${playerName(info.player)} ${info.text}` : ''}` : 'Start, empty board');
-  $('rb-first').disabled = $('rb-prev').disabled = i === 0;
-  $('rb-next').disabled = $('rb-last').disabled = i === n;
-  $('rb-play').disabled = n === 0;
-  syncPlayButton();
-
-  // HUD: what is on the board now is the position under review
-  const shownPlayer = info?.player ?? 1;
-  $('hud').className = `game-visible turn-p${shownPlayer} reviewing`;
-  $('turn-chip').className = info ? `p${info.player}` : 'p1 waiting';
-  $('chip-label').textContent = review.returnTo === 'game' && !review.played ? 'PREVIEW' : 'REPLAY';
-  $('chip-sub').textContent = `MOVE ${i}/${n}`;
-  const status = $('status-text');
-  status.className = 'active';
-  status.textContent = !info ? 'OPENING · EMPTY BOARD'
-    : info.pass ? `${playerName(info.player)} PASSED`
-    : entry.action?.type === ActionType.THROW // a throw moves either side's piece: say whose
-      ? `${playerName(info.player)} THREW ${pieceOwnerName(info.owner)} ${PIECE_NAMES[info.type] ?? info.type}`
-      : `${playerName(info.player)} ${VERB[entry.action?.type] ?? 'PLAYED'} ${PIECE_NAMES[info.type] ?? info.type}`;
-  if (i === n && gameState.winner) status.textContent += ` · ${turnChipText({ state: gameState, mode: gameMode, myPlayer })}`;
-  $('piece-desc').classList.remove('visible');
-  renderQueenMeters(r.state);
-  for (const id of ['btn-pass', 'btn-undo', 'btn-cancel']) $(id).classList.add('hidden');
-
-  if (movesSheetOpen()) syncMovesHighlight();
-}
-
-/** Keys while reviewing; returns true when the key was handled here. */
-function handleReviewKey(event) {
-  const key = event.key;
-  if (key === 'Escape') {
-    if (!gameMenu.hidden) closeGameMenu({ restoreFocus: true });
-    else exitReview();
-    return true;
-  }
-  if (!gameMenu.hidden || event.ctrlKey || event.metaKey || event.altKey) return false;
-  // The slider and buttons keep their own keys (arrows move the slider; Space presses a button).
-  const onSlider = event.target === $('rb-slider');
-  const onButton = !!event.target.closest?.('button');
-  const i = review.replay.index;
-  if (!onSlider && (key === 'ArrowRight' || key === 'ArrowLeft')) {
-    event.preventDefault();
-    seekReview(i + (key === 'ArrowRight' ? 1 : -1), { animate: key === 'ArrowRight' });
-    return true;
-  }
-  if (!onSlider && (key === 'Home' || key === 'End')) {
-    event.preventDefault();
-    seekReview(key === 'Home' ? 0 : review.replay.states.length - 1);
-    return true;
-  }
-  if ((key === ' ' || key.toLowerCase() === 'k') && !onButton) {
-    event.preventDefault();
-    toggleAutoplay();
-    return true;
-  }
-  return false;
-}
-
-$('review-pill').addEventListener('click', exitReview);
-$('rb-first').addEventListener('click', () => seekReview(0));
-$('rb-prev').addEventListener('click', () => seekReview(review.replay.index - 1));
-$('rb-next').addEventListener('click', () => seekReview(review.replay.index + 1, { animate: true }));
-$('rb-last').addEventListener('click', () => seekReview(review.replay.states.length - 1));
-$('rb-play').addEventListener('click', toggleAutoplay);
-$('rb-slider').addEventListener('input', event => seekReview(Number(event.target.value)));
-$('rb-moves').addEventListener('click', () => openMovesSheet());
-$('rb-copy').addEventListener('click', () => copyMoves());
-
-// ── Move list sheet ────────────────────────────────────
-
-function movesSheetOpen() {
-  return movesSheet.classList.contains('active');
-}
-
-function openMovesSheet() {
-  if (!gameState || movesSheetOpen()) return;
-  closeGameMenu();
-  hidePieceTooltip();
-  sheetReturnFocus = document.activeElement;
-  renderMovesSheet();
-  movesSheet.inert = false;
-  movesSheet.classList.add('active');
-  movesSheet.setAttribute('aria-hidden', 'false');
-  // Modal: everything else is inert while it is open (the toast stays live: an update's RELOAD).
-  document.body.classList.add('sheet-open'); // toasts move up to the HUD, clear of the rows
-  sheetInerted = [...document.body.children].filter(el => el !== movesSheet && el !== $('toast') && !el.inert);
-  for (const el of sheetInerted) el.inert = true;
-  const current = $('moves-list').querySelector('.mv-ply.current:not(:disabled)');
-  current?.scrollIntoView({ block: 'center' });
-  (current ?? $('btn-close-moves')).focus({ preventScroll: true });
-}
-
-function closeMovesSheet({ restoreFocus = true } = {}) {
-  if (!movesSheetOpen()) return;
-  movesSheet.classList.remove('active');
-  movesSheet.setAttribute('aria-hidden', 'true');
-  movesSheet.inert = true; // its buttons leave the tab order while it is closed
-  document.body.classList.remove('sheet-open');
-  for (const el of sheetInerted) el.inert = false;
-  sheetInerted = [];
-  if (restoreFocus) {
-    const back = sheetReturnFocus?.isConnected && sheetReturnFocus.offsetParent !== null ? sheetReturnFocus
-      : review ? $('rb-moves') : $('btn-menu');
-    back.focus();
-  }
-  sheetReturnFocus = null;
-  flushDeferredWin();
-}
-
-/** The log the sheet lists, the position it marks as current, and whether rows can be previewed. */
-function sheetModel() {
-  if (review) return { log: review.log, current: review.replay.index, playable: true };
-  return { log: moveLog, current: moveLog.length, playable: !!replayForGame(moveLog, gameState) };
-}
-
-function renderMovesSheet() {
-  const { log, current, playable } = sheetModel();
-  const focused = document.activeElement?.closest?.('#moves-list .mv-ply')?.dataset.index;
-  $('moves-count').textContent = `${log.length} MOVE${log.length === 1 ? '' : 'S'}`;
-  const note = $('moves-note');
-  note.hidden = playable;
-  note.textContent = 'HISTORY UNAVAILABLE FOR THIS GAME — it was saved by an older version, so past positions can’t be shown.';
-
-  // One row per round: P1's move on the left, P2's on the right.
-  const rounds = new Map();
-  log.forEach((entry, i) => {
-    const round = Math.ceil((entry.turnNumber ?? i + 1) / 2);
-    if (!rounds.has(round)) rounds.set(round, {});
-    rounds.get(round)[entry.player] = { entry, index: i + 1 };
-  });
-  const cell = ply => {
-    if (!ply) return '<span class="mv-ply mv-none" aria-hidden="true"></span>';
-    const info = plyInfo(ply.entry);
-    const label = `Move ${ply.index}: ${playerName(info.player)} ${info.pass ? 'passed' : info.text}`;
-    return `<button class="mv-ply p${info.player}${info.pass ? ' pass' : ''}${ply.index === current ? ' current' : ''}" type="button"
-      data-index="${ply.index}" aria-label="${escapeHTML(label)}"${ply.index === current ? ' aria-current="step"' : ''}${playable ? '' : ' disabled'}>
-      <span class="mini-tile mv-tile${info.type ? '' : ' blank'}" aria-hidden="true">${info.type ? spriteSVG(info.type) : ''}</span>
-      <span class="mv-text">${notationHTML(info.text)}</span></button>`;
-  };
-  $('moves-list').innerHTML = log.length
-    ? [...rounds].map(([round, plies]) =>
-      `<li class="mv-row"><span class="mv-num" aria-hidden="true">${round}</span>${cell(plies[1])}${cell(plies[2])}</li>`).join('')
-    : `<li class="mv-empty">${playable ? 'NO MOVES YET' : 'NO MOVES RECORDED SINCE RESUMING'}</li>`;
-
-  $('btn-copy-moves').disabled = !log.length;
-  $('btn-moves-replay').hidden = !playable || !log.length || !!review; // the replay bar already plays it
-  if (focused) $('moves-list').querySelector(`[data-index="${focused}"]`)?.focus({ preventScroll: true });
-}
-
-/** Re-mark the current row without rebuilding the list (the replay stepped under the open sheet). */
-function syncMovesHighlight() {
-  const { current } = sheetModel();
-  for (const btn of $('moves-list').querySelectorAll('.mv-ply[data-index]')) {
-    const on = Number(btn.dataset.index) === current;
-    btn.classList.toggle('current', on);
-    if (on) btn.setAttribute('aria-current', 'step');
-    else btn.removeAttribute('aria-current');
-  }
-}
-
-function movesTitle() {
-  const w = gameState.winner;
-  const result = w === 'DRAW' ? 'DRAW' : w ? `P${w} WINS` : 'IN PROGRESS';
-  const exps = Object.entries(gameState.settings.expansions ?? {}).filter(([, on]) => on).map(([name]) => name.toUpperCase());
-  return `HIVE · P1 (w) vs P2 (b) · ${result}${exps.length ? ` · +${exps.join(' +')}` : ''}`;
-}
-
-/** @param {{ inline?: boolean }} opts inline: answer on the sheet's own button (a toast would cover its rows) */
-async function copyMoves({ inline = false } = {}) {
-  const log = review ? review.log : moveLog;
-  if (!gameState || !log.length) { toast('NO MOVES TO COPY YET', 'warn', 1400); return; }
-  const ok = await copyText(movesText(log, { title: movesTitle() }));
-  if (inline) flashCopyButton(ok);
-  else toast(ok ? `${log.length} MOVE${log.length === 1 ? '' : 'S'} COPIED` : 'COULD NOT COPY THE MOVES', ok ? 'good' : 'error', 1600);
-}
-
-const COPY_MOVES_HTML = $('btn-copy-moves').innerHTML;
-const CHECK_ICON = '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
-let copyFlashTimer = null;
-/** "COPIED" (or "COPY FAILED") on the sheet's COPY MOVES button for a moment. */
-function flashCopyButton(ok) {
-  const btn = $('btn-copy-moves');
-  if (copyFlashTimer) clearTimeout(copyFlashTimer);
-  btn.innerHTML = ok ? `${CHECK_ICON} COPIED` : 'COPY FAILED';
-  btn.classList.toggle('copied', ok);
-  btn.classList.toggle('copy-failed', !ok);
-  copyFlashTimer = setTimeout(() => {
-    copyFlashTimer = null;
-    btn.innerHTML = COPY_MOVES_HTML;
-    btn.classList.remove('copied', 'copy-failed');
-  }, 1600);
-}
-
-$('btn-close-moves').addEventListener('click', () => closeMovesSheet());
-$('btn-copy-moves').addEventListener('click', () => copyMoves({ inline: true }));
-$('btn-moves-replay').addEventListener('click', () => {
-  closeMovesSheet({ restoreFocus: false });
-  if (enterReview(0)) startAutoplay({ hold: true });
-});
-movesSheet.addEventListener('click', event => {
-  if (event.target === movesSheet) { closeMovesSheet(); return; } // the scrim
-  const ply = event.target.closest('.mv-ply[data-index]');
-  if (!ply || ply.disabled) return;
-  const index = Number(ply.dataset.index);
-  closeMovesSheet({ restoreFocus: false });
-  if (review) { seekReview(index); $('rb-play').focus(); }
-  else enterReview(index);
-});
-movesSheet.addEventListener('keydown', event => {
-  if (event.key === 'Escape') {
-    event.preventDefault();
-    event.stopPropagation();
-    closeMovesSheet();
-    return;
-  }
-  const plies = [...$('moves-list').querySelectorAll('.mv-ply[data-index]:not(:disabled)')];
-  const at = plies.indexOf(document.activeElement);
-  // Rows hold two moves: Up/Down go a round, Left/Right a move.
-  const step = { ArrowDown: 2, ArrowUp: -2, ArrowRight: 1, ArrowLeft: -1 }[event.key];
-  const target = event.key === 'Home' ? 0 : event.key === 'End' ? plies.length - 1
-    : step === undefined ? null : at < 0 ? 0 : Math.max(0, Math.min(plies.length - 1, at + step));
-  if (target !== null && plies.length) {
-    event.preventDefault();
-    plies[target].focus();
-    return;
-  }
-  if (event.key === 'Tab') {
-    // Keep focus inside the sheet.
-    const focusable = [...$('moves-panel').querySelectorAll('button:not(:disabled):not([hidden])')];
-    const first = focusable[0], last = focusable.at(-1);
-    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
-  }
+const reviewer = createReview({
+  board,
+  winFx,
+  state:    () => gameState,
+  mode:     () => gameMode,
+  myPlayer: () => myPlayer,
+  moveLog:  () => moveLog,
+  pieceNames: PIECE_NAMES,
+  holdLive() {
+    // A forced pass waits for the live board; live alarms and chimes may not go off inside the review.
+    if (passTimer) clearTimeout(passTimer);
+    if (dangerTimer) clearTimeout(dangerTimer);
+    if (turnSoundTimer) clearTimeout(turnSoundTimer);
+    passTimer = dangerTimer = turnSoundTimer = landingAlarm = null;
+  },
+  resumeLive() {
+    if (gameMode === 'LOCAL' && getAllLegalActions(gameState).mustPass) announceTurn();
+  },
+  closeGameMenu,
+  gameMenuOpen: () => !gameMenu.hidden,
+  hidePieceTooltip,
+  hideBanner,
+  hideBoardHint,
+  clearSelection: () => clearSelection(false),
+  updateInsets,
+  syncBoardRenderer,
+  syncUI,
+  renderQueenMeters,
+  toast,
+  playMoveSound,
+  copyText,
 });
 
 // ── Keyboard shortcuts ─────────────────────────────────
@@ -1870,11 +1537,11 @@ document.addEventListener('keydown', event => {
   if (!event.key || (event.target.closest?.('input, textarea') && event.target.id !== 'rb-slider')) return;
   if (!gameState || isOverlayOpen() || $('win-screen').classList.contains('active')) return;
   const key = event.key;
-  if (movesSheetOpen()) { // keys inside the sheet are its own; this catches Esc with focus elsewhere
-    if (key === 'Escape') closeMovesSheet();
+  if (reviewer.sheetOpen()) { // keys inside the sheet are its own; this catches Esc with focus elsewhere
+    if (key === 'Escape') reviewer.closeSheet();
     return;
   }
-  if (review && handleReviewKey(event)) return;
+  if (reviewer.handleKey(event)) return;
 
   if (key === 'Escape') {
     if (!gameMenu.hidden) closeGameMenu({ restoreFocus: true });
@@ -1883,7 +1550,7 @@ document.addEventListener('keydown', event => {
     return;
   }
   if (event.altKey || (event.metaKey && key.toLowerCase() !== 'z')) return;
-  if (key.toLowerCase() === 'z' && gameMode === 'LOCAL' && !review) { event.preventDefault(); undo(); }
+  if (key.toLowerCase() === 'z' && gameMode === 'LOCAL' && !reviewer.active) { event.preventDefault(); undo(); }
   else if (key.toLowerCase() === 'c' && !event.ctrlKey) board.recenter(true);
   else if (key === '+' || key === '=') board.zoomBy(1.2);
   else if (key === '-' || key === '_') board.zoomBy(1 / 1.2);
@@ -1955,6 +1622,7 @@ const FATAL_ERRORS = {
   // The stored session is kept (see exitToMenu) so the player can reclaim the seat later.
   SEAT_TAKEN:           'GAME OPENED IN ANOTHER TAB',
   NO_ACTIVE_GAME:       'That game is no longer active.',
+  ROOM_FULL:            'That room is full — 16 spectators are already watching.', // a spectator re-joining after a drop
 };
 
 /**
@@ -1969,9 +1637,10 @@ export function initNetHandlers() {
   });
 
   // Authoritative game state after any action
-  net.on('GAME_STATE', ({ gameState: snap, history: serverHistory }) => {
+  net.on('GAME_STATE', ({ gameState: snap, history: serverHistory, clock: serverClock, serverNow }) => {
     board.finishAnimations();
     if (Array.isArray(serverHistory)) moveLog = serverHistory;
+    setServerClock({ clock: serverClock, serverNow });
     const prev = gameState;
     gameState = deserializeState(snap);
     // Snapshots carry no action: recover it, and its route, from the previous state.
@@ -1979,12 +1648,15 @@ export function initNetHandlers() {
     onStateChanged(prev, { move });
   });
 
-  net.on('ROOM_RESUMED', ({ player, gameState: snap, endReason, history: serverHistory }) => {
-    myPlayer = player;
+  // Back after a drop: the authoritative state, re-applied. A spectator re-joins (SPECTATING) and gets
+  // the same snapshot; a player reclaims the seat (ROOM_RESUMED).
+  const resumeFromSnapshot = ({ gameState: snap, endReason, history: serverHistory, clock: serverClock, serverNow }) => {
     if (Array.isArray(serverHistory)) moveLog = serverHistory;
+    setServerClock({ clock: serverClock, serverNow });
     connectionNotice = null;
+    awayPlayers.clear();
     if (snap) {
-      leaveReviewForLive();
+      reviewer.leaveForLive();
       cancelTimers(); // nothing from before the drop (win impact, alarms, chime) may fire over the fresh state
       board.finishAnimations({ clearFx: true });
       const prev = gameState;
@@ -1994,26 +1666,57 @@ export function initNetHandlers() {
       if (lastMove) board.lastMove = lastMove;
       syncBoardRenderer();
       if (gameState.winner) {
+        clearToast(); // a stale "away" notice must not sit over the result
         winReason = winReasonFromServer(endReason);
         // Already over before the drop: show the result calmly. Ended while we were away: it is news.
         const calm = !prev || !!prev.winner;
-        if (winTimer) clearTimeout(winTimer);
-        winTimer = setTimeout(() => showWinScreen({ calm }), 300);
+        winFx.scheduleCard(300, { calm });
       }
     }
     syncUI();
     toast('RECONNECTED', 'good', 1400);
+    // Back in the game: say whose move it is (the board may have changed while we were away).
+    const banner = gameState && !reviewer.active && resumeBanner({
+      state: gameState, myPlayer, mustPass: myPlayer != null && gameState.turn === myPlayer && getAllLegalActions(gameState).mustPass,
+    });
+    if (banner) showBanner(banner.text, banner.color, PieceType.QUEEN, 1600);
+  };
+
+  net.on('ROOM_RESUMED', msg => {
+    myPlayer = msg.player;
+    spectatorCount = 0; // the server sends the current count right after
+    resumeFromSnapshot(msg);
+  });
+
+  net.on('SPECTATING', msg => {
+    myPlayer = null;
+    resumeFromSnapshot(msg);
+    // Players already away when we joined: say so (resumeFromSnapshot cleared the set).
+    for (const p of msg.away ?? []) awayPlayers.add(p);
+    const [gone] = awayPlayers;
+    if (gone && !gameState?.winner) toast(`PLAYER ${gone} DISCONNECTED`, 'warn', 0);
+  });
+
+  net.on('SPECTATORS', ({ count }) => {
+    spectatorCount = Number(count) || 0;
+    renderSpectators();
   });
 
   // Server confirmed game over (win, or resign)
-  net.on('GAME_OVER', ({ winner, reason }) => {
+  net.on('GAME_OVER', ({ winner, reason, clock: serverClock, serverNow }) => {
     if (!gameState) return;
-    leaveReviewForLive();
+    reviewer.leaveForLive();
+    if (serverClock) setServerClock({ clock: serverClock, serverNow });
+    else if (clock) clock = pauseClock(clock, Date.now()); // the game is over: the display stops too
     gameState = { ...gameState, winner };
+    clearAwayToast();
     winReason = winReasonFromServer(reason);
     clearSelection(false);
+    hidePieceTooltip();
     syncUI();
-    if (!winTimer && !winPresented) winTimer = setTimeout(showWinScreen, reason ? 200 : 700);
+    if (winFx.cardPending || winFx.presented) return;
+    if (reason === 'TIMEOUT') { hideBanner(); winFx.play(null); } // the flag falls: dim, then the card
+    else winFx.scheduleCard(reason ? 200 : 700);
   });
 
   // Server rejected a move (shouldn't happen with correct client logic)
@@ -2025,22 +1728,37 @@ export function initNetHandlers() {
     syncUI();
   });
 
-  net.on('OPPONENT_DISCONNECTED', () => {
+  net.on('OPPONENT_DISCONNECTED', ({ player } = {}) => {
+    if (watching()) { // a spectator is told which player went away
+      awayPlayers.add(player);
+      if (!gameState?.winner) toast(`PLAYER ${player} DISCONNECTED`, 'warn', 0);
+      return;
+    }
     opponentAway = true;
     if (!gameState?.winner) toast('OPPONENT DISCONNECTED — WAITING FOR THEM…', 'warn', 0);
   });
 
-  net.on('OPPONENT_RECONNECTED', () => {
+  net.on('OPPONENT_RECONNECTED', ({ player } = {}) => {
+    if (watching()) {
+      if (!awayPlayers.delete(player)) return;
+      const [still] = awayPlayers;
+      if (still && !gameState?.winner) toast(`PLAYER ${still} DISCONNECTED`, 'warn', 0);
+      else toast(`PLAYER ${player} RECONNECTED`, 'good', 1600);
+      return;
+    }
     if (opponentAway) toast('OPPONENT RECONNECTED', 'good', 1600);
     opponentAway = false;
   });
 
   // Server closed the room (timeout, etc.)
-  net.on('ROOM_CLOSED', () => exitToMenu({ notice: 'The room was closed after a period of inactivity.' }));
+  net.on('ROOM_CLOSED', ({ reason } = {}) => exitToMenu({
+    notice: reason === 'PLAYERS_LEFT' ? 'The players left — room closed.' : 'The room was closed after a period of inactivity.',
+  }));
 
   net.on('ERROR', ({ reason }) => {
     if (FATAL_ERRORS[reason]) exitToMenu({ notice: FATAL_ERRORS[reason], keepSaved: reason === 'SEAT_TAKEN' });
     else if (reason === 'ALREADY_IN_ROOM') toast('ALREADY IN A ROOM', 'warn');
+    else if (reason === 'NOT_A_PLAYER') toast('SPECTATORS CAN ONLY WATCH', 'warn', 1600);
     else toast(`SERVER ERROR: ${reason}`, 'error');
   });
 }
