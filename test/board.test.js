@@ -1,13 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { Board, stackLayers, hiveLayerKey, hiveBounds, layerCovers, badgeLayout } from '../js/board.js';
+import { Board, stackLayers, hiveLayerKey, hiveBounds, layerCovers, badgeLayout, tweenPoint, moveDuration, LAND_MS } from '../js/board.js';
 import { hexToPixel } from '../js/hex.js';
 
 // Just enough of a <canvas> for Board's constructor and input wiring.
 function fakeCanvas() {
   const listeners = {};
-  const ctx = new Proxy({}, { get: (target, key) => target[key] ?? (() => {}), set: (target, key, v) => { target[key] = v; return true; } });
+  const stub = new Proxy(function () {}, { get: () => stub, apply: () => stub });
+  const ctx = new Proxy({}, { get: (target, key) => target[key] ?? (() => stub), set: (target, key, v) => { target[key] = v; return true; } });
   return {
     width: 0, height: 0, style: {},
     getContext: () => ctx,
@@ -20,6 +21,8 @@ function fakeCanvas() {
 function makeBoard() {
   const canvas = fakeCanvas();
   const board = new Board(canvas, fakeCanvas());
+  board._makeCanvas = fakeCanvas;
+  board.reducedMotion = false;
   board.resize(400, 800);
   return { board, canvas };
 }
@@ -205,4 +208,164 @@ test('badgeLayout: the compact cue covers at most ~15% of the top glyph', () => 
     }
     assert.ok(covered / inBox <= 0.15, `r=${r}: covers ${(100 * covered / inBox).toFixed(1)}%`);
   }
+});
+
+
+// ── Move animation ───────────────────────────────────────
+
+const near = (a, b, eps = 1e-9) => Math.abs(a - b) <= eps;
+const KINDS = ['slide', 'hop', 'climb', 'throw'];
+
+test('tweenPoint: t=0 is the first point and t=1 the last, for every kind', () => {
+  const pts = [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 20 }];
+  for (const kind of KINDS) {
+    const a = tweenPoint(pts, 0, kind), b = tweenPoint(pts, 1, kind);
+    assert.deepEqual([a.x, a.y], [0, 0], kind);
+    assert.deepEqual([b.x, b.y], [10, 20], kind);
+    assert.ok(near(a.lift, 0) && near(b.lift, 0), `${kind} lift is 0 at both ends`);
+  }
+  const drop = [{ x: 4, y: 5 }];
+  assert.deepEqual([tweenPoint(drop, 0, 'place').x, tweenPoint(drop, 0, 'place').y], [4, 5]);
+  assert.equal(tweenPoint(drop, 0, 'place').lift, 1, 'a placement starts high');
+  assert.equal(tweenPoint(drop, 1, 'place').lift, 0, 'and lands');
+});
+
+test('tweenPoint: a slide moves at constant speed along the polyline', () => {
+  const pts = [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 30 }]; // length 40
+  const at = t => { const p = tweenPoint(pts, t, 'slide'); return [p.x, p.y]; };
+  assert.deepEqual(at(0.25), [10, 0]);
+  assert.deepEqual(at(0.5), [10, 10]);
+  assert.deepEqual(at(0.125), [5, 0]);
+  assert.deepEqual(at(2), [10, 30], 'clamped');
+});
+
+test('tweenPoint: hop lift peaks at t=0.5 and is symmetric', () => {
+  const pts = [{ x: 0, y: 0 }, { x: 100, y: 0 }];
+  const lift = t => tweenPoint(pts, t, 'hop').lift;
+  assert.ok(near(lift(0.5), 1));
+  for (const t of [0.1, 0.3, 0.45, 0.55, 0.7, 0.9]) assert.ok(lift(t) < 1, `t=${t}`);
+  assert.ok(near(lift(0.3), lift(0.7)));
+  assert.ok(lift(0.3) > lift(0.1));
+});
+
+test('moveDuration: ~120 ms per hex, never over the 700 ms budget (incl. landing)', () => {
+  assert.ok(moveDuration('slide', 4) >= 400);
+  assert.ok(moveDuration('slide', 6) > moveDuration('slide', 3));
+  for (const kind of [...KINDS, 'place']) {
+    for (const steps of [1, 2, 5, 12]) {
+      const d = moveDuration(kind, steps);
+      assert.ok(d > 0 && d + LAND_MS <= 700, `${kind} × ${steps}: ${d} + ${LAND_MS}`);
+    }
+  }
+});
+
+function boardWithMove() {
+  const { board } = makeBoard();
+  board.pieces.set('0,0', [{ player: 2, type: 'QUEEN' }]);
+  board.pieces.set('2,0', [{ player: 1, type: 'ANT' }]);
+  return board;
+}
+
+test('animateMove hides the arriving top piece and flies it, then lands with FX', async () => {
+  const board = boardWithMove();
+  let done = false;
+  const p = board.animateMove({ path: ['-1,0', '-1,1', '0,1', '1,1', '2,0'], kind: 'slide', toKey: '2,0' }).then(() => { done = true; });
+  assert.ok(board.hiddenTop.has('2,0'), 'top piece left out of the layer while in flight');
+  assert.equal(board.floating.length, 1);
+  assert.equal(board.floating[0].piece.type, 'ANT');
+
+  board.draw(1000);
+  const start = { x: board.floating[0].x, y: board.floating[0].y };
+  board.draw(1150);
+  assert.ok(board.floating[0].x !== start.x || board.floating[0].y !== start.y, 'the piece moves');
+  board.draw(1500);   // 4 steps = 480 ms: just past touchdown
+  assert.ok(board.particles.length >= 10 && board.particles.length <= 16, `sparks: ${board.particles.length}`);
+  assert.ok(board.hiddenTop.has('2,0'), 'still settling');
+  board.draw(1700);   // past the landing settle
+  await p;
+  assert.ok(done);
+  assert.equal(board.floating.length, 0);
+  assert.equal(board.hiddenTop.size, 0);
+  board.draw(5000);
+  assert.equal(board.particles.length, 0, 'sparks are culled when spent');
+});
+
+test('finishAnimations completes a flight at once: nothing hidden, nothing floating, promise resolved', async () => {
+  const board = boardWithMove();
+  const p = board.animateMove({ path: ['-1,0', '2,0'], kind: 'hop', toKey: '2,0' });
+  board.draw(1000); board.draw(1100);
+  board.finishAnimations({ clearFx: true });
+  await p;
+  assert.equal(board.floating.length, 0);
+  assert.equal(board.hiddenTop.size, 0);
+  assert.equal(board.particles.length, 0);
+});
+
+test('reduced motion: animateMove is instant with no particles or shake', async () => {
+  const board = boardWithMove();
+  board.reducedMotion = true;
+  await board.animateMove({ path: ['-1,0', '2,0'], kind: 'climb', toKey: '2,0' });
+  assert.equal(board.floating.length, 0);
+  assert.equal(board.hiddenTop.size, 0);
+  board.draw(1000); board.draw(2000);
+  assert.equal(board.particles.length, 0);
+});
+
+test('reveal pans gently to show off-screen targets and leaves visible ones alone', () => {
+  const { board } = makeBoard();
+  board.insets = { top: 52, bottom: 112 };
+  board.pieces.set('0,0', [{ player: 1, type: 'ANT' }]);
+  board.recenter(false);
+  const before = { tx: board.tx, ty: board.ty, scale: board.scale };
+  assert.equal(board.reveal(['0,0', '1,0']), false, 'already visible: no camera move');
+  assert.deepEqual({ tx: board.tx, ty: board.ty, scale: board.scale }, before);
+
+  board.tx -= 300; // the user panned the hive mostly off to the left
+  assert.equal(board.reveal(['0,0']), true);
+  board.draw(0); board.draw(2000);
+  const { x, y } = board.hexToScreen('0,0');
+  const r = board.SIZE * board.scale;
+  assert.ok(x - r >= 0 && x + r <= 400 && y - r >= 52 && y + r <= 800 - 112, 'target now in the playable area');
+  assert.equal(board.scale, before.scale, 'a pan was enough: no zoom');
+});
+
+test('reveal zooms out only when the targets cannot fit at the current zoom', () => {
+  const { board } = makeBoard();
+  board.insets = { top: 52, bottom: 112 };
+  board.scale = 1.25;
+  const keys = ['-6,0', '6,0'];
+  for (const k of keys) board.pieces.set(k, [{ player: 1, type: 'ANT' }]);
+  assert.equal(board.reveal(keys), true);
+  board.draw(0); board.draw(2000);
+  assert.ok(board.scale < 1.25);
+  for (const k of keys) {
+    const { x } = board.hexToScreen(k);
+    assert.ok(x >= 0 && x <= 400, `${k} visible`);
+  }
+});
+
+test('reveal keeps its context (the hive) in view when it has to move anyway', () => {
+  const { board } = makeBoard();
+  board.insets = { top: 52, bottom: 112 };
+  const hive = ['-2,0', '-1,0', '0,0', '1,0'];
+  for (const k of hive) board.pieces.set(k, [{ player: 1, type: 'ANT' }]);
+  board.recenter(false);
+  assert.equal(board.reveal(['-1,0'], hive), false, 'target visible: context alone never moves the camera');
+  assert.equal(board.reveal(['3,0'], hive), true);
+  board.draw(0); board.draw(2000);
+  for (const k of [...hive, '3,0']) {
+    const { x } = board.hexToScreen(k);
+    assert.ok(x - board.SIZE * board.scale >= 0 && x + board.SIZE * board.scale <= 400, `${k} in view`);
+  }
+});
+
+test('reveal does not fight a user who is panning', () => {
+  const { board, canvas } = makeBoard();
+  board.pieces.set('0,0', [{ player: 1, type: 'ANT' }]);
+  board.tx = -2000;
+  canvas.fire('pointerdown', { pointerId: 1, clientX: 100, clientY: 400 });
+  canvas.fire('pointermove', { pointerId: 1, clientX: 140, clientY: 400 });
+  assert.equal(board.reveal(['0,0']), false, 'pointer down');
+  canvas.fire('pointerup', { pointerId: 1, clientX: 140, clientY: 400 });
+  assert.equal(board.reveal(['0,0']), false, 'just finished a drag');
 });

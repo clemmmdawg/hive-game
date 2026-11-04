@@ -1,6 +1,6 @@
 // hints.js — Status-line copy for the HUD. Pure; no DOM.
 
-import { getAllLegalActions } from './game.js';
+import { ActionType, getAllLegalActions, getLegalPlacements, getLegalMoves, getLegalThrows } from './game.js';
 
 const BLOCKER_TEXT = {
   NOT_YOUR_PIECE:   "THAT'S NOT YOUR PIECE",
@@ -105,6 +105,31 @@ export function describeLastMove(prev, next) {
   const placed = countPieces(next.board) > countPieces(prev.board);
   if (!from && !placed) return null;
   return { from, to: next.lastMovedHex, player: prev.turn };
+}
+
+/**
+ * The action that turned `prev` into `next`, recovered from the two snapshots
+ * (online play only receives snapshots; the board animates from this). Only a
+ * single legal ply is recognised: anything else — a pass, a resume, an undo,
+ * snapshots further apart — gives null.
+ * @returns {{type:'PLACE', pieceType, to}|{type:'MOVE', from, to}|{type:'THROW', pillbugHex, from, to}|null}
+ */
+export function inferAction(prev, next) {
+  if (!prev || !next || next.turnNumber !== prev.turnNumber + 1) return null;
+  const lm = describeLastMove(prev, next);
+  if (!lm) return null;
+  const { from, to } = lm;
+
+  if (from === null) {
+    const pieceType = next.board.get(to)?.at(-1)?.type;
+    return pieceType && getLegalPlacements(prev, pieceType).includes(to)
+      ? { type: ActionType.PLACE, pieceType, to } : null;
+  }
+  if (next.pillbugThrewHex === to) {
+    const t = getLegalThrows(prev).find(t => t.from === from && t.to === to);
+    return t ? { type: ActionType.THROW, pillbugHex: t.pillbugHex, from, to } : null;
+  }
+  return getLegalMoves(prev, from).includes(to) ? { type: ActionType.MOVE, from, to } : null;
 }
 
 function countPieces(board) {

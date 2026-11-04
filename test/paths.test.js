@@ -130,6 +130,19 @@ test('mosquito copying ant yields a slide path; on top of hive it climbs', () =>
   assert.equal(mv(top, '0,0', '1,0').kind, 'climb');
 });
 
+test('ground mosquito stepping to an empty hex prefers a slide over an equal-length climb', () => {
+  // Beetle is the first neighbour (east), so its 'climb' route is found first.
+  const s = position([
+    ['0,0',  [P(1, PieceType.MOSQUITO)]],
+    ['1,0',  [P(2, PieceType.BEETLE)]],
+    ['0,1',  [P(2, PieceType.QUEEN)]],
+    ['-1,1', [P(1, PieceType.QUEEN)]],
+  ]);
+  assert.deepEqual(mv(s, '0,0', '1,-1'), { path: ['0,0', '1,-1'], kind: 'slide' });
+  // Onto a piece only the beetle copy works: still a climb.
+  assert.equal(mv(s, '0,0', '1,0').kind, 'climb');
+});
+
 test('illegal destinations give null', () => {
   const s = row(PieceType.SPIDER);
   assert.equal(mv(s, '0,0', '1,0'), null);        // occupied

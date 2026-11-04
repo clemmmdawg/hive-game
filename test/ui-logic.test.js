@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { ActionType, PieceType, applyAction, createGame, getLegalPlacements } from '../js/game.js';
-import { statusText, describeLastMove, winReasonFromServer, resumedWinReason, turnChipText } from '../js/hints.js';
+import { ActionType, PieceType, applyAction, createGame, getLegalPlacements, getLegalMoves, getLegalThrows } from '../js/game.js';
+import { statusText, describeLastMove, inferAction, winReasonFromServer, resumedWinReason, turnChipText } from '../js/hints.js';
 import { encodeLocalSave, decodeLocalSave, MAX_UNDO } from '../js/local-save.js';
 
 const P = (player, type) => ({ player, type });
@@ -100,6 +100,64 @@ test('last move is null after a pass and falls back to lastMovedHex on resume', 
   assert.equal(describeLastMove(prev, passed), null);
   assert.deepEqual(describeLastMove(null, prev), { from: null, to: '0,0', player: 1 });
   assert.equal(describeLastMove(null, createGame({})), null);
+});
+
+// ── inferAction ──────────────────────────────────────────────────────────────
+
+function expansionGame(entries, turn = 1) {
+  const state = createGame({ expansions: { mosquito: true, ladybug: true, pillbug: true } });
+  state.board = new Map(entries);
+  state.queenPlaced = { 1: true, 2: true };
+  state.turn = turn;
+  state.turnNumber = 10;
+  return state;
+}
+
+test('inferAction recovers a placement from two snapshots', () => {
+  const prev = place(createGame({}), PieceType.ANT);
+  const action = { type: ActionType.PLACE, pieceType: PieceType.SPIDER, to: getLegalPlacements(prev, PieceType.SPIDER)[0] };
+  assert.deepEqual(inferAction(prev, applyAction(prev, action)), action);
+});
+
+test('inferAction recovers a move, including a beetle climbing onto a stack', () => {
+  const prev = expansionGame([
+    ['0,0', [P(1, PieceType.BEETLE)]],
+    ['1,0', [P(2, PieceType.QUEEN)]],
+    ['-1,0', [P(1, PieceType.QUEEN)]],
+  ]);
+  for (const to of getLegalMoves(prev, '0,0')) {
+    const action = { type: ActionType.MOVE, from: '0,0', to };
+    assert.deepEqual(inferAction(prev, applyAction(prev, action)), action, `beetle to ${to}`);
+  }
+});
+
+test('inferAction tells a pillbug throw from a move (own and opponent pieces)', () => {
+  const prev = expansionGame([
+    ['0,0', [P(1, PieceType.PILLBUG)]],
+    ['1,0', [P(2, PieceType.ANT)]],
+    ['-1,0', [P(1, PieceType.QUEEN)]],
+    ['1,-1', [P(2, PieceType.QUEEN)]],
+  ]);
+  prev.lastOpponentMovedHex = null;
+  const throws = getLegalThrows(prev);
+  assert.ok(throws.some(t => t.from === '1,0') && throws.some(t => t.from === '-1,0'), 'both pieces are throwable');
+  for (const t of throws) {
+    const action = { type: ActionType.THROW, pillbugHex: t.pillbugHex, from: t.from, to: t.to };
+    assert.deepEqual(inferAction(prev, applyAction(prev, action)), action, `throw ${t.from}→${t.to}`);
+  }
+});
+
+test('inferAction returns null for passes and unrelated snapshots', () => {
+  const a = place(createGame({}), PieceType.ANT);
+  const b = place(a, PieceType.ANT);
+  const c = place(b, PieceType.QUEEN);
+  assert.equal(inferAction(null, a), null);
+  assert.equal(inferAction(a, null), null);
+  assert.equal(inferAction(a, a), null, 'same state');
+  assert.equal(inferAction(a, c), null, 'two plies apart');
+  assert.equal(inferAction(c, a), null, 'going backwards (undo / resume)');
+  assert.equal(inferAction(b, applyAction(b, { type: ActionType.PASS })), null, 'pass');
+  assert.equal(inferAction(createGame({}), c), null, 'a different game');
 });
 
 // ── end-of-game copy ─────────────────────────────────────────────────────────

@@ -286,11 +286,12 @@ export function drawSprite(ctx, type, x, y, size, { ink, fill, glow }) {
 
   // Soft neon halo: a wide, faint stroke under everything (cheaper than shadowBlur).
   if (glow) {
-    ctx.globalAlpha = 0.35;
+    const alpha = ctx.globalAlpha; // respect a caller's fade
+    ctx.globalAlpha = alpha * 0.35;
     ctx.strokeStyle = glow;
     ctx.lineWidth   = STROKE * 2.2;
     ctx.stroke(paths.outline);
-    ctx.globalAlpha = 1;
+    ctx.globalAlpha = alpha;
   }
 
   ctx.lineWidth   = STROKE;

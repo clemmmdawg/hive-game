@@ -1,14 +1,14 @@
 // app.js — Game state machine + UI
 import { hexKey } from './hex.js';
-import { Board } from './board.js';
+import { Board, moveDuration, LAND_MS } from './board.js';
 import {
   PieceType, ActionType,
   createGame, applyAction,
   getLegalPlacements, getLegalMoves, getLegalThrows, getMoveBlocker,
-  getAllLegalActions, deserializeState,
+  getAllLegalActions, deserializeState, getMovePath,
 } from './game.js';
 import { initMenu, showMenu, showConfirm, showRules, leaveOnlineSession, isOverlayOpen } from './menu.js';
-import { statusText, describeLastMove, winReasonFromServer, resumedWinReason, turnChipText } from './hints.js';
+import { statusText, describeLastMove, inferAction, winReasonFromServer, resumedWinReason, turnChipText } from './hints.js';
 import { encodeLocalSave, decodeLocalSave, MAX_UNDO } from './local-save.js';
 import { spriteSVG, drawSprite, SPECIES_COLOR, bodyFill } from './sprites.js';
 import * as net from './net.js';
@@ -108,6 +108,10 @@ window.addEventListener('resize', () => {
 });
 
 (function loop(t) { board.draw(t); requestAnimationFrame(loop); })(0);
+
+// The ×N stack badges use the pixel font: re-render the cached layer once it has
+// loaded, or a cold start keeps the fallback face in the cache.
+document.fonts?.ready.then(() => board.invalidate());
 
 // ── Game state ─────────────────────────────────────────
 
@@ -245,6 +249,7 @@ function cancelTimers() {
 }
 
 function resetBoardView() {
+  board.finishAnimations({ clearFx: true });
   board.pieces.clear();
   board.ghosts       = new Set();
   board.throwTargets = new Set();
@@ -317,6 +322,7 @@ export function startOnlineGame(settings, playerNum, serializedState, endReason 
 }
 
 function beginGameSession(lastMove) {
+  board.finishAnimations({ clearFx: true });
   winPresented = false;
   winReason    = null;
   hideWinScreen();
@@ -423,6 +429,7 @@ function selectTrayPiece(type) {
   uiState.boardPick = null;
   board.selectedHex = null;
   updateGhosts();
+  board.reveal(board.ghosts, board.pieces.keys());
   syncUI();
 }
 
@@ -434,6 +441,7 @@ function selectBoardPiece(key) {
   uiState.throwPillbugHex = null;
   board.selectedHex = key;
   updateGhosts();
+  board.reveal([key, ...board.ghosts], board.pieces.keys());
   syncUI();
 }
 
@@ -445,11 +453,13 @@ function selectThrowPiece(fromKey, pillbugKey) {
   uiState.throwPillbugHex = pillbugKey;
   board.selectedHex       = pillbugKey;   // keep the thrower highlighted
   updateGhosts();
+  board.reveal([fromKey, ...board.ghosts], board.pieces.keys());
   syncUI();
 }
 
 /** Route an action to the server (ONLINE) or apply it locally. */
 function act(action) {
+  board.finishAnimations(); // a new action completes any running tween
   if (gameMode === 'ONLINE') {
     if (!net.isConnected()) {
       toast('NOT CONNECTED — RECONNECTING…', 'warn');
@@ -467,10 +477,11 @@ function act(action) {
   }
 
   const prev = gameState;
+  const move = getMovePath(prev, action);
   history.push(prev);
   if (history.length > MAX_UNDO) history.shift();
   gameState = applyAction(prev, action);
-  onStateChanged(prev);
+  onStateChanged(prev, { move });
 }
 
 function doPlace(toKey) {
@@ -487,20 +498,28 @@ function doThrow(toKey) {
 
 // ── Post-action ────────────────────────────────────────
 
-/** Common path after gameState changes (local action or server snapshot). */
-function onStateChanged(prev, { animate = true } = {}) {
+/**
+ * Common path after gameState changes (local action or server snapshot).
+ * `move` is the getMovePath() route of the action, flown by the board; without
+ * one the arriving piece just pops in.
+ */
+function onStateChanged(prev, { animate = true, move = null } = {}) {
   clearSelection(false);
   const lastMove = describeLastMove(prev, gameState);
   if (lastMove) board.lastMove = lastMove;
   syncBoardRenderer();
-  if (lastMove && animate) board.markArrival(lastMove.to);
-  board.ensureHiveVisible();
+  const flying = !!(lastMove && animate && move && !board.reducedMotion);
+  if (flying) board.animateMove({ ...move, toKey: lastMove.to, player: lastMove.player });
+  else if (lastMove && animate) board.markArrival(lastMove.to);
+  board.reveal(board.pieces.keys());
   syncUI();
   saveLocal();
 
   if (gameState.winner) {
     hideBanner();
-    winTimer = setTimeout(showWinScreen, 700);
+    // Let the winning move land before the result card.
+    const delay = flying ? moveDuration(move.kind, move.path.length - 1) + LAND_MS + 450 : 700;
+    winTimer = setTimeout(showWinScreen, delay);
     return;
   }
   announceTurn();
@@ -541,6 +560,7 @@ function announceTurn() {
 
 function undo() {
   if (gameMode !== 'LOCAL' || !history.length || !gameState) return;
+  board.finishAnimations({ clearFx: true }); // no animation, and nothing left mid-air
   cancelTimers();
   const restored = history.pop();
   gameState    = restored;
@@ -1134,15 +1154,19 @@ export function initNetHandlers() {
 
   // Authoritative game state after any action
   net.on('GAME_STATE', ({ gameState: snap }) => {
+    board.finishAnimations();
     const prev = gameState;
     gameState = deserializeState(snap);
-    onStateChanged(prev);
+    // Snapshots carry no action: recover it, and its route, from the previous state.
+    const move = prev ? getMovePath(prev, inferAction(prev, gameState)) : null;
+    onStateChanged(prev, { move });
   });
 
   net.on('ROOM_RESUMED', ({ player, gameState: snap, endReason }) => {
     myPlayer = player;
     connectionNotice = null;
     if (snap) {
+      board.finishAnimations({ clearFx: true });
       const prev = gameState;
       gameState = deserializeState(snap);
       clearSelection(false);

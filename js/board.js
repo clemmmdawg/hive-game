@@ -53,6 +53,8 @@ export function stackLayers(height, size) {
 const LAYER_PAD      = 3;    // hexes of padding around the hive (grid hints, glows)
 const LAYER_MARGIN   = 0.25; // a viewport-clipped layer reaches this far past each edge
 const ZOOM_SETTLE_MS = 140;  // while zooming, blit the stale layer scaled; re-render once settled
+const ZOOM_REUSE_MIN = 0.4;  // …as long as the zoom stays within this ratio of the layer's scale
+const ZOOM_REUSE_MAX = 2.5;
 const MIN_LINE_PX    = 1.5;  // thinnest screen-px line for the selection ring and last-move ticks
 const BADGE_FULL_R   = 22;   // top-face radius (screen px) from which full stack badges show
 const BADGE_MIN_R    = 9;    // below this the stepped slabs alone show the height
@@ -128,6 +130,85 @@ const RINGS = {
 
 const easeOutCubic = p => 1 - Math.pow(1 - p, 3);
 const easeOutBack  = p => 1 + 2.2 * Math.pow(p - 1, 3) + 1.2 * Math.pow(p - 1, 2);
+const easeInOutCubic = p => (p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2);
+const easeInOutSine  = p => -(Math.cos(Math.PI * p) - 1) / 2;
+
+// ── Move animation ──
+// Timing: ~120 ms per hex step; the tween plus the landing settle stay within 700 ms.
+const STEP_MS     = 120;
+const MOVE_MAX_MS = 700;
+export const LAND_MS = 150;                       // squash-and-settle after touchdown
+const MIN_MOVE_MS = { slide: 220, hop: 300, climb: 280, throw: 400, place: 270 };
+const LIFT        = {                              // arc height (× SIZE) and how much a lifted piece grows
+  slide: { h: 0.14, grow: 0.05 },
+  hop:   { h: 0.55, grow: 0.16, perStep: 0.12, max: 1.2 },
+  climb: { h: 0.5,  grow: 0.10 },
+  throw: { h: 1.3,  grow: 0.22 },
+  place: { h: 1.8,  grow: 0.30 },
+};
+const SQUASH      = { slide: 0.05, hop: 0.13, climb: 0.11, throw: 0.14, place: 0.17 };
+const SPARKS      = { slide: 10, place: 12, hop: 14, climb: 14, throw: 16 };
+const NUDGE_PX    = { climb: 2.5, throw: 3 };      // camera nudge on heavy landings (screen px)
+const NUDGE_MS    = 220;
+const RIPPLE_MS   = 480;
+const FLASH_MS    = 170;
+const MAX_PARTICLES = 96;
+const USER_CAMERA_GRACE_MS = 1200;                 // reveal() leaves the camera alone this long after a user pan/zoom
+
+/** Tween duration (ms, without the LAND_MS settle) for a move of `steps` hexes. */
+export function moveDuration(kind, steps) {
+  const min = MIN_MOVE_MS[kind] ?? MIN_MOVE_MS.slide;
+  if (kind === 'place') return min;
+  return Math.min(MOVE_MAX_MS - LAND_MS, Math.max(min, STEP_MS * steps));
+}
+
+/** Height profile 0..1 of a move at progress u: arcs for hops/throws, a hover for slides, a fall for drops. */
+function liftCurve(kind, u, n) {
+  const arc = 4 * u * (1 - u);
+  if (kind === 'place') return 1 - u * (0.35 + 0.65 * u); // thrown down, then gravity
+  if (kind === 'slide') return Math.min(1, arc * 2);   // pick up, glide, set down
+  if (kind === 'climb' && n > 2) return Math.min(1, arc * 1.8); // ladybug: up, across the top, down
+  return arc;                                          // hop / throw / climb: parabola
+}
+
+/**
+ * Position along a move at progress `t` (0..1): constant speed along the
+ * polyline `points` (board space), plus `lift` 0..1 for arc height and scale.
+ * Easing is the caller's job (it passes an eased t).
+ * @returns {{x:number, y:number, lift:number}}
+ */
+export function tweenPoint(points, t, kind) {
+  const u = Math.max(0, Math.min(1, t));
+  const lift = liftCurve(kind, u, points.length);
+  if (points.length === 1 || u === 0) return { x: points[0].x, y: points[0].y, lift };
+  if (u === 1) { const last = points.at(-1); return { x: last.x, y: last.y, lift }; }
+  const lens = [];
+  let total = 0;
+  for (let i = 1; i < points.length; i++) {
+    const d = Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+    lens.push(d);
+    total += d;
+  }
+  let dist = u * total;
+  for (let i = 0; i < lens.length; i++) {
+    if (dist <= lens[i] || i === lens.length - 1) {
+      const k = lens[i] ? Math.min(1, dist / lens[i]) : 1;
+      const a = points[i], b = points[i + 1];
+      return { x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k, lift };
+    }
+    dist -= lens[i];
+  }
+  return { x: points.at(-1).x, y: points.at(-1).y, lift };
+}
+
+/** Progress easing per move kind. */
+function moveEase(kind, p) {
+  if (kind === 'place') return p;           // gravity lives in the lift curve
+  if (kind === 'slide') return easeInOutCubic(p);
+  return easeInOutSine(p);                  // arcs: gentle take-off and touchdown
+}
+
+const now = () => globalThis.performance?.now() ?? Date.now();
 
 export class Board {
   /**
@@ -176,6 +257,16 @@ export class Board {
     this.reducedMotion = !!globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
     this._camera  = null; // { from, to, start } while animating a recenter
     this._arrival = null; // { key, start } while a newly arrived piece pops in
+    this._userCameraAt = -Infinity; // last user pan / pinch / wheel / zoom key (performance.now())
+
+    // ── Move animation + impact FX ──
+    this._flights  = [];   // pieces in flight (see animateMove)
+    /** @type {{x:number,y:number,vx:number,vy:number,born:number,life:number,color:string}[]} landing sparks (board space) */
+    this.particles = [];
+    this._ripples  = [];   // { x, y, r, color, born } landing rings
+    this._nudge    = null; // { born, amp } camera nudge
+    this._tiles    = new Map(); // player → { S, half, canvas } pre-rendered tile for flights
+    this._lastT    = null;
 
     // ── Hive layer cache (see draw) ──
     this._layer      = null;      // { board, glyphs, key, rect, scale, dpr, faces, bx0, by0, id }
@@ -273,9 +364,59 @@ export class Board {
     }
   }
 
+  /**
+   * Gently bring `keys` (hex keys: legal targets, a moved piece, the hive) into
+   * the playable area between the insets: the smallest pan that shows them, or —
+   * only if they cannot fit at this zoom — a zoom-out to fit. Never zooms in, and
+   * leaves the camera alone while the user is panning or just did.
+   * `context` (e.g. the hive) is kept in view too when it moves anyway, so a
+   * reveal does not push the rest of the hive out only to bring it back later.
+   * @returns {boolean} true when the camera starts moving
+   */
+  reveal(keys, context = []) {
+    const list = [...keys];
+    if (!list.length || this._pts.size || now() - this._userCameraAt < USER_CAMERA_GRACE_MS) return false;
+    const base   = this._camera?.to ?? { tx: this.tx, ty: this.ty, scale: this.scale };
+    if (!this._revealTarget(list, base)) return false;
+    const target = this._revealTarget([...list, ...context], base);
+    if (!target) return false;
+    if (this.reducedMotion) {
+      this._camera = null;
+      Object.assign(this, target);
+    } else {
+      this._camera = { from: { tx: this.tx, ty: this.ty, scale: this.scale }, to: target, start: null };
+    }
+    return true;
+  }
+
+  /** Camera that shows `keys`, starting from camera `base`; null if they are already in view. */
+  _revealTarget(keys, { tx, ty, scale }) {
+    const box = hiveBounds(keys, this.SIZE, this.SIZE);
+    const { top, bottom } = this.insets;
+    const vx0 = FIT_PAD, vx1 = this.W - FIT_PAD;
+    const vy0 = top + FIT_PAD, vy1 = this.H - bottom - FIT_PAD;
+    const sx0 = tx + box.x0 * scale, sx1 = tx + box.x1 * scale;
+    const sy0 = ty + box.y0 * scale, sy1 = ty + box.y1 * scale;
+    if (sx0 >= vx0 && sx1 <= vx1 && sy0 >= vy0 && sy1 <= vy1) return null;
+
+    const viewW = Math.max(1, vx1 - vx0), viewH = Math.max(1, vy1 - vy0);
+    if (sx1 - sx0 <= viewW && sy1 - sy0 <= viewH) {
+      const dx = sx0 < vx0 ? vx0 - sx0 : sx1 > vx1 ? vx1 - sx1 : 0;
+      const dy = sy0 < vy0 ? vy0 - sy0 : sy1 > vy1 ? vy1 - sy1 : 0;
+      return { tx: tx + dx, ty: ty + dy, scale };
+    }
+    const fit = Math.max(MIN_SCALE, Math.min(scale, viewW / (box.x1 - box.x0), viewH / (box.y1 - box.y0)));
+    return {
+      tx: (vx0 + vx1) / 2 - ((box.x0 + box.x1) / 2) * fit,
+      ty: (vy0 + vy1) / 2 - ((box.y0 + box.y1) / 2) * fit,
+      scale: fit,
+    };
+  }
+
   /** Zoom around the center of the playable area (keyboard / buttons). */
   zoomBy(ratio) {
     this._camera = null;
+    this._userCameraAt = now();
     const cy = this.insets.top + (this.H - this.insets.top - this.insets.bottom) / 2;
     this._applyZoom(ratio, this.W / 2, cy);
   }
@@ -290,6 +431,197 @@ export class Board {
   /** Pop-in animation for a piece that just arrived at `key`. */
   markArrival(key) {
     this._arrival = this.reducedMotion ? null : { key, start: null };
+  }
+
+  /**
+   * Fly the top piece of `toKey` along `path` (hex keys, from getMovePath). The
+   * piece is already in `pieces` at its destination; while in flight it is left
+   * out of the cached layer (`hiddenTop`) and drawn live from `floating`. On
+   * touchdown: squash-and-settle, a ripple in the player colour, sparks in the
+   * species colour and, for climbs/throws, a small camera nudge. Under reduced
+   * motion it resolves at once with no effects.
+   * @param {{path:string[], kind:'slide'|'hop'|'climb'|'throw'|'place', piece?:object, player?:1|2, toKey?:string}} move
+   * @returns {Promise<void>} resolves when the piece has settled (or finishAnimations ran)
+   */
+  animateMove({ path, kind, piece, player, toKey }) {
+    this.finishAnimations();
+    toKey ??= path?.at(-1);
+    const stack = this.pieces.get(toKey);
+    piece ??= stack?.at(-1);
+    if (this.reducedMotion || !path?.length || !stack || !piece) return Promise.resolve();
+
+    const tileR = this.SIZE - 2;
+    const pts = path.map(k => { const { q, r } = parseKey(k); return hexToPixel(q, r, this.SIZE); });
+    const endL = stackLayers(stack.length, tileR).at(-1);
+    const startL = kind === 'place' ? endL : stackLayers((this.pieces.get(path[0])?.length ?? 0) + 1, tileR).at(-1);
+    const steps = Math.max(1, path.length - 1);
+    const spec = LIFT[kind] ?? LIFT.slide;
+    const liftH = this.SIZE * Math.min(spec.max ?? Infinity, spec.h + (spec.perStep ?? 0) * steps);
+
+    const entry = { piece, x: pts[0].x, y: pts[0].y + startL.dy, lift: kind === 'place' ? liftH : 0, scale: startL.scale, alpha: kind === 'place' ? 0 : 1 };
+    this.floating.push(entry);
+    this.hiddenTop.add(toKey);
+    return new Promise(resolve => {
+      this._flights.push({
+        toKey, piece, kind, pts, startL, endL, steps, liftH, grow: spec.grow, entry, resolve,
+        player: player ?? piece.player, dur: moveDuration(kind, steps), start: null, landedAt: null,
+      });
+    });
+  }
+
+  /**
+   * Complete every running move at once: pieces snap home (no landing FX) and
+   * their promises resolve. `clearFx` also drops sparks, ripples and the nudge
+   * (undo: nothing may linger where the piece used to be).
+   */
+  finishAnimations({ clearFx = false } = {}) {
+    for (const f of [...this._flights]) this._endFlight(f);
+    this._arrival = null;
+    if (clearFx) {
+      this.particles = [];
+      this._ripples  = [];
+      this._nudge    = null;
+    }
+  }
+
+  _endFlight(f) {
+    this._flights = this._flights.filter(x => x !== f);
+    this.floating = this.floating.filter(x => x !== f.entry);
+    if (!this._flights.some(x => x.toKey === f.toKey)) this.hiddenTop.delete(f.toKey);
+    f.resolve();
+  }
+
+  /** Advance every flight to time t (tween, then the landing settle). */
+  _stepFlights(t) {
+    for (const f of [...this._flights]) {
+      if (f.start === null) f.start = t;
+      const e = f.entry;
+      const p = (t - f.start) / f.dur;
+      if (p < 1) {
+        const u  = moveEase(f.kind, p);
+        const pt = tweenPoint(f.pts, u, f.kind);
+        // Vertical speed stretches the tile a touch while it rises or falls.
+        const du = 0.01;
+        const v  = (liftCurve(f.kind, Math.min(1, u + du), f.pts.length) - liftCurve(f.kind, Math.max(0, u - du), f.pts.length)) / (2 * du);
+        const st = f.kind === 'slide' ? 0 : Math.min(0.08, 0.02 * Math.abs(v));
+        Object.assign(e, {
+          x: pt.x,
+          y: pt.y + f.startL.dy + (f.endL.dy - f.startL.dy) * u,
+          lift: pt.lift * f.liftH,
+          scale: (f.startL.scale + (f.endL.scale - f.startL.scale) * u) * (1 + pt.lift * f.grow),
+          sx: 1 - st, sy: 1 + st,
+          alpha: f.kind === 'place' ? Math.min(1, p / 0.3) : 1,
+        });
+        continue;
+      }
+      if (f.landedAt === null) {
+        f.landedAt = f.start + f.dur;
+        this._land(f, t);
+      }
+      const q = (t - f.landedAt) / LAND_MS;
+      if (q >= 1) { this._endFlight(f); continue; }
+      const sq  = SQUASH[f.kind] * Math.exp(-4 * q) * Math.cos(q * Math.PI * 2.5);
+      const end = f.pts.at(-1);
+      Object.assign(e, { x: end.x, y: end.y + f.endL.dy, lift: 0, scale: f.endL.scale, sx: 1 + sq, sy: 1 - sq, alpha: 1 });
+    }
+  }
+
+  /** Touchdown effects for flight f at time t. */
+  _land(f, t) {
+    const end = f.pts.at(-1);
+    const x = end.x, y = end.y + f.endL.dy;
+    const r = (this.SIZE - 2) * f.endL.scale;
+    this._ripples.push({ x, y, r, color: f.player === 2 ? P2 : P1, born: t });
+    const color = SPECIES_COLOR[f.piece.type] ?? '#ffffff';
+    const n = SPARKS[f.kind] ?? 12;
+    const k = this.SIZE / 50;
+    for (let i = 0; i < n; i++) {
+      const a = ((i + Math.random() * 0.8) / n) * Math.PI * 2;
+      const speed = (230 + Math.random() * 220) * k;
+      const d = r * (0.8 + Math.random() * 0.15);
+      this.particles.push({
+        x: x + Math.cos(a) * d, y: y + Math.sin(a) * d * 0.9,
+        vx: Math.cos(a) * speed, vy: Math.sin(a) * speed * 0.9 - 40 * k,
+        born: t, life: 380 + Math.random() * 280, color,
+      });
+    }
+    if (this.particles.length > MAX_PARTICLES) this.particles.splice(0, this.particles.length - MAX_PARTICLES);
+    if (NUDGE_PX[f.kind]) this._nudge = { born: t, amp: NUDGE_PX[f.kind] };
+  }
+
+  /** Age the landing effects; drop finished ones. */
+  _stepFx(t, dt) {
+    const s = dt / 1000;
+    const drag = Math.exp(-4.5 * s);
+    this.particles = this.particles.filter(p => t - p.born < p.life);
+    for (const p of this.particles) {
+      p.x += p.vx * s; p.y += p.vy * s;
+      p.vx *= drag;    p.vy = p.vy * drag + 160 * s; // a little gravity
+    }
+    this._ripples = this._ripples.filter(r => t - r.born < RIPPLE_MS);
+    if (this._nudge && t - this._nudge.born >= NUDGE_MS) this._nudge = null;
+  }
+
+  /** Screen offset of the camera nudge: a quick drop that springs back. */
+  _nudgeOffset(t) {
+    const n = this._nudge;
+    if (!n) return 0;
+    const q = (t - n.born) / NUDGE_MS;
+    return n.amp * Math.exp(-3.5 * q) * Math.sin(Math.PI * Math.min(1, q) * 2.5 + Math.PI / 2) * (q < 1 ? 1 : 0);
+  }
+
+  /** Ripple rings, impact flashes and sparks (board space, additive). */
+  _drawFx(ctx, t) {
+    if (!this._ripples.length && !this.particles.length) return;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineJoin = 'round';
+    for (const rp of this._ripples) {
+      const q = (t - rp.born) / RIPPLE_MS;
+      if (q < 0) continue;
+      if (t - rp.born < FLASH_MS) {   // the face flashes white on impact
+        this._hexPath(ctx, rp.x, rp.y, rp.r * 0.92);
+        ctx.globalAlpha = 0.32 * (1 - (t - rp.born) / FLASH_MS);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+      }
+      const R = rp.r * (1.02 + 0.95 * easeOutCubic(q));
+      const a = Math.pow(1 - q, 1.6);
+      this._hexPath(ctx, rp.x, rp.y, R);
+      ctx.strokeStyle = rp.color;
+      ctx.globalAlpha = 0.28 * a;
+      ctx.lineWidth = 10 * (1 - q) + 2;
+      ctx.stroke();
+      ctx.globalAlpha = 0.95 * a;
+      ctx.lineWidth = Math.max(MIN_LINE_PX / this.scale, 3 * (1 - q) + 0.8);
+      ctx.stroke();
+    }
+    ctx.lineCap = 'round';
+    const minW = MIN_LINE_PX / this.scale;
+    for (const p of this.particles) {
+      const q = (t - p.born) / p.life;
+      if (q < 0) continue;
+      const a = 1 - q;
+      // A coloured streak trailing behind the spark…
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(p.x - p.vx * 0.06, p.y - p.vy * 0.06);
+      ctx.globalAlpha = a * a;
+      ctx.strokeStyle = p.color;
+      ctx.lineWidth = Math.max(minW, 4.2 * (1 - q * 0.6));
+      ctx.stroke();
+      // …with a white-hot head while it is young.
+      if (q < 0.5) {
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y);
+        ctx.lineTo(p.x - p.vx * 0.02, p.y - p.vy * 0.02);
+        ctx.globalAlpha = 0.9 * (1 - q * 2);
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = Math.max(minW, 1.8);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
   }
 
   _fitTarget() {
@@ -353,10 +685,26 @@ export class Board {
    * glyph canvas is only touched when its layer moved or a loose piece is live.
    */
   draw(t) {
-    const ctx = this.ctx;
-    const W = this.W, H = this.H, dpr = this.dpr;
     this._stepCamera(t);
     if (this.scale !== this._prevScale) { this._prevScale = this.scale; this._zoomedAt = t; }
+    const dt = this._lastT === null ? 16 : Math.max(0, Math.min(50, t - this._lastT));
+    this._lastT = t;
+    this._stepFlights(t);
+    this._stepFx(t, dt);
+
+    // The landing nudge shifts this frame only; the camera itself stays put.
+    const nudge = this._nudgeOffset(t);
+    this.ty += nudge;
+    try {
+      this._drawFrame(t);
+    } finally {
+      this.ty -= nudge;
+    }
+  }
+
+  _drawFrame(t) {
+    const ctx = this.ctx;
+    const W = this.W, H = this.H, dpr = this.dpr;
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.globalAlpha = 1;
@@ -366,6 +714,7 @@ export class Board {
 
     const loose = this._loosePieces(t);
     const layer = this._currentLayer(t, loose);
+    loose.push(...this._parkedPieces(layer, loose));
 
     // Blit the layer, pixel-aligned (scaled only while a zoom settles).
     const k  = this.scale / layer.scale;
@@ -387,6 +736,7 @@ export class Board {
     this._drawSelectionRing(ctx, t);
     this._drawThrowPick(ctx, t, faces);
     this._drawGhostPulses(ctx, t, faces);
+    this._drawFx(ctx, t);
 
     this._compositeGlyphs(layer, gx, gy, gw, gh, loose, faces);
   }
@@ -419,13 +769,50 @@ export class Board {
     });
     const content = this._contentBounds();
     const L = this._layer;
-    if (L && !this._dirty && L.key === key && L.dpr === this.dpr && layerCovers(L.rect, this._viewRect(0), content)) {
-      if (L.scale === this.scale) return L;
-      const ratio    = this.scale / L.scale;
-      const zooming  = this._camera || t - this._zoomedAt < ZOOM_SETTLE_MS;
-      if (zooming && ratio > 0.67 && ratio < 1.5) return L;
+    const moving = !!this._camera || t - this._zoomedAt < ZOOM_SETTLE_MS;
+    if (L && !this._dirty && L.dpr === this.dpr && layerCovers(L.rect, this._viewRect(0), content)) {
+      // While the camera moves, a piece that just settled (left hiddenTop /
+      // hiddenStacks) is drawn loose over the old layer instead of forcing a
+      // re-render mid-move; the layer catches up once the camera settles.
+      const usable = L.key === key || (moving && this._onlyRejoining(L, hiddenStacks));
+      if (usable) {
+        if (L.scale === this.scale) return L;
+        const ratio = this.scale / L.scale;
+        if (moving && ratio > ZOOM_REUSE_MIN && ratio < ZOOM_REUSE_MAX) return L;
+      }
     }
     return this._renderLayer(key, content, hiddenStacks);
+  }
+
+  /** True when layer L differs from the wanted one only by pieces it still hides. */
+  _onlyRejoining(L, hiddenStacks) {
+    const within = (small, big) => [...small].every(k => big.has(k));
+    if (!within(this.hiddenTop, L.hiddenTop) || !within(hiddenStacks, L.hiddenStacks)) return false;
+    return L.key === hiveLayerKey({
+      pieces: this.pieces, ghosts: this.ghosts, selectedHex: this.selectedHex, throwPick: this.throwPick,
+      lastMove: this.lastMove, hiddenTop: L.hiddenTop, hiddenStacks: L.hiddenStacks,
+    });
+  }
+
+  /** Pieces the layer still leaves out although they have settled (see _currentLayer). */
+  _parkedPieces(layer, loose) {
+    const parked = [];
+    const live = new Set(loose.filter(lp => lp.stack).map(lp => lp.key));
+    for (const key of layer.hiddenStacks) {
+      if (live.has(key) || !this.pieces.has(key)) continue;
+      const { q, r } = parseKey(key);
+      const p = hexToPixel(q, r, this.SIZE);
+      parked.push({ key, stack: this.pieces.get(key), x: p.x, y: p.y, pop: 1 });
+    }
+    for (const key of layer.hiddenTop) {
+      const stack = this.pieces.get(key);
+      if (this.hiddenTop.has(key) || !stack?.length) continue;
+      const { q, r } = parseKey(key);
+      const p = hexToPixel(q, r, this.SIZE);
+      const top = stackLayers(stack.length, this.SIZE - 2).at(-1);
+      parked.push({ key: null, piece: stack.at(-1), badgeStack: stack, x: p.x, y: p.y + top.dy, scale: top.scale });
+    }
+    return parked;
   }
 
   /** Board-space box of everything the layer can draw. */
@@ -474,7 +861,11 @@ export class Board {
     }
     for (const c of [L.board, L.glyphs]) {
       if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
-      else c.getContext('2d').clearRect(0, 0, w, h);
+      else {
+        const g = c.getContext('2d');
+        g.setTransform(1, 0, 0, 1, 0, 0); // the last render left its board transform on the context
+        g.clearRect(0, 0, w, h);
+      }
     }
 
     let faces = new Map();
@@ -494,6 +885,7 @@ export class Board {
 
     Object.assign(L, {
       key, dpr, scale: s, faces, id: L.id + 1,
+      hiddenTop: new Set(this.hiddenTop), hiddenStacks: new Set(hiddenStacks),
       rect: visible ? rect : { x0: 0, y0: 0, x1: 0, y1: 0 },
       bx0: (devX0 / dpr - this.tx) / s,
       by0: (devY0 / dpr - this.ty) / s,
@@ -504,28 +896,49 @@ export class Board {
 
   /**
    * Update #emoji-layer: blit the glyph layer where the board layer went, then
-   * draw live glyphs for loose pieces. Skipped entirely while nothing changed.
+   * draw live glyphs for loose pieces. Skipped entirely while nothing changed;
+   * while only loose pieces move, just the patches they covered last frame are
+   * restored from the layer (no full-canvas clear + blit per animation frame).
    */
   _compositeGlyphs(layer, gx, gy, gw, gh, loose, faces) {
     const stamp = `${layer.id}|${gx}|${gy}|${gw}|${gh}`;
     const live  = loose.length > 0;
     if (!live && !this._glyphsLive && stamp === this._glyphStamp) return;
-    this._glyphStamp = stamp;
-    this._glyphsLive = live;
 
     const ec = this.emojiCtx;
     ec.setTransform(1, 0, 0, 1, 0, 0);
     ec.globalAlpha = 1;
     ec.globalCompositeOperation = 'source-over';
-    ec.clearRect(0, 0, this.emojiCanvas.width, this.emojiCanvas.height);
-    ec.drawImage(layer.glyphs, gx, gy, gw, gh);
+    const patch = stamp === this._glyphStamp && gw === layer.glyphs.width && gh === layer.glyphs.height;
+    if (patch) {
+      for (const r of this._liveRects ?? []) {
+        ec.clearRect(r.x, r.y, r.w, r.h);
+        const sx = Math.max(0, r.x - gx), sy = Math.max(0, r.y - gy);
+        const sw = Math.min(gw, r.x + r.w - gx) - sx, sh = Math.min(gh, r.y + r.h - gy) - sy;
+        if (sw > 0 && sh > 0) ec.drawImage(layer.glyphs, sx, sy, sw, sh, gx + sx, gy + sy, sw, sh);
+      }
+    } else {
+      ec.clearRect(0, 0, this.emojiCanvas.width, this.emojiCanvas.height);
+      ec.drawImage(layer.glyphs, gx, gy, gw, gh);
+    }
+    this._glyphStamp = stamp;
+    this._glyphsLive = live;
+    this._liveRects  = [];
     if (!live) return;
 
     ec.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     const liveFaces = new Map();
+    const dpr = this.dpr, s = this.scale;
     for (const lp of loose) {
       const id = lp.key ?? lp;
-      if (faces.has(id)) liveFaces.set(id, faces.get(id));
+      const face = faces.get(id);
+      if (!face) continue;
+      liveFaces.set(id, face);
+      // Device-px box that covers the glyph, its glow and any stack badge.
+      const half = (face.r * s * 1.1 * Math.max(face.sx ?? 1, face.sy ?? 1) + 4) * dpr;
+      const cx = (this.tx + face.x * s) * dpr, cy = (this.ty + face.y * s) * dpr;
+      const x = Math.floor(cx - half), y = Math.floor(cy - half);
+      this._liveRects.push({ x, y, w: Math.ceil(cx + half) - x, h: Math.ceil(cy + half) - y });
     }
     this._drawGlyphs(ec, liveFaces);
   }
@@ -591,7 +1004,7 @@ export class Board {
   /** Gold corner ticks around the piece that moved last (never thinner than MIN_LINE_PX). */
   _drawLastMoveRing(ctx) {
     const lm = this.lastMove;
-    if (!lm?.to || !this.pieces.has(lm.to)) return;
+    if (!lm?.to || !this.pieces.has(lm.to) || this.hiddenTop.has(lm.to)) return; // marks it once it lands
     const { q, r } = parseKey(lm.to);
     const p = hexToPixel(q, r, this.SIZE);
     const R   = this.SIZE + 4;
@@ -757,12 +1170,52 @@ export class Board {
     }
   }
 
-  /** A single in-flight piece from `floating` (board space), keyed by its entry. */
+  /**
+   * A single in-flight piece from `floating` (board space), keyed by its entry:
+   * a soft shadow on the ground below, then the pre-rendered tile raised by
+   * `lift`, grown by `scale`, squashed by `sx`/`sy` and faded by `alpha`.
+   */
   _drawFloating(ctx, f, faces) {
-    const r = (this.SIZE - 2) * (f.scale ?? 1);
-    const lift = f.lift ?? 0;
-    this._drawTile(ctx, f.x, f.y - lift, r, f.piece.player, { lift });
-    faces.set(f, { x: f.x, y: f.y - lift, r, stack: [f.piece] });
+    const tileR = this.SIZE - 2;
+    const r     = tileR * (f.scale ?? 1);
+    const lift  = f.lift ?? 0;
+    const sx = f.sx ?? 1, sy = f.sy ?? 1, alpha = f.alpha ?? 1;
+    ctx.save();
+    if (lift > 0.5) {
+      const h = Math.min(1, lift / (this.SIZE * 1.5));
+      const g = ctx.createRadialGradient(f.x, f.y + r * LIP, 0, f.x, f.y + r * LIP, r * (1.05 - 0.25 * h));
+      g.addColorStop(0, `rgba(0,0,0,${(0.55 * (1 - 0.6 * h) * alpha).toFixed(3)})`);
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.ellipse(f.x, f.y + r * LIP, r * (1.05 - 0.25 * h), r * (0.8 - 0.2 * h), 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    const spr = this._tileSprite(f.piece.player);
+    const k = r / tileR;
+    ctx.globalAlpha = alpha;
+    ctx.translate(f.x, f.y - lift);
+    ctx.scale(k * sx, k * sy);
+    ctx.drawImage(spr.canvas, -spr.half / spr.S, -spr.half / spr.S, (2 * spr.half) / spr.S, (2 * spr.half) / spr.S);
+    ctx.restore();
+    faces.set(f, { x: f.x, y: f.y - lift, r, stack: f.badgeStack ?? [f.piece], sx, sy, alpha });
+  }
+
+  /** A player's plain tile, pre-rendered (glow and all) so flights never blur per frame. */
+  _tileSprite(player) {
+    const S = this.scale * this.dpr * 1.25; // headroom: lifted pieces grow
+    const cached = this._tiles.get(player);
+    if (cached && cached.S / S > 0.8 && cached.S / S < 1.25) return cached;
+    const R = this.SIZE - 2;
+    const half = Math.ceil(R * 1.55 * S);
+    const canvas = cached?.canvas ?? this._makeCanvas();
+    canvas.width = canvas.height = half * 2;
+    const g = canvas.getContext('2d');
+    g.setTransform(S, 0, 0, S, half, half);
+    this._drawTile(g, 0, 0, R, player, {});
+    const spr = { S, half, canvas };
+    this._tiles.set(player, spr);
+    return spr;
   }
 
   /** Pulsing colour wash + inner ring on a tile's face (glyph stays on top). */
@@ -871,11 +1324,20 @@ export class Board {
     const s = this.scale;
     for (const face of faces.values()) {
       const { stack } = face;
-      const sx = this.tx + face.x * s;
-      const sy = this.ty + face.y * s;
+      let sx = this.tx + face.x * s;
+      let sy = this.ty + face.y * s;
       const r  = face.r * s;
+      const shaped = face.sx !== undefined || face.alpha !== undefined; // in-flight piece
+      if (shaped) {
+        ec.save();
+        ec.translate(sx, sy);
+        ec.scale(face.sx ?? 1, face.sy ?? 1);
+        ec.globalAlpha = face.alpha ?? 1;
+        sx = sy = 0;
+      }
       this._drawPieceVisual(ec, stack.at(-1), sx, sy, r * GLYPH_BOX);
       if (stack.length > 1) this._drawStackBadge(ec, stack, sx, sy, r);
+      if (shaped) ec.restore();
     }
   }
 
@@ -1042,6 +1504,7 @@ export class Board {
         if (this._pinchLast > 0) {
           const mid = this._pinchMid();
           this._applyZoom(d / this._pinchLast, mid.x, mid.y);
+          this._userCameraAt = now();
         }
         this._pinchLast = d;
         return;
@@ -1053,6 +1516,7 @@ export class Board {
         if (this._hasMoved || Math.hypot(dx, dy) > 6) {
           if (!this._hasMoved) this.onViewChange?.();
           this._hasMoved = true;
+          this._userCameraAt = now();
           this.tx = this._dragOrigin.tx + dx;
           this.ty = this._dragOrigin.ty + dy;
         }
@@ -1097,6 +1561,7 @@ export class Board {
       e.preventDefault();
       this.onHover?.(null);
       this._camera = null;
+      this._userCameraAt = now();
       this.onViewChange?.();
       const delta = Math.max(-120, Math.min(120, e.deltaY));
       this._applyZoom(Math.exp(-delta * 0.0015), e.clientX, e.clientY);

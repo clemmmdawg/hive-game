@@ -804,7 +804,11 @@ function pathForType(board, fromKey, toKey, type) {
         if (t === PieceType.MOSQUITO || seen.has(t)) continue;
         seen.add(t);
         const cand = pathForType(board, fromKey, toKey, t);
-        if (cand && (!best || cand.path.length < best.path.length)) best = cand;
+        if (!cand) continue;
+        // Shortest route wins; on a tie a ground step reads better as a slide than a climb.
+        const shorter  = !best || cand.path.length < best.path.length;
+        const smoother = best && cand.path.length === best.path.length && cand.kind === 'slide' && best.kind === 'climb';
+        if (shorter || smoother) best = cand;
       }
       return best;
     }
