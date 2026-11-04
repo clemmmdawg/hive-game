@@ -213,6 +213,11 @@ function showStackTooltip(key, x, y, brief = false) {
 // ── Toast + turn banner ────────────────────────────────
 
 let toastTimer = null;
+/** The waiting service worker the RELOAD toast offers; a transient toast never discards the offer. */
+let pendingUpdate = null;
+/** RELOAD was pressed: the next controllerchange reloads, even on the session that first installed. */
+let reloadRequested = false;
+
 /** @param {number} ms 0 keeps the toast up until replaced or cleared */
 function toast(text, kind = '', ms = 2200) {
   const el = $('toast');
@@ -221,15 +226,21 @@ function toast(text, kind = '', ms = 2200) {
   el.className = `visible ${kind}`;
   toastTimer = ms ? setTimeout(clearToast, ms) : null;
 }
-/** A persistent toast with a RELOAD button for a freshly installed service worker. */
+
+/** Offer a freshly installed service worker: a persistent toast with RELOAD (re-shown after other toasts). */
 function showUpdateToast(worker) {
+  pendingUpdate = worker;
   toast('NEW VERSION READY', 'good', 0);
   const el  = $('toast');
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'toast-action';
   btn.textContent = 'RELOAD';
-  btn.addEventListener('click', () => { btn.disabled = true; worker.postMessage('SKIP_WAITING'); });
+  btn.disabled = reloadRequested;
+  btn.addEventListener('click', () => {
+    reloadRequested = btn.disabled = true;
+    worker.postMessage('SKIP_WAITING');
+  });
   el.append(btn);
   el.classList.add('has-action');
 }
@@ -240,7 +251,8 @@ function initServiceWorker() {
   let reloading = false;
   const hadController = !!navigator.serviceWorker.controller;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (!hadController || reloading) return; // first install claiming the page needs no reload
+    // The first install claiming the page needs no reload; an update the player asked for does.
+    if (reloading || (!hadController && !reloadRequested)) return;
     reloading = true;
     location.reload();
   });
@@ -254,10 +266,12 @@ function initServiceWorker() {
   }).catch(() => {});
 }
 
+/** Hide the current toast; a pending update offer comes back in its place. */
 function clearToast() {
   if (toastTimer) clearTimeout(toastTimer);
   toastTimer = null;
   $('toast').className = '';
+  if (pendingUpdate) showUpdateToast(pendingUpdate);
 }
 
 let bannerTimer = null;

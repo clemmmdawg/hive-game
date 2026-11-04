@@ -1,3 +1,14 @@
+/* ── Fonts ──────────────────────────────────────────────── */
+/* Press Start 2P, self-hosted (latin subset, SIL OFL 1.1: assets/fonts/OFL.txt) and precached by sw.js,
+   so the pixel font is there offline after a single visit. Glyphs outside latin fall back to monospace. */
+@font-face {
+  font-family: 'Press Start 2P';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('assets/fonts/press-start-2p-latin.woff2') format('woff2');
+}
+
 /* ── Variables ──────────────────────────────────────────── */
 :root {
   --bg:        #05050f;
@@ -1239,7 +1250,7 @@ kbd {
 
 #toast {
   position: fixed;
-  z-index: 70;
+  z-index: 100; /* above every screen and dialog: an update's RELOAD must be tappable on the menu */
   left: 50%;
   bottom: calc(var(--tray-h) + var(--safe-bottom) - 16px); /* straddles the tray's top edge, clear of the hive */
   width: max-content;
@@ -1260,7 +1271,11 @@ kbd {
   transition: opacity .2s, transform .2s var(--ease-out);
 }
 #toast.visible { opacity: 1; transform: translate(-50%, 0); }
-#toast.has-action { display: flex; align-items: center; gap: 12px; pointer-events: all; }
+#toast.has-action { display: flex; align-items: center; gap: 12px; }
+#toast.has-action .toast-action { pointer-events: auto; } /* only the button takes taps; the pill never blocks */
+/* Over the main menu the bottom is START / CONTINUE: hang the toast from the top instead. */
+body:has(#menu-screen.active) #toast { top: calc(var(--safe-top) + 12px); bottom: auto; transform: translate(-50%, -10px); }
+body:has(#menu-screen.active) #toast.visible { transform: translate(-50%, 0); }
 .toast-action {
   min-height: 32px;
   padding: 0 12px;

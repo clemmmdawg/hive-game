@@ -42,6 +42,14 @@ async function precacheList() {
   return [...body.matchAll(/'([^']+)'/g)].map(m => m[1]);
 }
 
+/** Relative `.js` import specifiers, single- or double-quoted: static, dynamic and side-effect imports. */
+const IMPORT_RE = /(?:from\s+|import\s*\(\s*|import\s+)(['"])(\.[^'"]+\.js)\1/g;
+
+test('the import scan sees single- and double-quoted specifiers', () => {
+  const src = `import { a } from './a.js';\nimport { b } from "./b.js";\nimport "./c.js";\nawait import('./d.js');`;
+  assert.deepEqual([...src.matchAll(IMPORT_RE)].map(m => m[2]), ['./a.js', './b.js', './c.js', './d.js']);
+});
+
 test('every module reachable from index.html is precached, and every precached file exists', async () => {
   const list = await precacheList();
   const seen = new Set();
@@ -49,8 +57,8 @@ test('every module reachable from index.html is precached, and every precached f
     if (seen.has(rel)) return;
     seen.add(rel);
     const src = await read(rel);
-    for (const m of src.matchAll(/(?:from\s+|import\s*\(\s*|import\s+)'(\.[^']+\.js)'/g)) {
-      await walk(path.posix.join(path.posix.dirname(rel), m[1]));
+    for (const m of src.matchAll(IMPORT_RE)) {
+      await walk(path.posix.join(path.posix.dirname(rel), m[2]));
     }
   };
   const html = await read('index.html');
@@ -73,9 +81,44 @@ test('sw.js has a versioned cache, SKIP_WAITING handling and ignores non-GET and
   assert.match(src, /\/ws/);
 });
 
-test('hidden win and confirm overlays start inert so their buttons leave the tab order', async () => {
+test('hidden win, confirm and rules overlays start inert so their buttons leave the tab order', async () => {
   const html = await read('index.html');
-  for (const id of ['win-screen', 'resign-confirm']) {
+  for (const id of ['win-screen', 'resign-confirm', 'rules-overlay']) {
     assert.match(html, new RegExp(`<div id="${id}"[^>]*\\binert\\b`), id);
   }
+});
+
+const FONT = '/assets/fonts/press-start-2p-latin.woff2';
+
+test('the pixel font is self-hosted, precached and licensed (works offline after one visit)', async () => {
+  const [html, css, sw] = await Promise.all([read('index.html'), read('styles.css'), read('sw.js')]);
+  assert.doesNotMatch(html, /fonts\.(googleapis|gstatic)\.com/, 'no third-party font request');
+  assert.doesNotMatch(sw, /fonts\.(googleapis|gstatic)\.com/, 'no font runtime-cache branch left');
+  const face = /@font-face\s*{([^}]*)}/.exec(css)?.[1] ?? '';
+  assert.match(face, /font-family:\s*'Press Start 2P'/);
+  assert.match(face, /font-display:\s*swap/);
+  assert.ok(face.includes(`url('${FONT.slice(1)}')`), 'styles.css @font-face points at the local woff2');
+  assert.ok((await precacheList()).includes(FONT), 'font precached');
+  await access(path.join(ROOT, FONT));
+  assert.match(await read('assets/fonts/OFL.txt'), /SIL OPEN FONT LICENSE Version 1\.1/);
+});
+
+/** The z-index of the first rule whose selector is exactly `selector`. */
+function zIndexOf(css, selector) {
+  const esc = selector.replace(/[#.]/g, c => `\\${c}`);
+  const body = new RegExp(`^${esc}\\s*{([^}]*)}`, 'm').exec(css)?.[1];
+  return Number(/z-index:\s*(\d+)/.exec(body ?? '')?.[1]);
+}
+
+test('toasts stack above the menu, win, confirm and rules layers (the update RELOAD must be tappable)', async () => {
+  const css = await read('styles.css');
+  const toastZ = zIndexOf(css, '#toast');
+  for (const layer of ['#menu-screen', '#win-screen', '#resign-confirm', '#rules-overlay', '#moves-sheet']) {
+    const z = zIndexOf(css, layer);
+    assert.ok(Number.isFinite(z), `${layer} has a z-index`);
+    assert.ok(toastZ > z, `#toast (${toastZ}) above ${layer} (${z})`);
+  }
+  assert.match(/^#toast\s*{([^}]*)}/m.exec(css)[1], /pointer-events:\s*none/, 'the toast pill never blocks taps');
+  assert.doesNotMatch(/^#toast\.has-action\s*{([^}]*)}/m.exec(css)?.[1] ?? '', /pointer-events/, 'not even with an action');
+  assert.match(/^#toast\.has-action \.toast-action\s*{([^}]*)}/m.exec(css)?.[1] ?? '', /pointer-events:\s*auto/, 'only its button');
 });

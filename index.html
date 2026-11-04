@@ -14,9 +14,7 @@
   <link rel="icon" type="image/png" sizes="32x32" href="assets/icons/favicon-32.png">
   <link rel="icon" type="image/svg+xml" href="assets/icons/icon.svg">
   <link rel="apple-touch-icon" href="assets/icons/apple-touch-icon-180.png">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+  <link rel="preload" href="assets/fonts/press-start-2p-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -96,7 +94,7 @@
   </div>
 
   <!-- RULES DIALOG -->
-  <div id="rules-overlay" aria-hidden="true">
+  <div id="rules-overlay" aria-hidden="true" inert>
     <section id="rules-dialog" role="dialog" aria-modal="true" aria-labelledby="rules-title">
       <header id="rules-header">
         <div>

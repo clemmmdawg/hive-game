@@ -162,9 +162,11 @@ export function showRules() {
   const overlay = $('rules-overlay');
   if (overlay.classList.contains('active')) return;
   _rulesPreviousFocus = document.activeElement;
+  overlay.inert = false;
   overlay.classList.add('active');
   overlay.setAttribute('aria-hidden', 'false');
-  _inertedForRules = [...document.body.children].filter(el => el !== overlay && !el.inert);
+  // Modal: everything else is inert while it is open, except the toast (an update's RELOAD stays live).
+  _inertedForRules = [...document.body.children].filter(el => el !== overlay && el.id !== 'toast' && !el.inert);
   for (const el of _inertedForRules) el.inert = true;
   document.addEventListener('keydown', _handleRulesKeydown, true);
   $('btn-close-rules').focus();
@@ -209,6 +211,7 @@ function _hideRules() {
   if (!overlay.classList.contains('active')) return;
   overlay.classList.remove('active');
   overlay.setAttribute('aria-hidden', 'true');
+  overlay.inert = true; // its close button and scroll area leave the tab order while it is closed
   for (const el of _inertedForRules) el.inert = false;
   _inertedForRules = [];
   document.removeEventListener('keydown', _handleRulesKeydown, true);
