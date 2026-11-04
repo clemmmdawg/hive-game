@@ -65,3 +65,137 @@ test('resigning is rejected once the game already has a winner', async () => {
   assert.deepEqual(resolveResign({ ...live, winner: 1 }, 2), { valid: false, reason: 'GAME_OVER' });
   assert.deepEqual(resolveResign(null, 1), { valid: false, reason: 'NO_ACTIVE_GAME' });
 });
+
+// ── Server hardening (real ws server on an ephemeral port) ───────────────────
+
+import { WebSocket } from 'ws';
+import { mock } from 'node:test';
+import { createHiveServer } from '../server/server.js';
+import { getRoom, WAIT_TIMEOUT, IDLE_TIMEOUT } from '../server/rooms.js';
+
+async function startServer(opts) {
+  const server = createHiveServer(opts);
+  await new Promise(r => server.httpServer.listen(0, '127.0.0.1', r));
+  const url = `ws://127.0.0.1:${server.httpServer.address().port}`;
+  const clients = [];
+  return {
+    ...server,
+    async client(wsOpts) {
+      const ws = new WebSocket(url, wsOpts);
+      ws.inbox = [];
+      ws.on('message', d => ws.inbox.push(JSON.parse(d.toString())));
+      await new Promise((res, rej) => { ws.once('open', res); ws.once('error', rej); });
+      clients.push(ws);
+      return ws;
+    },
+    async stop() {
+      for (const c of clients) c.terminate();
+      server.wss.close();
+      await new Promise(r => server.httpServer.close(r));
+    },
+  };
+}
+
+async function next(ws, type, timeout = 2000) {
+  const t0 = Date.now();
+  for (;;) {
+    const i = ws.inbox.findIndex(m => m.type === type);
+    if (i >= 0) return ws.inbox.splice(i, 1)[0];
+    if (Date.now() - t0 > timeout) throw new Error(`timeout waiting for ${type}`);
+    await new Promise(r => setTimeout(r, 10));
+  }
+}
+const send = (ws, m) => ws.send(typeof m === 'string' ? m : JSON.stringify(m));
+const closed = ws => ws.readyState === 3 || new Promise(r => ws.once('close', () => r(true)));
+
+async function startGame(srv) {
+  const a = await srv.client();
+  send(a, { type: 'CREATE_ROOM', settings: {} });
+  const created = await next(a, 'ROOM_CREATED');
+  const b = await srv.client();
+  send(b, { type: 'JOIN_ROOM', code: created.code });
+  await next(a, 'GAME_START');
+  await next(b, 'GAME_START');
+  return { a, b, code: created.code, tokenA: created.token, tokenB: (await next(b, 'PLAYER_ASSIGNMENT')).token };
+}
+
+test('malformed messages never crash the server', async () => {
+  const srv = await startServer();
+  try {
+    const ws = await srv.client();
+    for (const bad of ['null', '42', '"x"', '[]', '{"type":5}']) send(ws, bad);
+    send(ws, { type: 'CREATE_ROOM', settings: null });
+    assert.equal((await next(ws, 'ROOM_CREATED')).player, 1);
+    const ws2 = await srv.client();
+    send(ws2, { type: 'CREATE_ROOM', settings: { expansions: null } });
+    assert.ok((await next(ws2, 'ROOM_CREATED')).code);
+    assert.equal(ws.readyState, 1);
+  } finally { await srv.stop(); }
+});
+
+test('resume replaces a still-OPEN (half-open) old socket without telling the opponent it left', async () => {
+  const srv = await startServer();
+  try {
+    const { a, b, code, tokenA } = await startGame(srv);
+    const a2 = await srv.client();
+    send(a2, { type: 'RESUME_ROOM', code, token: tokenA });
+    const resumed = await next(a2, 'ROOM_RESUMED');
+    assert.equal(resumed.player, 1);
+    assert.equal(resumed.endReason, undefined);
+    await closed(a);
+    await next(b, 'OPPONENT_RECONNECTED');
+    await new Promise(r => setTimeout(r, 100));
+    assert.equal(b.inbox.some(m => m.type === 'OPPONENT_DISCONNECTED'), false);
+  } finally { await srv.stop(); }
+});
+
+test('host waiting timer stays 10 minutes after the host joins', () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const room = createRoom({});
+    joinRoom(room.code, socket());
+    mock.timers.tick(WAIT_TIMEOUT - 1000);
+    assert.ok(getRoom(room.code), 'still waiting just before 10 min');
+    mock.timers.tick(2000);
+    assert.equal(getRoom(room.code), undefined, 'expired at 10 min, not 30');
+    assert.ok(IDLE_TIMEOUT > WAIT_TIMEOUT);
+  } finally { mock.timers.reset(); }
+});
+
+test('a seated socket cannot create or join another room', async () => {
+  const srv = await startServer();
+  try {
+    const { a, code } = await startGame(srv);
+    send(a, { type: 'CREATE_ROOM', settings: {} });
+    assert.equal((await next(a, 'ERROR')).reason, 'ALREADY_IN_ROOM');
+    send(a, { type: 'JOIN_ROOM', code });
+    assert.equal((await next(a, 'ERROR')).reason, 'ALREADY_IN_ROOM');
+  } finally { await srv.stop(); }
+});
+
+test('resign then resume reports endReason RESIGN', async () => {
+  const srv = await startServer();
+  try {
+    const { a, b, code, tokenB } = await startGame(srv);
+    send(a, { type: 'RESIGN' });
+    const over = await next(b, 'GAME_OVER');
+    assert.deepEqual([over.winner, over.reason], [2, 'RESIGN']);
+    b.terminate();
+    await closed(b);
+    const b2 = await srv.client();
+    send(b2, { type: 'RESUME_ROOM', code, token: tokenB });
+    const resumed = await next(b2, 'ROOM_RESUMED');
+    assert.equal(resumed.endReason, 'RESIGN');
+    assert.equal(resumed.gameState.winner, 2);
+  } finally { await srv.stop(); }
+});
+
+test('heartbeat terminates a client that never answers pings', async () => {
+  const srv = await startServer({ heartbeatMs: 40 });
+  try {
+    const dead = await srv.client({ autoPong: false });
+    const live = await srv.client();
+    await closed(dead);
+    assert.equal(live.readyState, 1);
+  } finally { await srv.stop(); }
+});

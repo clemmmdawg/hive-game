@@ -15,8 +15,8 @@
 import { randomUUID } from 'crypto';
 
 const CODE_CHARS   = 'BCDFGHJKLMNPQRSTVWXYZ23456789';
-const WAIT_TIMEOUT = 10 * 60 * 1000; // 10 min — waiting for 2nd player
-const IDLE_TIMEOUT = 30 * 60 * 1000; // 30 min — game inactivity
+export const WAIT_TIMEOUT = 10 * 60 * 1000; // 10 min — waiting for 2nd player
+export const IDLE_TIMEOUT = 30 * 60 * 1000; // 30 min — game inactivity
 
 /** @type {Map<string, Room>} */
 const rooms = new Map();
@@ -47,6 +47,7 @@ export function createRoom(settings) {
     tokens:       [null, null],   // reconnect UUIDs parallel to sockets
     gameState:    null,           // set to a live GameState when game starts
     settings,
+    endReason:    null,           // 'QUEEN' | 'RESIGN' | 'DRAW' once finished
     idleTimer:    null,
     lastActivity: Date.now(),
   };
@@ -54,7 +55,7 @@ export function createRoom(settings) {
 
   // Expire the room if no second player arrives
   room.idleTimer = setTimeout(() => {
-    if (!room.sockets[1]) cleanupRoom(code);
+    if (!room.tokens[1]) cleanupRoom(code);
   }, WAIT_TIMEOUT);
   room.idleTimer.unref?.();
 
@@ -100,7 +101,14 @@ export function resumeRoom(code, token, socket) {
   if (slot === -1) return { error: 'INVALID_RESUME_TOKEN' };
 
   const current = room.sockets[slot];
-  if (current && current.readyState === WS_OPEN) return { error: 'SEAT_OCCUPIED' };
+  // The old socket may be half-open (dead TCP the server hasn't noticed yet):
+  // the token holder wins. Detach it so its late 'close' is a no-op.
+  if (current && current !== socket) {
+    current._hiveRoom   = null;
+    current._hivePlayer = null;
+    current._hiveToken  = null;
+    current.terminate?.();
+  }
 
   const playerNum = slot + 1;
   room.sockets[slot] = socket;
@@ -167,7 +175,9 @@ export function sendTo(room, playerNum, message) {
 function touchActivity(room) {
   room.lastActivity = Date.now();
   if (room.idleTimer) clearTimeout(room.idleTimer);
-  room.idleTimer = setTimeout(() => cleanupRoom(room.code), IDLE_TIMEOUT);
+  // Until a second player has claimed a seat the room is only waiting for them.
+  const delay = room.tokens[1] ? IDLE_TIMEOUT : WAIT_TIMEOUT;
+  room.idleTimer = setTimeout(() => cleanupRoom(room.code), delay);
   room.idleTimer.unref?.();
 }
 
