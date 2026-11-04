@@ -958,8 +958,9 @@ kbd {
   opacity: 0;
   transition: opacity .35s ease-out;
   background: radial-gradient(circle at var(--dim-x, 50%) var(--dim-y, 50%),
-    rgba(3,3,10,0) 0, rgba(3,3,10,0) var(--dim-r, 80px), rgba(3,3,10,.3) calc(var(--dim-r, 80px) * 1.9));
+    rgba(3,3,10,0) 0, rgba(3,3,10,0) var(--dim-r, 80px), rgba(3,3,10,.45) calc(var(--dim-r, 80px) * 1.45));
 }
+#board-dim.plain { background: rgba(3,3,10,.45); } /* no fallen queen (stalemate): an even dim */
 #board-dim.visible { opacity: 1; }
 
 .hud-btn {
@@ -1240,7 +1241,8 @@ kbd {
   position: fixed;
   z-index: 70;
   left: 50%;
-  bottom: calc(var(--tray-h) + var(--safe-bottom) + 70px);
+  bottom: calc(var(--tray-h) + var(--safe-bottom) - 16px); /* straddles the tray's top edge, clear of the hive */
+  width: max-content;
   max-width: calc(100% - 32px);
   padding: 11px 16px;
   border: 1px solid rgba(255,255,255,.16);
@@ -1389,8 +1391,7 @@ kbd {
   cursor: default;
 }
 .piece-slot.exhausted { opacity: 0.12; }
-.piece-slot:focus-visible { outline: none; }
-.piece-slot:focus-visible .piece-hex { outline: 2px solid #fff; outline-offset: 2px; }
+#tray-pieces .piece-slot:focus-visible { outline: none; } /* the hex halo below is the indicator */
 
 /* Tray tile, matching the board: ::before is the thick rim in the owner's colour,
    ::after the dark bevelled face. Both are hex-clipped so .piece-hex itself can
@@ -1455,6 +1456,12 @@ kbd {
   background:
     linear-gradient(180deg, rgba(255,255,255,.16), transparent 30%),
     radial-gradient(circle at 50% 30%, color-mix(in srgb, var(--rim) 22%, #141428), #07070f 80%);
+}
+
+/* Keyboard focus: a white halo that follows the hex (drop-shadows trace the clipped rim) */
+.piece-slot:focus-visible .piece-hex {
+  filter: drop-shadow(0 0 1px #fff) drop-shadow(0 0 1px #fff) drop-shadow(0 0 1.5px #fff) drop-shadow(0 0 7px color-mix(in srgb, var(--rim) 70%, #fff));
+  animation: none;
 }
 
 /* Queen is forced this turn */

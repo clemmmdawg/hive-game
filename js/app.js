@@ -130,6 +130,7 @@ let passTimer    = null;    // pending automatic pass in LOCAL mode
 let winTimer     = null;
 let winFxTimer   = null;   // shockwave + dim when the winning move did not fly
 let winTouchdown = null;   // …or run by board.onLand when the winning piece touches down
+let winDeferred  = null;   // card options while the ☰ menu held the result card back
 let holdResult   = false;  // the winning piece is still in the air: the HUD keeps the result for the impact
 let dangerTimer  = null;   // queen-in-danger alarm for a move that did not fly
 let landingAlarm = null;   // …or raised by board.onLand when the piece that caused it touches down
@@ -258,7 +259,7 @@ function cancelTimers() {
   if (turnSoundTimer) clearTimeout(turnSoundTimer);
   if (winFxTimer) clearTimeout(winFxTimer);
   if (dangerTimer) clearTimeout(dangerTimer);
-  passTimer = winTimer = turnSoundTimer = winFxTimer = dangerTimer = winTouchdown = landingAlarm = null;
+  passTimer = winTimer = turnSoundTimer = winFxTimer = dangerTimer = winTouchdown = landingAlarm = winDeferred = null;
   holdResult = false;
 }
 
@@ -585,17 +586,18 @@ function surroundedQueens(state) {
   return queenPips(state.board).filter(m => m.count === 6).map(m => m.key);
 }
 
-/** Dim the board round the fallen queen(s): a spotlight on them, the rest 30% darker. */
+/** Dim the board round the fallen queen(s): a spotlight on them, the rest 45% darker (evenly with no fallen queen). */
 function showBoardDim(keys) {
   const el = $('board-dim');
   const spots = keys.map(k => board.hexToScreen(k));
+  el.classList.toggle('plain', !spots.length);
   if (spots.length) {
     const x = spots.reduce((a, p) => a + p.x, 0) / spots.length;
     const y = spots.reduce((a, p) => a + p.y, 0) / spots.length;
     const spread = Math.max(0, ...spots.map(p => Math.hypot(p.x - x, p.y - y)));
     el.style.setProperty('--dim-x', `${x}px`);
     el.style.setProperty('--dim-y', `${y}px`);
-    el.style.setProperty('--dim-r', `${Math.round(spread + board.SIZE * board.scale * 1.05)}px`);
+    el.style.setProperty('--dim-r', `${Math.round(spread + board.SIZE * board.scale * 0.95)}px`);
   }
   el.classList.add('visible');
 }
@@ -864,9 +866,13 @@ function winCopy() {
 function showWinScreen({ calm = false } = {}) {
   winTimer = null;
   if (winPresented || !gameState?.winner) return;
+  // The player opened ☰ during the sequence: leave it be; the card follows when it closes.
+  if (!gameMenu.hidden) { winDeferred = { calm }; return; }
   winPresented = true;
   holdResult = false;
-  closeGameMenu();
+  // A touchdown that never came (stalled frames, a snapped flight) must not fire over the card.
+  if (winFxTimer) clearTimeout(winFxTimer);
+  winFxTimer = winTouchdown = winDeferred = null;
   hidePieceTooltip();
   const screen = $('win-screen');
   const winner = gameState.winner;
@@ -1232,6 +1238,13 @@ function closeGameMenu({ restoreFocus = false } = {}) {
   gameMenu.hidden = true;
   $('btn-menu').setAttribute('aria-expanded', 'false');
   if (restoreFocus) $('btn-menu').focus();
+  if (winDeferred) {
+    // Shown a beat later, so a menu choice made in the same click (quit, rematch) cancels it first.
+    const opts = winDeferred;
+    winDeferred = null;
+    if (winTimer) clearTimeout(winTimer);
+    winTimer = setTimeout(() => showWinScreen(opts), 250);
+  }
 }
 
 $('btn-menu').addEventListener('click', () => (gameMenu.hidden ? openGameMenu() : closeGameMenu()));
@@ -1414,6 +1427,7 @@ export function initNetHandlers() {
     myPlayer = player;
     connectionNotice = null;
     if (snap) {
+      cancelTimers(); // nothing from before the drop (win impact, alarms, chime) may fire over the fresh state
       board.finishAnimations({ clearFx: true });
       const prev = gameState;
       gameState = deserializeState(snap);
