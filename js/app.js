@@ -1,14 +1,17 @@
 // app.js — Game state machine + UI
-import { hexKey } from './hex.js';
-import { Board, moveDuration, LAND_MS } from './board.js';
+import { hexKey, hexToPixel, hexNeighbors } from './hex.js';
+import { Board, moveDuration, winTiming, queenPips } from './board.js';
 import {
   PieceType, ActionType,
   createGame, applyAction,
   getLegalPlacements, getLegalMoves, getLegalThrows, getMoveBlocker,
-  getAllLegalActions, deserializeState, getMovePath,
+  getAllLegalActions, deserializeState, getMovePath, queenPressure,
 } from './game.js';
 import { initMenu, showMenu, showConfirm, showRules, leaveOnlineSession, isOverlayOpen } from './menu.js';
-import { statusText, describeLastMove, inferAction, winReasonFromServer, resumedWinReason, turnChipText } from './hints.js';
+import {
+  statusText, describeLastMove, inferAction, winReasonFromServer, resumedWinReason, turnChipText,
+  dangerText, newDangers,
+} from './hints.js';
 import { encodeLocalSave, decodeLocalSave, MAX_UNDO } from './local-save.js';
 import { spriteSVG, drawSprite, SPECIES_COLOR, bodyFill } from './sprites.js';
 import * as net from './net.js';
@@ -125,6 +128,10 @@ let winPresented = false;
 let winReason    = null;    // null | 'QUEEN' | 'RESIGN' | 'STALEMATE'
 let passTimer    = null;    // pending automatic pass in LOCAL mode
 let winTimer     = null;
+let winFxTimer   = null;   // shockwave + dim when the winning move did not fly
+let winTouchdown = null;   // …or run by board.onLand when the winning piece touches down
+let holdResult   = false;  // the winning piece is still in the air: the HUD keeps the result for the impact
+let dangerTimer  = null;   // queen-in-danger alarm, held back until the piece lands
 let turnSoundTimer = null; // "your turn" chime, held back until the opponent's piece lands
 let connectionNotice = null; // shown in place of the status line while offline
 let opponentAway = false;
@@ -248,7 +255,10 @@ function cancelTimers() {
   if (passTimer) clearTimeout(passTimer);
   if (winTimer) clearTimeout(winTimer);
   if (turnSoundTimer) clearTimeout(turnSoundTimer);
-  passTimer = winTimer = turnSoundTimer = null;
+  if (winFxTimer) clearTimeout(winFxTimer);
+  if (dangerTimer) clearTimeout(dangerTimer);
+  passTimer = winTimer = turnSoundTimer = winFxTimer = dangerTimer = winTouchdown = null;
+  holdResult = false;
 }
 
 function resetBoardView() {
@@ -318,7 +328,8 @@ export function startOnlineGame(settings, playerNum, serializedState, endReason 
   winReason = resumedWinReason(gameState, endReason);
   if (gameState.winner) {
     syncUI();
-    winTimer = setTimeout(showWinScreen, 300);
+    // Reloaded into a finished game: the result, without replaying the fanfare.
+    winTimer = setTimeout(() => showWinScreen({ calm: true }), 300);
   } else {
     showBanner(`YOU ARE PLAYER ${myPlayer}`, `p${myPlayer}`, PieceType.QUEEN, 1800);
   }
@@ -431,6 +442,7 @@ function cancelSelection() {
 }
 
 function selectTrayPiece(type) {
+  if (!gameState || gameState.winner) return;
   hidePieceTooltip();
   if (uiState.trayPick?.type === type) { cancelSelection(); return; }
   sfx.play('select');
@@ -521,22 +533,74 @@ function onStateChanged(prev, { animate = true, move = null } = {}) {
   const lastMove = describeLastMove(prev, gameState);
   if (lastMove) board.lastMove = lastMove;
   syncBoardRenderer();
+  const won = !!gameState.winner;
   const flying = !!(lastMove && animate && move && !board.reducedMotion);
-  if (flying) board.animateMove({ ...move, toKey: lastMove.to, player: lastMove.player });
+  // The winning move plays in slow motion (see winTiming).
+  if (flying) board.animateMove({ ...move, toKey: lastMove.to, player: lastMove.player, speed: won ? 0.4 : 1 });
   else if (lastMove && animate) board.markArrival(lastMove.to);
   if (lastMove && animate) playMoveSound(move?.kind, board.hiddenTop.has(lastMove.to));
   board.reveal(board.pieces.keys());
+  holdResult = won && flying;
   syncUI();
   saveLocal();
 
-  if (gameState.winner) {
+  if (won) {
     hideBanner();
-    // Let the winning move land before the result card.
-    const delay = flying ? moveDuration(move.kind, move.path.length - 1) + LAND_MS + 450 : 700;
-    winTimer = setTimeout(showWinScreen, delay);
+    playWinSequence(flying ? move : null);
     return;
   }
-  announceTurn(flying ? moveDuration(move.kind, move.path.length - 1) : 0);
+  const landingMs = flying ? moveDuration(move.kind, move.path.length - 1) : 0;
+  const dangers = animate ? newDangers(prev ? queenPressure(prev) : null, queenPressure(gameState)) : [];
+  announceTurn(landingMs, dangers);
+}
+
+/**
+ * The climax: the winning move flies in slow motion; at touchdown a white
+ * shockwave rings out of the surrounded queen(s) and the board dims round
+ * them; then confetti and the result card. Reduced motion: no slow-mo, no
+ * shockwave, the card after 300 ms.
+ * @param {{kind:string, path:string[]}|null} move the flown route, if any
+ */
+function playWinSequence(move) {
+  if (winTimer) clearTimeout(winTimer);
+  if (winFxTimer) clearTimeout(winFxTimer);
+  const timing = winTiming(move?.kind ?? null, (move?.path.length ?? 1) - 1, { reducedMotion: board.reducedMotion });
+  const queens = surroundedQueens(gameState);
+  const impact = () => {
+    winFxTimer = winTouchdown = null;
+    holdResult = false;
+    board.shockwave(queens);
+    showBoardDim(queens);
+    syncUI();
+  };
+  // Synced to the actual touchdown (frames can lag the clock); the card keeps to the clock.
+  if (timing.flightMs) winTouchdown = impact;
+  else winFxTimer = setTimeout(impact, 0);
+  winTimer = setTimeout(showWinScreen, timing.cardMs);
+}
+
+/** Hex keys of every queen with all six sides occupied. */
+function surroundedQueens(state) {
+  return queenPips(state.board).filter(m => m.count === 6).map(m => m.key);
+}
+
+/** Dim the board round the fallen queen(s): a spotlight on them, the rest 30% darker. */
+function showBoardDim(keys) {
+  const el = $('board-dim');
+  const spots = keys.map(k => board.hexToScreen(k));
+  if (spots.length) {
+    const x = spots.reduce((a, p) => a + p.x, 0) / spots.length;
+    const y = spots.reduce((a, p) => a + p.y, 0) / spots.length;
+    const spread = Math.max(0, ...spots.map(p => Math.hypot(p.x - x, p.y - y)));
+    el.style.setProperty('--dim-x', `${x}px`);
+    el.style.setProperty('--dim-y', `${y}px`);
+    el.style.setProperty('--dim-r', `${Math.round(spread + board.SIZE * board.scale * 1.05)}px`);
+  }
+  el.classList.add('visible');
+}
+
+function hideBoardDim() {
+  $('board-dim').classList.remove('visible');
 }
 
 /**
@@ -548,28 +612,35 @@ function playMoveSound(kind, inFlight) {
   if (!inFlight) { sfx.play('place'); return; }
   if (kind && kind !== 'place') sfx.play(kind, { haptic: false });
 }
-board.onLand = () => sfx.play('place');
+board.onLand = () => {
+  sfx.play('place');
+  winTouchdown?.();
+};
 
 /**
  * Tell players whose turn it is; in LOCAL mode, auto-pass a stuck player.
  * `landingMs`: how long the move that ended the turn takes to land (the chime waits for it).
+ * `dangers`: players whose queen this move put one side from surrounded (newDangers);
+ * their alarm replaces the turn banner and chime.
  */
-function announceTurn(landingMs = 0) {
+function announceTurn(landingMs = 0, dangers = []) {
   if (!gameState || gameState.winner) return;
   const turn = gameState.turn;
 
   if (gameMode === 'ONLINE') {
+    const mustPass = turn === myPlayer && getAllLegalActions(gameState).mustPass;
+    if (dangers.length) raiseDangerAlarm(dangers, landingMs, { banner: !mustPass });
     if (turn === myPlayer) {
-      const mustPass = getAllLegalActions(gameState).mustPass;
-      showBanner(mustPass ? 'NO MOVES — TAP PASS' : 'YOUR TURN', mustPass ? 'gold' : `p${turn}`);
-      playTurnChime(landingMs);
+      if (mustPass || !dangers.length) showBanner(mustPass ? 'NO MOVES — TAP PASS' : 'YOUR TURN', mustPass ? 'gold' : `p${turn}`);
+      if (!dangers.length) playTurnChime(landingMs);
     }
     return;
   }
 
   if (getAllLegalActions(gameState).mustPass) {
     showBanner(`P${turn} HAS NO MOVES — PASSING`, 'gold', PieceType.QUEEN, 1600);
-    playTurnChime(landingMs);
+    if (dangers.length) raiseDangerAlarm(dangers, landingMs, { banner: false });
+    else playTurnChime(landingMs);
     const stuck = gameState;
     passTimer = setTimeout(() => {
       passTimer = null;
@@ -585,7 +656,32 @@ function announceTurn(landingMs = 0) {
     return;
   }
 
-  showBanner(`PLAYER ${turn}'S TURN`, `p${turn}`, PieceType.QUEEN, 1100);
+  if (dangers.length) raiseDangerAlarm(dangers, landingMs);
+  else showBanner(`PLAYER ${turn}'S TURN`, `p${turn}`, PieceType.QUEEN, 1100);
+}
+
+/**
+ * A queen just reached five occupied sides: once the piece lands, the `danger`
+ * sting, a red banner, and a jolt of the HUD meter. Fires once per transition
+ * (the caller passes only newDangers()).
+ */
+function raiseDangerAlarm(players, landingMs, { banner = true } = {}) {
+  if (dangerTimer) clearTimeout(dangerTimer);
+  dangerTimer = setTimeout(() => {
+    dangerTimer = null;
+    if (!gameState || gameState.winner) return;
+    sfx.play('danger');
+    if (banner) {
+      const text = players.length > 1 ? 'BOTH QUEENS IN DANGER' : dangerText(players[0], { mode: gameMode, myPlayer });
+      showBanner(text, 'danger', PieceType.QUEEN, 1800);
+    }
+    for (const p of players) {
+      const meter = $(`qm-${p}`);
+      meter.classList.remove('alarm');
+      void meter.offsetWidth; // restart the one-shot animation
+      meter.classList.add('alarm');
+    }
+  }, landingMs);
 }
 
 /**
@@ -747,10 +843,12 @@ function winCopy() {
   return { headline, reason: `${whose} queen was surrounded after ${rounds} round${rounds === 1 ? '' : 's'}.`, emblem: PieceType.QUEEN };
 }
 
-function showWinScreen() {
+/** @param {{calm?: boolean}} [opts] calm: a game that was already over (resume) — no sting, no confetti */
+function showWinScreen({ calm = false } = {}) {
   winTimer = null;
   if (winPresented || !gameState?.winner) return;
   winPresented = true;
+  holdResult = false;
   closeGameMenu();
   hidePieceTooltip();
   const screen = $('win-screen');
@@ -767,8 +865,10 @@ function showWinScreen() {
   screen.classList.add('active');
   ($('btn-rematch').hidden ? $('btn-view-board') : $('btn-rematch')).focus();
   const lost = gameMode === 'ONLINE' && winner !== myPlayer && winner !== 'DRAW';
-  sfx.play(winner === 'DRAW' ? 'draw' : lost ? 'lose' : 'win');
-  if (!lost) launchConfetti();
+  if (!calm) {
+    sfx.play(winner === 'DRAW' ? 'draw' : lost ? 'lose' : 'win');
+    if (!lost) launchConfetti();
+  }
   syncUI();
 }
 
@@ -777,6 +877,7 @@ function hideWinScreen() {
   screen.classList.remove('active');
   screen.setAttribute('aria-hidden', 'true');
   stopConfetti();
+  hideBoardDim();
 }
 
 function rematch() {
@@ -986,6 +1087,13 @@ function descOwner() {
 
 function syncUI() {
   if (!gameState) return;
+  if (holdResult) {
+    // Slow-motion winning move: no spoilers until it lands (playWinSequence).
+    $('status-text').textContent = '';
+    $('piece-desc').classList.remove('visible');
+    $('btn-cancel').classList.add('hidden');
+    return;
+  }
   const turn    = gameState.turn;
   const actions = getAllLegalActions(gameState);
   const online  = gameMode === 'ONLINE';
@@ -999,6 +1107,8 @@ function syncUI() {
   chip.className = `p${chipPlayer}${myTurn || over ? '' : ' waiting'}`;
   $('chip-label').textContent = turnChipText({ state: gameState, mode: gameMode, myPlayer });
   $('chip-sub').textContent   = over ? 'FINAL' : `ROUND ${Math.ceil(gameState.turnNumber / 2)}`;
+
+  renderQueenMeters();
 
   // Status line
   const blocker = uiState.phase === 'BOARD' ? getMoveBlocker(gameState, uiState.boardPick) : null;
@@ -1015,7 +1125,8 @@ function syncUI() {
     });
     const warn = (blocker && !throwCount) || (myTurn && actions.mustPass)
       || (myTurn && !over && uiState.phase === 'IDLE' && /QUEEN NOW/.test(status.textContent));
-    status.className = warn ? 'warn' : (uiState.phase !== 'IDLE' || over) ? 'active' : '';
+    const danger = /IN DANGER/.test(status.textContent);
+    status.className = danger ? 'alert' : warn ? 'warn' : (uiState.phase !== 'IDLE' || over) ? 'active' : '';
   }
 
   // Description bar for the selected piece, with anything buried underneath it
@@ -1051,6 +1162,40 @@ function syncUI() {
   $('menu-quit-label').textContent = over ? 'MAIN MENU' : online ? 'RESIGN GAME' : 'QUIT TO MENU';
 
   renderTray(actions);
+}
+
+// ── HUD queen meters ───────────────────────────────────
+
+// A tiny queen hex ringed by six pips, laid out like the board's neighbours
+// (same order as queenPips), so the HUD reads exactly like the pips on the tile.
+const METER_PIPS = hexNeighbors(0, 0).map(({ q, r }) => {
+  const p = hexToPixel(q, r, 1);
+  const len = Math.hypot(p.x, p.y);
+  return { x: (p.x / len) * 8.6, y: (p.y / len) * 8.6 };
+});
+const hexPoints = (cx, cy, R) => Array.from({ length: 6 }, (_, i) =>
+  `${(cx + R * Math.cos((Math.PI / 3) * i)).toFixed(2)},${(cy + R * Math.sin((Math.PI / 3) * i)).toFixed(2)}`).join(' ');
+
+for (const p of [1, 2]) {
+  $(`qm-${p}`).innerHTML = `<svg viewBox="-12 -12 24 24" aria-hidden="true" focusable="false">
+    <polygon class="qm-core" points="${hexPoints(0, 0, 4.6)}"/>
+    ${METER_PIPS.map(pt => `<polygon class="qm-pip" points="${hexPoints(pt.x, pt.y, 2.3)}"/>`).join('')}
+  </svg>`;
+}
+
+function renderQueenMeters() {
+  const meters = new Map(queenPips(gameState.board).map(m => [m.player, m]));
+  for (const player of [1, 2]) {
+    const el = $(`qm-${player}`);
+    const m  = meters.get(player);
+    const level = m ? m.count : null;
+    el.classList.toggle('unplaced', !m);
+    for (const n of [4, 5, 6]) el.classList.toggle(`lvl-${n}`, level === n);
+    el.querySelectorAll('.qm-pip').forEach((pip, i) => pip.classList.toggle('lit', !!m?.lit[i]));
+    const who = gameMode === 'ONLINE' ? (player === myPlayer ? 'Your' : "Opponent's") : `Player ${player}`;
+    el.setAttribute('aria-label', m ? `${who} queen: ${level} of 6 sides covered` : `${who} queen not placed`);
+    el.title = el.getAttribute('aria-label');
+  }
 }
 
 // ── Game menu ──────────────────────────────────────────
@@ -1141,8 +1286,9 @@ $('btn-pass').addEventListener('click', () => {
 // ── Keyboard shortcuts ─────────────────────────────────
 
 document.addEventListener('keydown', event => {
+  // Autofill and IME keydowns can carry no key at all.
+  if (!event.key || event.target.closest?.('input, textarea')) return;
   if (!gameState || isOverlayOpen() || $('win-screen').classList.contains('active')) return;
-  if (event.target.closest?.('input, textarea')) return;
   const key = event.key;
 
   if (key === 'Escape') {
@@ -1166,6 +1312,10 @@ document.addEventListener('keydown', event => {
 for (const type of ['pointerdown', 'keydown', 'touchend']) {
   document.addEventListener(type, () => sfx.unlock(), { capture: true, passive: true });
 }
+// Coming back to the tab: wake the context the browser suspended (no gesture needed to resume).
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') sfx.resume();
+});
 
 function syncSoundUI() {
   const on = !sfx.muted;
@@ -1190,7 +1340,7 @@ $('btn-sound-menu').addEventListener('click', toggleSound);
 
 // M works everywhere (menu, game, dialogs) except while typing.
 document.addEventListener('keydown', event => {
-  if (event.key.toLowerCase() !== 'm' || event.repeat) return;
+  if (event.key?.toLowerCase() !== 'm' || event.repeat) return;
   if (event.ctrlKey || event.metaKey || event.altKey) return;
   if (event.target.closest?.('input, textarea, select')) return;
   toggleSound();
@@ -1254,8 +1404,13 @@ export function initNetHandlers() {
       const lastMove = describeLastMove(prev, gameState);
       if (lastMove) board.lastMove = lastMove;
       syncBoardRenderer();
-      if (gameState.winner) winReason = winReasonFromServer(endReason);
-      if (gameState.winner) winTimer = setTimeout(showWinScreen, 300);
+      if (gameState.winner) {
+        winReason = winReasonFromServer(endReason);
+        // Already over before the drop: show the result calmly. Ended while we were away: it is news.
+        const calm = !prev || !!prev.winner;
+        if (winTimer) clearTimeout(winTimer);
+        winTimer = setTimeout(() => showWinScreen({ calm }), 300);
+      }
     }
     syncUI();
     toast('RECONNECTED', 'good', 1400);

@@ -1,6 +1,7 @@
 // audio.js — WebAudio sound effects + haptics. No asset files: every sound is synthesised.
 //
 //   sfx.unlock()            create/resume the AudioContext (call from a user gesture)
+//   sfx.resume()            resume an existing, suspended context (e.g. tab visible again)
 //   sfx.play(name, opts?)   play a voice; opts.haptic=false skips the vibration
 //   sfx.setMuted(bool)      mute sound and haptics; persisted under `hiveMuted`
 //   sfx.toggle() → muted    flip the mute flag
@@ -340,6 +341,15 @@ export const sfx = {
     if (ctx.state !== 'running' && ctx.resume) {
       try { Promise.resolve(ctx.resume()).catch(() => {}); } catch { /* offline/closed */ }
     }
+  },
+
+  /**
+   * Wake a context the browser suspended (tab hidden, iOS interruption). Never
+   * creates one: that still needs a user gesture (unlock).
+   */
+  resume() {
+    if (!ctx || ctx.state === 'running' || !ctx.resume) return;
+    try { Promise.resolve(ctx.resume()).catch(() => {}); } catch { /* closed */ }
   },
 
   /** Play `name` (see SOUND_NAMES). No-op before unlock, while muted, or for unknown names. */

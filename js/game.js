@@ -900,6 +900,22 @@ function queenSurrounded(board, q, r) {
 }
 
 /**
+ * How hemmed in each queen is: the number of occupied hexes around it (0–6;
+ * six means surrounded), or null while that queen is still in the supply.
+ * @returns {{1: number|null, 2: number|null}}
+ */
+export function queenPressure(state) {
+  const pressure = { 1: null, 2: null };
+  for (const [key, stack] of state.board) {
+    const queen = stack.find(p => p.type === PieceType.QUEEN);
+    if (!queen) continue;
+    const { q, r } = parseKey(key);
+    pressure[queen.player] = neighbors(q, r).filter(n => occupied(state.board, n.q, n.r)).length;
+  }
+  return pressure;
+}
+
+/**
  * Check the win condition after a move.
  * Returns null (game continues), 1 (P1 wins), 2 (P2 wins), or 'DRAW'.
  */

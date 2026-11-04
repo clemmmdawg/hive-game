@@ -156,6 +156,10 @@
         <span id="chip-sub">TURN 1</span>
       </span>
     </div>
+    <div id="queen-meters">
+      <span class="qm p1" id="qm-1" role="img" aria-label="Player 1 queen not placed"></span>
+      <span class="qm p2" id="qm-2" role="img" aria-label="Player 2 queen not placed"></span>
+    </div>
     <div id="status-text" aria-live="polite">SELECT A PIECE</div>
     <div id="hud-actions">
       <button class="hud-btn hud-action hidden" id="btn-pass" type="button">PASS</button>
@@ -183,6 +187,7 @@
 
   <canvas id="board" aria-label="Hive game board"></canvas>
   <canvas id="emoji-layer" aria-hidden="true"></canvas>
+  <div id="board-dim" aria-hidden="true"></div>
   <div id="board-hint" aria-hidden="true">DRAG TO PAN · PINCH OR SCROLL TO ZOOM</div>
 
   <div id="turn-banner" aria-hidden="true">

@@ -36,6 +36,8 @@ Run with `npm start` (port 3000), `npm start -- 3001`, or `npm start -- --port 3
 - Local undo (↶ button, `Z` key) and autosave/resume of the local game (CONTINUE GAME on the menu)
 - Opponent reserve strip above the tray; online tray always shows your own pieces
 - Win screen with reason, bug emoji confetti, Rematch (local) / View Board / Main Menu
+- Queen danger meter: six pips on each queen's rim (lit per occupied side; gold, amber pulse at 4, red pulse + halo + face wash at 5), mirrored by two HUD meters (`#queen-meters`); stepping up to 5 plays `danger` once at touchdown with a red banner, and the endangered mover's status reads "P1 QUEEN IN DANGER"
+- Win sequence: the winning move flies at 0.4× (capped at 1 s), a white shockwave + camera punch at touchdown, the board dims 30% round the fallen queen (`#board-dim`), then confetti + card — card ≤ 1.6 s (`winTiming`); the HUD holds the result until impact. Reduced motion: card after 300 ms, no slow-mo/shockwave. A finished game opened by reload/resume shows the card calmly (no sting, no confetti)
 - Settings (expansions, tournament rule) remembered in localStorage
 - Room share: COPY CODE + SHARE/COPY LINK; `?room=CODE` opens JOIN with the code filled in
 - Main menu with mode selection, expansion toggles, tournament rule toggle
@@ -77,7 +79,7 @@ Run with `npm start` (port 3000), `npm start -- 3001`, or `npm start -- --port 3
 │   ├── app.js          — Application state machine, UI wiring, tray, HUD, undo, autosave
 │   ├── menu.js         — Main menu, settings panel, rules dialog, confirm dialog
 │   ├── sprites.js      — Insect sprite path data + spriteSVG() (DOM) / drawSprite() (canvas)
-│   ├── hints.js        — Pure: HUD status copy (statusText) + last-move diff (describeLastMove, inferAction)
+│   ├── hints.js        — Pure: HUD status copy (statusText, dangerText, newDangers) + last-move diff (describeLastMove, inferAction)
 │   ├── local-save.js   — Pure: encode/decode the local game + undo history for localStorage
 │   ├── audio.js        — WebAudio synth sound effects + haptics + persisted mute (`sfx`)
 │   └── net.js          — WebSocket client (see Multiplayer)
@@ -159,6 +161,7 @@ applyAction(state, action) → GameState
 
 // Check win condition
 checkWin(state) → null | 1 | 2 | 'DRAW'
+queenPressure(state) → { 1: n|null, 2: n|null }   // occupied sides of each queen (null = not placed)
 
 // Utilities (also exported)
 isArticulationPoint(board, key) → bool
@@ -190,6 +193,7 @@ neighbors(q, r) → { q, r }[]
 
 ```js
 sfx.unlock();               // create/resume the AudioContext — app.js calls it on every pointerdown/keydown/touchend
+sfx.resume();               // resume an existing suspended context only (never creates one) — app.js calls it on visibilitychange → visible
 sfx.play(name, { haptic }?) // no-op before unlock, while muted, for unknown names, or the same name again within 30 ms
 sfx.setMuted(bool); sfx.toggle() → muted; sfx.muted   // persisted under localStorage `hiveMuted`; mutes haptics too
 SOUND_NAMES                 // select deselect invalid place slide hop climb throw turn danger win lose draw
@@ -227,13 +231,17 @@ board.recenter(animate);  // fit the whole hive (or origin) into view
 board.zoomBy(ratio);      // keyboard / button zoom around the playable center
 board.markArrival(key);   // pop-in animation for a piece that just arrived
 board.reveal(keys, context?); // animated minimal pan (zoom-out only if needed) to show keys; also fits context when moving anyway; no-op while the user pans
-board.animateMove({ path, kind, piece?, player?, toKey? }) → Promise // fly the top piece of toKey along a getMovePath route, then landing FX
-board.finishAnimations({ clearFx? }); // snap running flights home (act/undo/new GAME_STATE); clearFx also drops sparks/ripples/nudge
-board.reducedMotion       // true → animateMove/markArrival/recenter are instant, no FX
+board.animateMove({ path, kind, piece?, player?, toKey?, speed? }) → Promise // fly the top piece of toKey along a getMovePath route, then landing FX; speed < 1 = slow motion (win)
+board.shockwave(keys);    // win: white flash, expanding hex rings, sparks and a camera punch from each queen key
+board.finishAnimations({ clearFx? }); // snap running flights home (act/undo/new GAME_STATE); clearFx also drops sparks/ripples/nudge/shockwaves
+board.reducedMotion       // true → animateMove/markArrival/recenter are instant, no FX, no shockwave
+// Queen danger pips are drawn every frame as a live overlay (never in the cached layer).
 board.draw(t);            // call every RAF frame with DOMHighResTimeStamp
 
 // Pure helper (exported): stack geometry, bottom first. Top layer scale ≥ 0.8, shade 0.
 stackLayers(height, size) → [{ dx, dy, scale, shade }]
+queenPips(pieces, hidden?) → [{ key, player, count, lit[6], dirs[6], height }] // danger-meter geometry; hexes in `hidden` (in flight) don't count yet
+winTiming(kind, steps, { reducedMotion }?) → { flightMs, landMs, cardMs }      // win-sequence timeline; cardMs ≤ WIN_REVEAL_MAX_MS (1600)
 
 // Written by app.js each frame/action:
 board.pieces        // Map<hexKey, Array<{player, type, emoji, image?}>> — full stacks (emoji is the no-Path2D fallback)
@@ -299,6 +307,7 @@ Buttons share `.btn` + `.btn-primary | .btn-ghost | .btn-danger | .btn-small`; i
 |---|---|---|
 | 1 | `#board` canvas | Main render surface |
 | 2 | `#emoji-layer` canvas | Isolated emoji rendering |
+| 3 | `#board-dim` | Win-sequence dim with a spotlight on the fallen queen, pointer-events: none |
 | 18 | `#board-hint`, `#btn-recenter` | First-run hint, floating recenter button |
 | 19 | `#piece-desc` | Slides in below HUD |
 | 20 | `#hud`, `#tray` | Game chrome; hidden until game starts |

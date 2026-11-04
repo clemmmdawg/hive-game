@@ -200,3 +200,15 @@ test('softClip is transparent at normal levels and never reaches the -1 dBFS cei
   assert.ok(softClip(0.9) > softClip(0.8), 'monotonic');
   assert.ok(20 * Math.log10(CLIP_CEILING) <= -1);
 });
+
+test('resume wakes a suspended context but never creates one', () => {
+  const { made } = setup();
+  sfx.resume();
+  assert.equal(made.length, 0, 'no context before the first gesture');
+  sfx.unlock();
+  made[0].state = 'suspended';
+  sfx.resume();
+  assert.equal(made[0].resumed, 1);
+  sfx.resume();
+  assert.equal(made[0].resumed, 1, 'a running context is left alone');
+});

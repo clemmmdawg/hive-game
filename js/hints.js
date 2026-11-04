@@ -1,6 +1,6 @@
 // hints.js — Status-line copy for the HUD. Pure; no DOM.
 
-import { ActionType, getAllLegalActions, getLegalPlacements, getLegalMoves, getLegalThrows } from './game.js';
+import { ActionType, getAllLegalActions, getLegalPlacements, getLegalMoves, getLegalThrows, queenPressure } from './game.js';
 
 const BLOCKER_TEXT = {
   NOT_YOUR_PIECE:   "THAT'S NOT YOUR PIECE",
@@ -54,12 +54,35 @@ export function statusText({ state, phase = 'IDLE', mode = 'LOCAL', myPlayer = 1
     return 'TAP A GREEN HEX TO MOVE';
   }
 
+  if (queenPressure(state)[state.turn] === DANGER_AT) return dangerText(state.turn, { mode, myPlayer });
+
   const placed = placedCount(state.board, state.turn);
   if (placed === 0) return 'PLACE YOUR FIRST PIECE';
   if (!state.queenPlaced[state.turn]) {
     return placed === 3 ? 'PLACE YOUR QUEEN NOW — 4TH PIECE' : 'PLACE A PIECE · QUEEN BY YOUR 4TH';
   }
   return 'PLACE OR MOVE A PIECE';
+}
+
+/** Occupied sides at which a queen is one move from being surrounded. */
+export const DANGER_AT = 5;
+
+/** "P1 QUEEN IN DANGER" — online, from the viewer's side ("YOUR" / "ENEMY"). */
+export function dangerText(player, { mode = 'LOCAL', myPlayer = 1 } = {}) {
+  if (mode !== 'ONLINE') return `P${player} QUEEN IN DANGER`;
+  return `${player === myPlayer ? 'YOUR' : 'ENEMY'} QUEEN IN DANGER`;
+}
+
+/**
+ * Players whose queen has just stepped up onto DANGER_AT occupied sides between
+ * two queenPressure() readings — the moment the alarm sounds. Staying there,
+ * falling back, or going straight to six (the game is over) does not count;
+ * without a previous reading (a resume) there is no transition.
+ * @returns {Array<1|2>}
+ */
+export function newDangers(prev, next) {
+  if (!prev || !next) return [];
+  return [1, 2].filter(p => next[p] === DANGER_AT && (prev[p] ?? -1) < DANGER_AT);
 }
 
 /**

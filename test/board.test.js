@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { Board, stackLayers, hiveLayerKey, hiveBounds, layerCovers, badgeLayout, tweenPoint, moveDuration, LAND_MS } from '../js/board.js';
+import { Board, stackLayers, hiveLayerKey, hiveBounds, layerCovers, badgeLayout, tweenPoint, moveDuration, LAND_MS, queenPips, winTiming, WIN_REVEAL_MAX_MS } from '../js/board.js';
 import { hexToPixel } from '../js/hex.js';
 
 // Just enough of a <canvas> for Board's constructor and input wiring.
@@ -388,4 +388,99 @@ test('onLand fires once at touchdown with the kind and player, not when a flight
   board.finishAnimations();
   await q;
   assert.equal(landed.length, 1, 'a snapped flight makes no landing');
+});
+
+// ── Queen danger pips ────────────────────────────────────────────────────────
+
+const pc = (player, type) => ({ player, type });
+
+test('queenPips: one entry per queen, a pip lit for each occupied side', () => {
+  const pieces = new Map([
+    ['0,0', [pc(1, 'QUEEN')]], ['1,0', [pc(2, 'ANT')]], ['0,1', [pc(2, 'QUEEN')]],
+  ]);
+  const pips = queenPips(pieces);
+  assert.equal(pips.length, 2);
+  const p1 = pips.find(q => q.player === 1);
+  assert.equal(p1.key, '0,0');
+  assert.equal(p1.count, 2);
+  assert.equal(p1.lit.length, 6);
+  assert.equal(p1.lit.filter(Boolean).length, 2);
+  assert.equal(pips.find(q => q.player === 2).count, 2, '0,0 and 1,0 both touch 0,1');
+});
+
+test('queenPips: each pip points at its neighbour', () => {
+  const pieces = new Map([['0,0', [pc(1, 'QUEEN')]], ['0,-1', [pc(2, 'ANT')]]]);
+  const [q] = queenPips(pieces);
+  const i = q.lit.indexOf(true);
+  const n = hexToPixel(0, -1, 1);
+  const len = Math.hypot(n.x, n.y);
+  assert.ok(Math.abs(q.dirs[i].x - n.x / len) < 1e-9 && Math.abs(q.dirs[i].y - n.y / len) < 1e-9);
+});
+
+test('queenPips: a piece still in flight onto an empty hex does not light its pip yet', () => {
+  const pieces = new Map([['0,0', [pc(1, 'QUEEN')]], ['1,0', [pc(2, 'ANT')]], ['-1,0', [pc(2, 'ANT')]]]);
+  const [q] = queenPips(pieces, new Set(['1,0']));
+  assert.equal(q.count, 1);
+});
+
+test('queenPips: a flying queen has no pips; a queen under an arriving beetle keeps them', () => {
+  const pieces = new Map([['0,0', [pc(1, 'QUEEN')]], ['1,0', [pc(2, 'QUEEN'), pc(1, 'BEETLE')]]]);
+  const flying = queenPips(pieces, new Set(['0,0']));
+  assert.deepEqual(flying.map(q => q.key), ['1,0']);
+  const buried = queenPips(pieces, new Set(['1,0']));
+  assert.deepEqual(buried.map(q => q.key).sort(), ['0,0', '1,0']);
+  assert.equal(buried.find(q => q.key === '1,0').height, 1, 'on the queen while the beetle is in the air');
+  assert.equal(queenPips(pieces).find(q => q.key === '1,0').height, 2, 'then on the stack top');
+});
+
+// ── Win sequence ─────────────────────────────────────────────────────────────
+
+test('winTiming: the card is never later than the 1.6 s reveal budget', () => {
+  assert.ok(WIN_REVEAL_MAX_MS <= 1600);
+  for (const kind of ['slide', 'hop', 'climb', 'throw', 'place']) {
+    for (const steps of [1, 2, 3, 5, 12]) {
+      const w = winTiming(kind, steps);
+      assert.ok(w.flightMs >= moveDuration(kind, steps) * 1.8, `${kind}/${steps} plays in slow motion`);
+      assert.ok(w.landMs > w.flightMs && w.cardMs > w.landMs);
+      assert.ok(w.cardMs <= WIN_REVEAL_MAX_MS, `${kind}/${steps}: card at ${w.cardMs} ms`);
+    }
+  }
+});
+
+test('winTiming: no flight (pass, resign, reduced motion) shows the card after 300 ms', () => {
+  assert.deepEqual(winTiming(null, 0), { flightMs: 0, landMs: 0, cardMs: 300 });
+  assert.deepEqual(winTiming('slide', 3, { reducedMotion: true }), { flightMs: 0, landMs: 0, cardMs: 300 });
+});
+
+test('animateMove with speed 0.4 plays the move in slow motion', async () => {
+  const board = boardWithMove();
+  const p = board.animateMove({ path: ['-1,0', '-1,1', '0,1', '1,1', '2,0'], kind: 'slide', toKey: '2,0', speed: 0.4 });
+  assert.equal(board._flights[0].dur, winTiming('slide', 4).flightMs);
+  board.draw(1000);
+  board.draw(1000 + moveDuration('slide', 4) + 20);
+  assert.ok(board.particles.length === 0, 'not landed at normal speed');
+  board.finishAnimations();
+  await p;
+});
+
+test('shockwave: rings out from each queen and fades; none under reduced motion', () => {
+  const board = boardWithMove();
+  board.shockwave(['0,0']);
+  board.draw(1000);
+  assert.equal(board._shockwaves.length, 1);
+  board.draw(1300);
+  assert.equal(board._shockwaves.length, 1, 'still expanding');
+  board.draw(3000);
+  assert.equal(board._shockwaves.length, 0, 'culled when spent');
+
+  board.reducedMotion = true;
+  board.shockwave(['0,0']);
+  assert.equal(board._shockwaves.length, 0);
+});
+
+test('finishAnimations({clearFx}) drops a running shockwave', () => {
+  const board = boardWithMove();
+  board.shockwave(['0,0']);
+  board.finishAnimations({ clearFx: true });
+  assert.equal(board._shockwaves.length, 0);
 });

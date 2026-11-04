@@ -126,6 +126,8 @@ const RINGS = {
   pick:     { R: 54, lw: 4,   color: '#fff4d1', glow: AMBER, blur: 24, minPx: MIN_LINE_PX * 1.4 },
   sel:      { R: 55, lw: 2.5, color: '#ffffff', blur: 8,  minPx: MIN_LINE_PX },
   selGlow:  { R: 55, lw: 2.5, color: '#ffffff', blur: 22, minPx: MIN_LINE_PX },
+  danger:   { R: 54, lw: 3,   color: '#ff3048', blur: 26, minPx: MIN_LINE_PX },
+  warn:     { R: 53, lw: 2,   color: AMBER,     blur: 18, minPx: MIN_LINE_PX },
 };
 
 const easeOutCubic = p => 1 - Math.pow(1 - p, 3);
@@ -160,6 +162,77 @@ export function moveDuration(kind, steps) {
   const min = MIN_MOVE_MS[kind] ?? MIN_MOVE_MS.slide;
   if (kind === 'place') return min;
   return Math.min(MOVE_MAX_MS - LAND_MS, Math.max(min, STEP_MS * steps));
+}
+
+// ── Win sequence ──
+// The winning move flies at 0.4× speed (capped so long routes still fit), a white
+// shockwave rings out of the surrounded queen at touchdown, the board dims, and
+// the result card follows — all inside WIN_REVEAL_MAX_MS.
+export const WIN_REVEAL_MAX_MS = 1600;
+const WIN_SPEED       = 0.4;
+const WIN_FLIGHT_MAX  = 1000;  // ms: longest slow-motion flight
+const WIN_HOLD_MS     = 380;   // settled piece + shockwave before the card
+const WIN_INSTANT_MS  = 300;   // no flight (pass, resign, reduced motion)
+const SHOCK_MS        = 1100;
+const SHOCK_SPARKS    = 22;
+
+/** Tween duration of a move played at `speed` (< 1 is slower), capped at WIN_FLIGHT_MAX. */
+function slowDuration(kind, steps, speed) {
+  return Math.min(WIN_FLIGHT_MAX, Math.round(moveDuration(kind, steps) / speed));
+}
+
+/**
+ * Timeline of the win sequence, in ms from the winning action: `flightMs` the
+ * slow-motion tween (touchdown + shockwave), `landMs` the piece settled, `cardMs`
+ * the result card. Without a flight the card comes after WIN_INSTANT_MS.
+ */
+export function winTiming(kind, steps, { reducedMotion = false } = {}) {
+  if (!kind || reducedMotion) return { flightMs: 0, landMs: 0, cardMs: WIN_INSTANT_MS };
+  const flightMs = slowDuration(kind, Math.max(1, steps), WIN_SPEED);
+  const landMs   = flightMs + LAND_MS;
+  return { flightMs, landMs, cardMs: Math.min(WIN_REVEAL_MAX_MS, landMs + WIN_HOLD_MS) };
+}
+
+// ── Queen danger pips ──
+const PIP_DIST = 0.83;   // pip centre, × top-face radius, toward each neighbour (on the rim, clear of the glyph)
+const PIP_R    = 0.115;  // pip radius, × top-face radius
+const PIP_MIN_PX = 2.4;  // never smaller than this on screen
+const PIP_LEVEL = {      // occupied sides → lit colour (RGB) and pulse speed (rad/ms; 0 = steady)
+  calm:   { rgb: '255,210,63', pulse: 0 },     // queen gold
+  4:      { rgb: '255,179,0',  pulse: 1 / 260 },
+  5:      { rgb: '255,48,72',  pulse: 1 / 120 },
+  6:      { rgb: '255,48,72',  pulse: 0 },
+};
+
+/**
+ * Danger-meter geometry for every queen on the board: which of its six sides are
+ * occupied (`lit`, aligned with `dirs`, unit vectors toward each neighbour in
+ * board space), how many, and the visible stack height it sits under. Hexes in
+ * `hidden` have their top piece in flight: an empty hex it is flying to does
+ * not count yet, and a flying queen gets no meter until it lands.
+ * @returns {{key:string, player:1|2, count:number, lit:boolean[], dirs:{x:number,y:number}[], height:number}[]}
+ */
+export function queenPips(pieces, hidden = new Set()) {
+  const out = [];
+  for (const [key, stack] of pieces) {
+    const queen = stack.find(p => p.type === 'QUEEN');
+    if (!queen) continue;
+    const height = stack.length - (hidden.has(key) ? 1 : 0);
+    if (stack.indexOf(queen) >= height) continue; // the queen herself is in the air
+    const { q, r } = parseKey(key);
+    const c = hexToPixel(q, r, 1);
+    const lit = [], dirs = [];
+    for (const n of hexNeighbors(q, r)) {
+      const p = hexToPixel(n.q, n.r, 1);
+      const len = Math.hypot(p.x - c.x, p.y - c.y);
+      dirs.push({ x: (p.x - c.x) / len, y: (p.y - c.y) / len });
+      const nk = hexKey(n.q, n.r);
+      const st = pieces.get(nk);
+      lit.push(!!st && st.length - (hidden.has(nk) ? 1 : 0) > 0);
+    }
+    out.push({ key, player: queen.player, count: lit.filter(Boolean).length, lit, dirs, height });
+  }
+  return out;
 }
 
 /** Height profile 0..1 of a move at progress u: arcs for hops/throws, a hover for slides, a fall for drops. */
@@ -265,6 +338,7 @@ export class Board {
     this.particles = [];
     this._ripples  = [];   // { x, y, r, color, born } landing rings
     this._nudge    = null; // { born, amp } camera nudge
+    this._shockwaves = [];  // { x, y, r, born } win shockwaves (board space)
     this._tiles    = new Map(); // player → { S, half, canvas } pre-rendered tile for flights
     this._lastT    = null;
 
@@ -423,16 +497,47 @@ export class Board {
   }
 
   /**
+   * White shockwave out of each hex in `keys` (the surrounded queen(s)): a flash
+   * on the tile, two expanding hex rings, a burst of white sparks and a camera
+   * punch. Nothing under reduced motion.
+   */
+  shockwave(keys) {
+    if (this.reducedMotion) return;
+    const t = now();
+    const k = this.SIZE / 50;
+    for (const key of keys) {
+      const stack = this.pieces.get(key);
+      const { q, r } = parseKey(key);
+      const c = hexToPixel(q, r, this.SIZE);
+      const top = stackLayers(stack?.length || 1, this.SIZE - 2).at(-1);
+      const x = c.x, y = c.y + top.dy, rad = (this.SIZE - 2) * top.scale;
+      this._shockwaves.push({ x, y, r: rad, born: null });
+      for (let i = 0; i < SHOCK_SPARKS; i++) {
+        const a = ((i + Math.random() * 0.6) / SHOCK_SPARKS) * Math.PI * 2;
+        const speed = (380 + Math.random() * 320) * k;
+        this.particles.push({
+          x: x + Math.cos(a) * rad * 0.9, y: y + Math.sin(a) * rad * 0.8,
+          vx: Math.cos(a) * speed, vy: Math.sin(a) * speed * 0.9,
+          born: t, life: 520 + Math.random() * 360, color: i % 3 ? '#ffffff' : '#ffd23f',
+        });
+      }
+    }
+    if (this.particles.length > MAX_PARTICLES) this.particles.splice(0, this.particles.length - MAX_PARTICLES);
+    this._nudge = { born: t, amp: 6 };
+  }
+
+  /**
    * Fly the top piece of `toKey` along `path` (hex keys, from getMovePath). The
    * piece is already in `pieces` at its destination; while in flight it is left
    * out of the cached layer (`hiddenTop`) and drawn live from `floating`. On
    * touchdown: squash-and-settle, a ripple in the player colour, sparks in the
    * species colour and, for climbs/throws, a small camera nudge. Under reduced
    * motion it resolves at once with no effects.
-   * @param {{path:string[], kind:'slide'|'hop'|'climb'|'throw'|'place', piece?:object, player?:1|2, toKey?:string}} move
+   * `speed` below 1 plays it in slow motion (the winning move; see winTiming).
+   * @param {{path:string[], kind:'slide'|'hop'|'climb'|'throw'|'place', piece?:object, player?:1|2, toKey?:string, speed?:number}} move
    * @returns {Promise<void>} resolves when the piece has settled (or finishAnimations ran)
    */
-  animateMove({ path, kind, piece, player, toKey }) {
+  animateMove({ path, kind, piece, player, toKey, speed = 1 }) {
     this.finishAnimations();
     toKey ??= path?.at(-1);
     const stack = this.pieces.get(toKey);
@@ -453,7 +558,8 @@ export class Board {
     return new Promise(resolve => {
       this._flights.push({
         toKey, piece, kind, pts, startL, endL, steps, liftH, grow: spec.grow, entry, resolve,
-        player: player ?? piece.player, dur: moveDuration(kind, steps), start: null, landedAt: null,
+        player: player ?? piece.player, start: null, landedAt: null,
+        dur: speed < 1 ? slowDuration(kind, steps, speed) : moveDuration(kind, steps),
       });
     });
   }
@@ -470,6 +576,7 @@ export class Board {
       this.particles = [];
       this._ripples  = [];
       this._nudge    = null;
+      this._shockwaves = [];
     }
   }
 
@@ -549,6 +656,8 @@ export class Board {
       p.vx *= drag;    p.vy = p.vy * drag + 160 * s; // a little gravity
     }
     this._ripples = this._ripples.filter(r => t - r.born < RIPPLE_MS);
+    for (const w of this._shockwaves) w.born ??= t;
+    this._shockwaves = this._shockwaves.filter(w => t - w.born < SHOCK_MS);
     if (this._nudge && t - this._nudge.born >= NUDGE_MS) this._nudge = null;
   }
 
@@ -608,6 +717,105 @@ export class Board {
         ctx.globalAlpha = 0.9 * (1 - q * 2);
         ctx.strokeStyle = '#ffffff';
         ctx.lineWidth = Math.max(minW, 1.8);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  /**
+   * The danger meter: six small hex pips just inside each queen's top face, one
+   * per side, lit when that neighbour is occupied — queen gold while calm, an
+   * amber pulse at four, a fast red pulse plus a red halo round the tile at
+   * five (and a red wash on the face). Live overlay (cheap paths), so the cached layer never re-renders for it.
+   */
+  _drawQueenPips(ctx, t, faces) {
+    const meters = queenPips(this.pieces, this.hiddenTop);
+    if (!meters.length) return;
+    const tileR = this.SIZE - 2;
+    ctx.save();
+    ctx.lineJoin = 'round';
+    for (const m of meters) {
+      const { q, r } = parseKey(m.key);
+      const c = hexToPixel(q, r, this.SIZE);
+      const top = stackLayers(m.height, tileR).at(-1);
+      const fx = c.x, fy = c.y + top.dy, fr = tileR * top.scale;
+      const level = PIP_LEVEL[m.count] ?? PIP_LEVEL.calm;
+      const pulse = level.pulse ? 0.5 + 0.5 * Math.sin(t * level.pulse) : 1;
+      if (m.count === 5) {
+        this._tintFace(ctx, faces.get(m.key), '255,48,72', 0.25 + 0.75 * pulse);
+        this._blitRingAt(ctx, 'danger', fx, fy, 0.35 + 0.65 * pulse, 1 + 0.05 * pulse);
+      } else if (m.count === 4) {
+        this._blitRingAt(ctx, 'warn', fx, fy, 0.2 + 0.4 * pulse);
+      }
+      const pr = Math.max(fr * PIP_R, PIP_MIN_PX / this.scale);
+      const d  = fr * PIP_DIST;
+      for (let i = 0; i < 6; i++) {
+        const px = fx + m.dirs[i].x * d, py = fy + m.dirs[i].y * d;
+        ctx.globalCompositeOperation = 'source-over';
+        this._hexPath(ctx, px, py, pr * 1.18);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = 'rgba(2,2,8,.82)';     // socket
+        ctx.fill();
+        if (!m.lit[i]) {
+          ctx.strokeStyle = 'rgba(255,255,255,.22)';
+          ctx.lineWidth = Math.max(pr * 0.28, 0.8 / this.scale);
+          this._hexPath(ctx, px, py, pr * 0.82);
+          ctx.stroke();
+          continue;
+        }
+        ctx.globalCompositeOperation = 'lighter';
+        this._hexPath(ctx, px, py, pr * 2.1);   // soft bloom (no shadowBlur per frame)
+        ctx.globalAlpha = 0.16 + 0.22 * pulse;
+        ctx.fillStyle = `rgb(${level.rgb})`;
+        ctx.fill();
+        ctx.globalCompositeOperation = 'source-over';
+        this._hexPath(ctx, px, py, pr);
+        ctx.globalAlpha = 0.6 + 0.4 * pulse;
+        ctx.fill();
+        this._hexPath(ctx, px, py, pr * 0.42); // hot centre
+        ctx.globalAlpha = 0.55 * pulse;
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  /** Expanding white hex rings + a flash on the queen's tile (board space, additive). */
+  _drawShockwaves(ctx, t) {
+    if (!this._shockwaves.length) return;
+    const reach = Math.max(this.W, this.H) / this.scale * 0.85;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineJoin = 'round';
+    for (const w of this._shockwaves) {
+      const age = t - (w.born ?? t);
+      if (age < 160) {
+        this._hexPath(ctx, w.x, w.y, w.r * 0.95);
+        ctx.globalAlpha = 0.75 * (1 - age / 160);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+      }
+      if (age < 260) {   // a white blast over the neighbours (solid fills: a gradient per frame is too slow on phones)
+        const p = age / 260;
+        ctx.fillStyle = '#ffffff';
+        for (const [grow, alpha] of [[1.6, 0.16], [2.6, 0.08]]) {
+          this._hexPath(ctx, w.x, w.y, w.r * (1 + grow * easeOutCubic(p)));
+          ctx.globalAlpha = alpha * (1 - p);
+          ctx.fill();
+        }
+      }
+      for (const [delay, span, width] of [[0, 1, 1], [140, 0.62, 0.55]]) {
+        const q = (age - delay) / (SHOCK_MS - delay);
+        if (q <= 0 || q >= 1) continue;
+        const R = w.r + (reach * span - w.r) * easeOutCubic(q);
+        const a = Math.pow(1 - q, 1.4);
+        // One stroke per ring: a bright core with a translucent halo would double the fill cost.
+        this._hexPath(ctx, w.x, w.y, R);
+        ctx.strokeStyle = '#ffffff';
+        ctx.globalAlpha = 0.9 * a * width;
+        ctx.lineWidth = Math.max(MIN_LINE_PX / this.scale, (9 * (1 - q) + 1.5) * width);
         ctx.stroke();
       }
     }
@@ -723,10 +931,12 @@ export class Board {
       if (lp.stack) this._drawStack(ctx, lp.key, lp.stack, lp.x, lp.y, lp.pop, faces);
       else          this._drawFloating(ctx, lp, faces);
     }
+    this._drawQueenPips(ctx, t, faces);
     this._drawSelectionRing(ctx, t);
     this._drawThrowPick(ctx, t, faces);
     this._drawGhostPulses(ctx, t, faces);
     this._drawFx(ctx, t);
+    this._drawShockwaves(ctx, t);
 
     this._compositeGlyphs(layer, gx, gy, gw, gh, loose, faces);
   }
@@ -1078,9 +1288,15 @@ export class Board {
    * `grow`. Restores the board-space transform afterwards.
    */
   _blitRing(ctx, kind, key, alpha, grow = 1) {
-    const spr = this._ringSprite(kind);
     const { q, r } = parseKey(key);
     const p = hexToPixel(q, r, this.SIZE);
+    this._blitRingAt(ctx, kind, p.x, p.y, alpha, grow);
+  }
+
+  /** _blitRing centred on board point (x, y). */
+  _blitRingAt(ctx, kind, x, y, alpha, grow = 1) {
+    const spr = this._ringSprite(kind);
+    const p = { x, y };
     const dpr = this.dpr;
     const w = spr.width * grow, h = spr.height * grow;
     ctx.save();

@@ -898,6 +898,64 @@ kbd {
 
 #hud-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 
+/* Queen danger meters: one per player, pips lit per occupied side of the queen */
+#queen-meters { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+.qm {
+  --qm-color: var(--p1);
+  --qm-lit: #ffd23f;
+  display: block;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+}
+.qm.p2 { --qm-color: var(--p2); }
+.qm svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.qm-core {
+  fill: color-mix(in srgb, var(--qm-color) 22%, #07070f);
+  stroke: var(--qm-color);
+  stroke-width: 1.3;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 0 2px var(--qm-color));
+}
+.qm-pip {
+  fill: rgba(255,255,255,.06);
+  stroke: rgba(255,255,255,.28);
+  stroke-width: .8;
+  stroke-linejoin: round;
+  transition: fill .25s, stroke .25s;
+}
+.qm-pip.lit { fill: var(--qm-lit); stroke: color-mix(in srgb, var(--qm-lit) 60%, #fff); }
+.qm.unplaced { opacity: .35; }
+.qm.unplaced .qm-core { fill: transparent; stroke-dasharray: 2 1.6; filter: none; }
+.qm.lvl-4 { --qm-lit: var(--amber); }
+.qm.lvl-4 .qm-pip.lit { animation: qm-pulse .75s ease-in-out infinite alternate; }
+.qm.lvl-5, .qm.lvl-6 { --qm-lit: #ff3048; }
+.qm.lvl-5 .qm-pip.lit { animation: qm-pulse .34s ease-in-out infinite alternate; }
+.qm.lvl-5 svg { filter: drop-shadow(0 0 4px rgba(255,48,72,.85)); }
+.qm.lvl-5 .qm-core, .qm.lvl-6 .qm-core { stroke: #ff3048; }
+.qm.alarm { animation: qm-alarm .6s var(--ease-out); }
+@keyframes qm-pulse { from { opacity: 1; } to { opacity: .35; } }
+@keyframes qm-alarm {
+  0%   { transform: scale(1); }
+  18%  { transform: scale(1.45) rotate(-8deg); }
+  36%  { transform: scale(1.2) rotate(6deg); }
+  54%  { transform: scale(1.3) rotate(-4deg); }
+  100% { transform: none; }
+}
+
+/* The win sequence dims the board round the fallen queen(s) */
+#board-dim {
+  position: fixed;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .35s ease-out;
+  background: radial-gradient(circle at var(--dim-x, 50%) var(--dim-y, 50%),
+    rgba(3,3,10,0) 0, rgba(3,3,10,0) var(--dim-r, 80px), rgba(3,3,10,.3) calc(var(--dim-r, 80px) * 1.9));
+}
+#board-dim.visible { opacity: 1; }
+
 .hud-btn {
   background: rgba(255,255,255,.07);
   border: 1px solid rgba(255,255,255,.26);
@@ -1220,6 +1278,12 @@ kbd {
 #turn-banner.p1 { --banner-color: var(--p1); }
 #turn-banner.p2 { --banner-color: var(--p2); }
 #turn-banner.gold { --banner-color: var(--gold); }
+#turn-banner.danger { --banner-color: #ff3048; }
+#turn-banner.danger.visible { animation: banner-alarm .5s ease-out; }
+@keyframes banner-alarm {
+  0%, 100% { margin-left: 0; }
+  20% { margin-left: -6px; } 40% { margin-left: 5px; } 60% { margin-left: -3px; } 80% { margin-left: 2px; }
+}
 #turn-banner.visible { opacity: 1; transform: translate(-50%, 0) scale(1); }
 .banner-hex {
   display: grid;
@@ -1521,6 +1585,8 @@ input:focus-visible {
   #hud { padding-left: 8px; padding-right: 8px; gap: 6px; }
   #turn-chip { padding: 4px 7px 4px 5px; gap: 6px; }
   .chip-hex { width: 16px; height: 14px; }
+  .qm { width: 24px; height: 24px; }
+  #queen-meters { gap: 0; }
   #chip-sub { display: none; }
   #status-text { font-size: 8px; letter-spacing: .6px; line-height: 1.6; }
   #hud-actions { gap: 4px; }

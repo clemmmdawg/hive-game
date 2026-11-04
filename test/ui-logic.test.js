@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { ActionType, PieceType, applyAction, createGame, getLegalPlacements, getLegalMoves, getLegalThrows } from '../js/game.js';
-import { statusText, describeLastMove, inferAction, winReasonFromServer, resumedWinReason, turnChipText } from '../js/hints.js';
+import { statusText, dangerText, newDangers, describeLastMove, inferAction, winReasonFromServer, resumedWinReason, turnChipText } from '../js/hints.js';
 import { encodeLocalSave, decodeLocalSave, MAX_UNDO } from '../js/local-save.js';
 
 const P = (player, type) => ({ player, type });
@@ -11,6 +11,47 @@ function place(state, pieceType) {
   const [to] = getLegalPlacements(state, pieceType);
   return applyAction(state, { type: ActionType.PLACE, pieceType, to });
 }
+
+// ── Queen danger ─────────────────────────────────────────────────────────────
+
+/** P1 queen at 0,0 with `n` occupied neighbours (ordered round the queen); P2 queen out at 3,0. */
+function queenUnder(n, turn = 1) {
+  const ring = ['1,0', '1,-1', '0,-1', '-1,0', '-1,1', '0,1'];
+  const state = createGame({});
+  state.board = new Map([['0,0', [P(1, 'QUEEN')]], ['2,0', [P(2, 'ANT')]], ['3,0', [P(2, 'QUEEN')]]]);
+  ring.slice(0, n).forEach((k, i) => state.board.set(k, [P(i % 2 ? 1 : 2, 'ANT')]));
+  state.queenPlaced = { 1: true, 2: true };
+  state.turn = turn;
+  state.turnNumber = 12;
+  return state;
+}
+
+test('status: the mover is told their queen is in danger at five neighbours', () => {
+  assert.match(statusText({ state: queenUnder(5), phase: 'IDLE' }), /P1 QUEEN IN DANGER/);
+  assert.match(statusText({ state: queenUnder(5), phase: 'IDLE', mode: 'ONLINE', myPlayer: 1 }), /YOUR QUEEN IN DANGER/);
+});
+
+test('status: no danger copy at four neighbours, for the other player, or mid-selection', () => {
+  assert.doesNotMatch(statusText({ state: queenUnder(4), phase: 'IDLE' }), /DANGER/);
+  assert.doesNotMatch(statusText({ state: queenUnder(5, 2), phase: 'IDLE' }), /DANGER/);
+  assert.doesNotMatch(statusText({ state: queenUnder(5), phase: 'BOARD' }), /DANGER/);
+});
+
+test('dangerText names the queen from the viewer\'s side', () => {
+  assert.equal(dangerText(2), 'P2 QUEEN IN DANGER');
+  assert.equal(dangerText(2, { mode: 'ONLINE', myPlayer: 2 }), 'YOUR QUEEN IN DANGER');
+  assert.equal(dangerText(1, { mode: 'ONLINE', myPlayer: 2 }), 'ENEMY QUEEN IN DANGER');
+});
+
+test('newDangers: only an upward step onto five counts', () => {
+  assert.deepEqual(newDangers({ 1: 4, 2: 2 }, { 1: 5, 2: 2 }), [1]);
+  assert.deepEqual(newDangers({ 1: 3, 2: 4 }, { 1: 5, 2: 5 }), [1, 2]);
+  assert.deepEqual(newDangers({ 1: 5, 2: null }, { 1: 5, 2: 1 }), [], 'staying at five is not new');
+  assert.deepEqual(newDangers({ 1: 4, 2: 0 }, { 1: 6, 2: 0 }), [], 'six is the end, not a warning');
+  assert.deepEqual(newDangers({ 1: 5, 2: 0 }, { 1: 4, 2: 0 }), []);
+  assert.deepEqual(newDangers({ 1: null, 2: 0 }, { 1: 5, 2: 0 }), [1], 'placed straight into danger');
+  assert.deepEqual(newDangers(null, { 1: 5, 2: 0 }), [], 'no previous position (resume): no alarm');
+});
 
 // ── statusText ───────────────────────────────────────────────────────────────
 
