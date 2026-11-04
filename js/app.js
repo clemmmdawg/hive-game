@@ -706,7 +706,7 @@ function raiseDangerAlarm(players, landed, { banner = true } = {}) {
     if (dangerTimer) clearTimeout(dangerTimer);
     dangerTimer = null;
     if (landingAlarm === fire) landingAlarm = null;
-    if (!gameState || gameState.winner) return;
+    if (!gameState || gameState.winner || review) return; // nothing live sounds over a review
     sfx.play('danger');
     if (banner) {
       const text = players.length > 1 ? 'BOTH QUEENS IN DANGER' : dangerText(players[0], { mode: gameMode, myPlayer });
@@ -1395,6 +1395,10 @@ function enterReview(index, { returnTo } = {}) {
   }
   returnTo ??= $('win-screen').classList.contains('active') ? 'card' : gameState.winner ? 'board' : 'game';
   if (passTimer) { clearTimeout(passTimer); passTimer = null; } // a forced pass waits for the live board
+  // Live alarms and chimes belong to the live board: none may go off inside the review.
+  if (dangerTimer) clearTimeout(dangerTimer);
+  if (turnSoundTimer) clearTimeout(turnSoundTimer);
+  dangerTimer = turnSoundTimer = landingAlarm = null;
   closeGameMenu();
   closeMovesSheet({ restoreFocus: false });
   hidePieceTooltip();
@@ -1648,6 +1652,7 @@ function openMovesSheet() {
   hidePieceTooltip();
   sheetReturnFocus = document.activeElement;
   renderMovesSheet();
+  movesSheet.inert = false;
   movesSheet.classList.add('active');
   movesSheet.setAttribute('aria-hidden', 'false');
   // Modal: everything else is inert while it is open (the toast stays live for COPY).
@@ -1662,6 +1667,7 @@ function closeMovesSheet({ restoreFocus = true } = {}) {
   if (!movesSheetOpen()) return;
   movesSheet.classList.remove('active');
   movesSheet.setAttribute('aria-hidden', 'true');
+  movesSheet.inert = true; // its buttons leave the tab order while it is closed
   for (const el of sheetInerted) el.inert = false;
   sheetInerted = [];
   if (restoreFocus) {
@@ -1785,7 +1791,8 @@ movesSheet.addEventListener('keydown', event => {
 
 document.addEventListener('keydown', event => {
   // Autofill and IME keydowns can carry no key at all.
-  if (!event.key || event.target.closest?.('input, textarea')) return;
+  // The replay slider is the one input whose keys the review handles (Esc, Space; it keeps its arrows).
+  if (!event.key || (event.target.closest?.('input, textarea') && event.target.id !== 'rb-slider')) return;
   if (!gameState || isOverlayOpen() || $('win-screen').classList.contains('active')) return;
   const key = event.key;
   if (movesSheetOpen()) { // keys inside the sheet are its own; this catches Esc with focus elsewhere
