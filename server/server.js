@@ -56,19 +56,6 @@ const ROOT      = join(__dirname, '..');
 const HEARTBEAT_MS = 30_000;
 const MAX_PAYLOAD  = 64 * 1024; // no legitimate message is anywhere near this
 
-function readPort(args, envPort) {
-  const flagIndex = args.findIndex(arg => arg === '--port' || arg === '-p');
-  const raw = flagIndex >= 0 ? args[flagIndex + 1] : args[0] ?? envPort ?? '3000';
-  const port = Number(raw);
-
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-    console.error(`Invalid port: ${raw}. Use an integer from 1 to 65535.`);
-    process.exit(1);
-  }
-
-  return port;
-}
-
 // ── MIME types ───────────────────────────────────────────────────────────────
 
 const MIME = {
@@ -346,14 +333,4 @@ function normalizeSettings(raw) {
     // Clocks are not implemented yet; never trust arbitrary client shapes.
     clock: { ...DEFAULT_SETTINGS.clock },
   };
-}
-
-// ── Boot ─────────────────────────────────────────────────────────────────────
-
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const PORT = readPort(process.argv.slice(2), process.env.PORT);
-  const { httpServer } = createHiveServer();
-  httpServer.listen(PORT, () => {
-    console.log(`HIVE server listening on http://localhost:${PORT}`);
-  });
 }

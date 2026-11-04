@@ -5,7 +5,7 @@
 // with spread). States without ids (old saves, hand-built boards) get ids from game.js stampPieceIds(),
 // which deserializeState applies once at load so prev/after states can never number differently.
 
-import { PieceType, ActionType, parseKey, hexKey, neighbors, applyAction, pieceId, stampPieceIds } from './game.js';
+import { ActionType, parseKey, hexKey, neighbors, applyAction, pieceId, stampPieceIds } from './game.js';
 
 /**
  * Marker for where the moved piece sits relative to the reference piece, indexed by the direction

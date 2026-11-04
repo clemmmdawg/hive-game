@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { resolveStaticPath } from '../server/static.js';
+import { readSw, precacheHash } from '../scripts/sw-hash.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = rel => readFile(path.join(ROOT, rel), 'utf8');
@@ -121,4 +122,15 @@ test('toasts stack above the menu, win, confirm and rules layers (the update REL
   assert.match(/^#toast\s*{([^}]*)}/m.exec(css)[1], /pointer-events:\s*none/, 'the toast pill never blocks taps');
   assert.doesNotMatch(/^#toast\.has-action\s*{([^}]*)}/m.exec(css)?.[1] ?? '', /pointer-events/, 'not even with an action');
   assert.match(/^#toast\.has-action \.toast-action\s*{([^}]*)}/m.exec(css)?.[1] ?? '', /pointer-events:\s*auto/, 'only its button');
+});
+
+test('precached files only change together with a CACHE bump (sw-manifest.json)', async () => {
+  const { cache, files } = await readSw();
+  const rec = JSON.parse(await read('sw-manifest.json'));
+  const hash = await precacheHash(files);
+  assert.ok(
+    rec.hash === hash,
+    'A precached file changed: bump CACHE in sw.js, then run `npm run sw:stamp` to record the new hash.',
+  );
+  assert.equal(rec.cache, cache, 'sw.js CACHE differs from sw-manifest.json: run `npm run sw:stamp`.');
 });

@@ -95,9 +95,9 @@ function occupied(board, q, r) { return board.has(hexKey(q, r)); }
  * A piece moving from (fromQ,fromR) to an adjacent (toQ,toR) travels at the
  * higher of its current level (fromH, measured with the piece still in place)
  * and its landing level (toH + 1). It is blocked only if BOTH common-neighbor
- * stacks reach that level. Ground slides need both gates occupied; a beetle
- * climbing onto a single piece passes over single-height gates and is only
- * blocked by two stacks of height 2.
+ * stacks reach that level. For a ground slide (level 1) that means both gates
+ * occupied; a beetle climbing onto a single piece passes over single-height
+ * gates and is blocked only by two stacks of height 2.
  *
  * Additionally, a ground-to-ground slide (moving piece at level 1, target
  * empty) must keep contact with the hive: at least one common neighbor must
@@ -1019,12 +1019,12 @@ export function stampPieceIds(state) {
   for (const [, stack] of boardEntries) for (const p of stack) if (p.id) used.add(p.id);
   const next = {};
   const board = new Map();
-  for (const [k, stack] of boardEntries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+  for (const [k, stack] of [...boardEntries].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
     board.set(k, stack.map(p => {
       if (p.id) return p;
       const tag = `${p.player}${p.type}`;
       let n = next[tag] ?? 0, id;
-      do { id = pieceId(p.player, p.type, ++n); } while (UNNUMBERED.has(p.type) ? false : used.has(id));
+      do { id = pieceId(p.player, p.type, ++n); } while (!UNNUMBERED.has(p.type) && used.has(id));
       next[tag] = n; used.add(id);
       return { ...p, id };
     }));

@@ -116,7 +116,8 @@ window.addEventListener('resize', () => {
   updateInsets();
 });
 
-(function loop(t) { board.draw(t); requestAnimationFrame(loop); })(0);
+// Request the next frame first: an exception in a landing callback must not freeze the board.
+(function loop(t) { requestAnimationFrame(loop); board.draw(t); })(0);
 
 // The ×N stack badges use the pixel font: re-render the cached layer once it has
 // loaded, or a cold start keeps the fallback face in the cache.
