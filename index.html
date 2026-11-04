@@ -21,6 +21,7 @@
 
   <!-- MENU SCREEN -->
   <div id="menu-screen" aria-hidden="true">
+    <button id="btn-sound-menu" class="icon-btn" type="button" aria-pressed="true" aria-label="Sound on — mute" title="Mute (M)"><svg class="icon icon-sound-on" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4.2 4.2 0 0 1 0 6"/><path d="M18.3 6.3a8 8 0 0 1 0 11.4"/></svg><svg class="icon icon-sound-off" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M16 9.5l5 5M21 9.5l-5 5"/></svg></button>
     <main id="menu-shell">
       <div id="menu-brand">
         <svg id="menu-logo" viewBox="0 0 120 72" aria-hidden="true">
@@ -139,7 +140,7 @@
             <div><dt>TAP</dt><dd>Select a piece, then tap a green hex. Amber rings mark pieces a pillbug can throw.</dd></div>
             <div><dt>DRAG · PINCH</dt><dd>Pan and zoom the board. Scroll wheel zooms on desktop.</dd></div>
             <div><dt><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="6"/><path d="M12 2v5M12 17v5M2 12h5M17 12h5"/></svg> RECENTER</dt><dd>Fit the whole hive back in view.</dd></div>
-            <div><dt>KEYS</dt><dd><kbd>Esc</kbd> cancel · <kbd>Z</kbd> undo (local) · <kbd>C</kbd> recenter · <kbd>+</kbd>/<kbd>−</kbd> zoom</dd></div>
+            <div><dt>KEYS</dt><dd><kbd>Esc</kbd> cancel · <kbd>Z</kbd> undo (local) · <kbd>C</kbd> recenter · <kbd>+</kbd>/<kbd>−</kbd> zoom · <kbd>M</kbd> sound</dd></div>
           </dl>
         </section>
       </div>
@@ -167,6 +168,7 @@
   <nav id="game-menu" role="menu" aria-label="Game menu" hidden>
     <button role="menuitem" type="button" data-action="rules"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2z"/><path d="M4 19V5"/></svg> HOW TO PLAY</button>
     <button role="menuitem" type="button" data-action="recenter"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="6"/><path d="M12 2v5M12 17v5M2 12h5M17 12h5"/></svg> RECENTER VIEW</button>
+    <button role="menuitemcheckbox" aria-checked="true" type="button" data-action="sound" title="Toggle sound (M)"><svg class="icon icon-sound-on" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4.2 4.2 0 0 1 0 6"/><path d="M18.3 6.3a8 8 0 0 1 0 11.4"/></svg><svg class="icon icon-sound-off" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M16 9.5l5 5M21 9.5l-5 5"/></svg> <span id="menu-sound-label">SOUND: ON</span></button>
     <button role="menuitem" type="button" data-action="restart" data-local-only><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg> RESTART GAME</button>
     <button role="menuitem" type="button" data-action="rematch" data-finished-only hidden><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg> REMATCH</button>
     <button role="menuitem" type="button" data-action="quit" class="danger"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3v8"/><path d="M6.4 6.6a8 8 0 1 0 11.2 0"/></svg> <span id="menu-quit-label">QUIT TO MENU</span></button>

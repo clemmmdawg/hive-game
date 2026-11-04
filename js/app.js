@@ -12,6 +12,7 @@ import { statusText, describeLastMove, inferAction, winReasonFromServer, resumed
 import { encodeLocalSave, decodeLocalSave, MAX_UNDO } from './local-save.js';
 import { spriteSVG, drawSprite, SPECIES_COLOR, bodyFill } from './sprites.js';
 import * as net from './net.js';
+import { sfx } from './audio.js';
 
 // ── Piece display definitions ──────────────────────────
 
@@ -124,6 +125,7 @@ let winPresented = false;
 let winReason    = null;    // null | 'QUEEN' | 'RESIGN' | 'STALEMATE'
 let passTimer    = null;    // pending automatic pass in LOCAL mode
 let winTimer     = null;
+let turnSoundTimer = null; // "your turn" chime, held back until the opponent's piece lands
 let connectionNotice = null; // shown in place of the status line while offline
 let opponentAway = false;
 
@@ -245,7 +247,8 @@ function hideGame() {
 function cancelTimers() {
   if (passTimer) clearTimeout(passTimer);
   if (winTimer) clearTimeout(winTimer);
-  passTimer = winTimer = null;
+  if (turnSoundTimer) clearTimeout(turnSoundTimer);
+  passTimer = winTimer = turnSoundTimer = null;
 }
 
 function resetBoardView() {
@@ -421,9 +424,16 @@ function clearSelection(sync = true) {
   if (sync && gameState) syncUI();
 }
 
+/** The player backed out of a selection (tap away, Esc, ✕). */
+function cancelSelection() {
+  if (uiState.phase !== 'IDLE') sfx.play('deselect');
+  clearSelection();
+}
+
 function selectTrayPiece(type) {
   hidePieceTooltip();
-  if (uiState.trayPick?.type === type) { clearSelection(); return; }
+  if (uiState.trayPick?.type === type) { cancelSelection(); return; }
+  sfx.play('select');
   uiState.phase     = 'TRAY';
   uiState.trayPick  = { type };
   uiState.boardPick = null;
@@ -441,6 +451,8 @@ function selectBoardPiece(key) {
   uiState.throwPillbugHex = null;
   board.selectedHex = key;
   updateGhosts();
+  // A piece that cannot go anywhere gets a soft "no"; the status line says why.
+  sfx.play(board.ghosts.size || board.throwTargets.size ? 'select' : 'invalid');
   board.reveal([key, ...board.ghosts], board.pieces.keys());
   syncUI();
 }
@@ -453,6 +465,7 @@ function selectThrowPiece(fromKey, pillbugKey) {
   uiState.throwPillbugHex = pillbugKey;
   board.selectedHex       = pillbugKey;   // keep the thrower highlighted
   updateGhosts();
+  sfx.play('select');
   board.reveal([fromKey, ...board.ghosts], board.pieces.keys());
   syncUI();
 }
@@ -511,6 +524,7 @@ function onStateChanged(prev, { animate = true, move = null } = {}) {
   const flying = !!(lastMove && animate && move && !board.reducedMotion);
   if (flying) board.animateMove({ ...move, toKey: lastMove.to, player: lastMove.player });
   else if (lastMove && animate) board.markArrival(lastMove.to);
+  if (lastMove && animate) playMoveSound(move?.kind, board.hiddenTop.has(lastMove.to));
   board.reveal(board.pieces.keys());
   syncUI();
   saveLocal();
@@ -522,11 +536,25 @@ function onStateChanged(prev, { animate = true, move = null } = {}) {
     winTimer = setTimeout(showWinScreen, delay);
     return;
   }
-  announceTurn();
+  announceTurn(flying ? moveDuration(move.kind, move.path.length - 1) : 0);
 }
 
-/** Tell players whose turn it is; in LOCAL mode, auto-pass a stuck player. */
-function announceTurn() {
+/**
+ * Departure whoosh for a flying move; the landing thump (`place`, with the haptic)
+ * comes from board.onLand at touchdown. A piece that does not fly (reduced motion,
+ * no route) just lands at once.
+ */
+function playMoveSound(kind, inFlight) {
+  if (!inFlight) { sfx.play('place'); return; }
+  if (kind && kind !== 'place') sfx.play(kind, { haptic: false });
+}
+board.onLand = () => sfx.play('place');
+
+/**
+ * Tell players whose turn it is; in LOCAL mode, auto-pass a stuck player.
+ * `landingMs`: how long the move that ended the turn takes to land (the chime waits for it).
+ */
+function announceTurn(landingMs = 0) {
   if (!gameState || gameState.winner) return;
   const turn = gameState.turn;
 
@@ -534,12 +562,14 @@ function announceTurn() {
     if (turn === myPlayer) {
       const mustPass = getAllLegalActions(gameState).mustPass;
       showBanner(mustPass ? 'NO MOVES — TAP PASS' : 'YOUR TURN', mustPass ? 'gold' : `p${turn}`);
+      playTurnChime(landingMs);
     }
     return;
   }
 
   if (getAllLegalActions(gameState).mustPass) {
     showBanner(`P${turn} HAS NO MOVES — PASSING`, 'gold', PieceType.QUEEN, 1600);
+    playTurnChime(landingMs);
     const stuck = gameState;
     passTimer = setTimeout(() => {
       passTimer = null;
@@ -558,6 +588,15 @@ function announceTurn() {
   showBanner(`PLAYER ${turn}'S TURN`, `p${turn}`, PieceType.QUEEN, 1100);
 }
 
+/**
+ * The turn chime marks a turn that needs your attention (online: yours; local: a
+ * forced pass). Ordinary pass-and-play turns already have the move's own sounds.
+ */
+function playTurnChime(landingMs) {
+  if (turnSoundTimer) clearTimeout(turnSoundTimer);
+  turnSoundTimer = setTimeout(() => { turnSoundTimer = null; sfx.play('turn'); }, landingMs ? landingMs + 120 : 0);
+}
+
 function undo() {
   if (gameMode !== 'LOCAL' || !history.length || !gameState) return;
   board.finishAnimations({ clearFx: true }); // no animation, and nothing left mid-air
@@ -574,6 +613,7 @@ function undo() {
   syncBoardRenderer();
   syncUI();
   saveLocal();
+  sfx.play('deselect');
   toast(`UNDONE · PLAYER ${restored.turn} TO MOVE`, '', 1400);
 }
 
@@ -727,6 +767,7 @@ function showWinScreen() {
   screen.classList.add('active');
   ($('btn-rematch').hidden ? $('btn-view-board') : $('btn-rematch')).focus();
   const lost = gameMode === 'ONLINE' && winner !== myPlayer && winner !== 'DRAW';
+  sfx.play(winner === 'DRAW' ? 'draw' : lost ? 'lose' : 'win');
   if (!lost) launchConfetti();
   syncUI();
 }
@@ -773,17 +814,17 @@ board.onTap = (q, r, clientX, clientY) => {
     if (board.ghosts.has(key))          doPlace(key);
     else if (topPiece?.player === turn) selectBoardPiece(key);
     else if (topPiece)                  inspect();
-    else                                clearSelection();
+    else                                cancelSelection();
     return;
   }
 
   if (uiState.phase === 'BOARD') {
     if (board.ghosts.has(key))            doMove(key);
     else if (board.throwTargets.has(key)) selectThrowPiece(key, uiState.boardPick);
-    else if (key === uiState.boardPick)   clearSelection();
+    else if (key === uiState.boardPick)   cancelSelection();
     else if (topPiece?.player === turn)   selectBoardPiece(key);
     else if (topPiece)                    inspect();
-    else                                  clearSelection();
+    else                                  cancelSelection();
     return;
   }
 
@@ -792,7 +833,7 @@ board.onTap = (q, r, clientX, clientY) => {
     else if (key === uiState.throwPillbugHex)   selectBoardPiece(key); // back out of the throw
     else if (topPiece?.player === turn)         selectBoardPiece(key);
     else if (topPiece)                          inspect();
-    else                                        clearSelection();
+    else                                        cancelSelection();
     return;
   }
 
@@ -885,7 +926,9 @@ function renderReserve(player) {
 const trayEl = $('tray-pieces');
 trayEl.addEventListener('click', event => {
   const slot = event.target.closest('.piece-slot');
-  if (slot && !slot.classList.contains('disabled')) selectTrayPiece(slot.dataset.type);
+  if (!slot) return;
+  if (slot.classList.contains('disabled')) sfx.play('invalid');
+  else selectTrayPiece(slot.dataset.type);
 });
 trayEl.addEventListener('keydown', event => {
   const slot = event.target.closest('.piece-slot');
@@ -1046,6 +1089,7 @@ document.addEventListener('pointerdown', event => {
 gameMenu.addEventListener('click', event => {
   const action = event.target.closest('button')?.dataset.action;
   if (!action) return;
+  if (action === 'sound') { toggleSound(); return; } // stays open so the new state is visible
   closeGameMenu();
   if (action === 'rules')    showRules();
   if (action === 'recenter') board.recenter(true);
@@ -1085,7 +1129,7 @@ function requestQuit() {
 
 // ── Buttons ────────────────────────────────────────────
 
-$('btn-cancel').addEventListener('click', () => clearSelection());
+$('btn-cancel').addEventListener('click', () => cancelSelection());
 $('btn-undo').addEventListener('click', undo);
 $('btn-recenter').addEventListener('click', () => { board.recenter(true); hideBoardHint(); });
 $('btn-pass').addEventListener('click', () => {
@@ -1103,7 +1147,7 @@ document.addEventListener('keydown', event => {
 
   if (key === 'Escape') {
     if (!gameMenu.hidden) closeGameMenu({ restoreFocus: true });
-    else if (uiState.phase !== 'IDLE') clearSelection();
+    else if (uiState.phase !== 'IDLE') cancelSelection();
     else hidePieceTooltip();
     return;
   }
@@ -1113,6 +1157,43 @@ document.addEventListener('keydown', event => {
   else if (key === '+' || key === '=') board.zoomBy(1.2);
   else if (key === '-' || key === '_') board.zoomBy(1 / 1.2);
   else if (key === '?') showRules();
+});
+
+// ── Sound ──────────────────────────────────────────────
+
+// The AudioContext may only start inside a user gesture; every gesture also
+// resumes a context the browser suspended (backgrounded tab, iOS interruption).
+for (const type of ['pointerdown', 'keydown', 'touchend']) {
+  document.addEventListener(type, () => sfx.unlock(), { capture: true, passive: true });
+}
+
+function syncSoundUI() {
+  const on = !sfx.muted;
+  $('menu-sound-label').textContent = `SOUND: ${on ? 'ON' : 'OFF'}`;
+  for (const el of [$('btn-sound-menu'), document.querySelector('#game-menu [data-action="sound"]')]) {
+    el.classList.toggle('muted', !on);
+    el.setAttribute(el.getAttribute('role') === 'menuitemcheckbox' ? 'aria-checked' : 'aria-pressed', String(on));
+  }
+  $('btn-sound-menu').setAttribute('aria-label', on ? 'Sound on — mute' : 'Sound off — unmute');
+  $('btn-sound-menu').title = `${on ? 'Mute' : 'Unmute'} (M)`;
+}
+
+function toggleSound() {
+  sfx.unlock();
+  sfx.toggle();
+  syncSoundUI();
+  if (!sfx.muted) sfx.play('select'); // audible confirmation
+  if (gameState) toast(sfx.muted ? 'SOUND OFF' : 'SOUND ON', '', 1000);
+}
+
+$('btn-sound-menu').addEventListener('click', toggleSound);
+
+// M works everywhere (menu, game, dialogs) except while typing.
+document.addEventListener('keydown', event => {
+  if (event.key.toLowerCase() !== 'm' || event.repeat) return;
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  if (event.target.closest?.('input, textarea, select')) return;
+  toggleSound();
 });
 
 // ── Board hint ─────────────────────────────────────────
@@ -1193,6 +1274,7 @@ export function initNetHandlers() {
   // Server rejected a move (shouldn't happen with correct client logic)
   net.on('INVALID_MOVE', ({ reason }) => {
     console.warn('[app] Server rejected move:', reason);
+    sfx.play('invalid');
     toast('THE SERVER REJECTED THAT MOVE', 'error');
     syncBoardRenderer();
     syncUI();
@@ -1221,6 +1303,7 @@ export function initNetHandlers() {
 // ── Boot ───────────────────────────────────────────────
 
 for (const slot of document.querySelectorAll('[data-sprite]')) slot.innerHTML = spriteSVG(slot.dataset.sprite);
+syncSoundUI();
 hideGame();
 
 initMenu({

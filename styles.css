@@ -966,10 +966,27 @@ kbd {
   cursor: pointer;
 }
 #game-menu button .icon { width: 16px; height: 16px; opacity: .85; }
+#game-menu button.muted { color: var(--ui-text); }
 #game-menu button:hover,
 #game-menu button:focus-visible { background: rgba(255,255,255,.08); color: #fff; outline: none; }
 #game-menu button.danger { color: var(--p1); }
 #game-menu button.danger:hover { background: var(--p1-dim); }
+
+/* Sound toggle (☰ menu row + main-menu corner button): one icon per state */
+.muted .icon-sound-on,
+:not(.muted) > .icon-sound-off { display: none; }
+#btn-sound-menu {
+  position: absolute;
+  top: max(10px, var(--safe-top));
+  right: max(10px, env(safe-area-inset-right, 0px));
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  z-index: 1;
+}
+#btn-sound-menu.muted { color: var(--ui-text); }
+#btn-sound-menu:focus-visible { outline: 2px solid var(--p2); outline-offset: 2px; }
 
 /* ── Piece description bar ──────────────────────────────── */
 #piece-desc {

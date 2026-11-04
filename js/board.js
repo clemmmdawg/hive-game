@@ -301,6 +301,8 @@ export class Board {
     this.onHover = null;
     /** Fired once when the user first pans or zooms. */
     this.onViewChange = null;
+    /** Fired at touchdown of an animateMove flight: (kind, player) => void. */
+    this.onLand = null;
 
     this._bindEvents();
   }
@@ -349,19 +351,6 @@ export class Board {
       return;
     }
     this._camera = { from: { tx: this.tx, ty: this.ty, scale: this.scale }, to: target, start: null };
-  }
-
-  /** Recenter only if some piece has drifted outside the visible area. */
-  ensureHiveVisible() {
-    const { top, bottom } = this.insets;
-    const pad = this.SIZE * this.scale * 0.6;
-    for (const key of this.pieces.keys()) {
-      const { x, y } = this.hexToScreen(key);
-      if (x < pad || x > this.W - pad || y < top + pad || y > this.H - bottom - pad) {
-        this.recenter(true);
-        return;
-      }
-    }
   }
 
   /**
@@ -547,6 +536,7 @@ export class Board {
     }
     if (this.particles.length > MAX_PARTICLES) this.particles.splice(0, this.particles.length - MAX_PARTICLES);
     if (NUDGE_PX[f.kind]) this._nudge = { born: t, amp: NUDGE_PX[f.kind] };
+    this.onLand?.(f.kind, f.player);
   }
 
   /** Age the landing effects; drop finished ones. */

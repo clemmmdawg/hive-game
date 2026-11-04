@@ -369,3 +369,23 @@ test('reveal does not fight a user who is panning', () => {
   canvas.fire('pointerup', { pointerId: 1, clientX: 140, clientY: 400 });
   assert.equal(board.reveal(['0,0']), false, 'just finished a drag');
 });
+
+test('onLand fires once at touchdown with the kind and player, not when a flight is snapped home', async () => {
+  const board = boardWithMove();
+  const landed = [];
+  board.onLand = (kind, player) => landed.push([kind, player]);
+  const p = board.animateMove({ path: ['-1,0', '2,0'], kind: 'hop', toKey: '2,0' });
+  board.draw(1000);
+  assert.deepEqual(landed, [], 'not at departure');
+  board.draw(1100); board.draw(1400); board.draw(1450);
+  assert.deepEqual(landed, [['hop', 1]]);
+  board.draw(1800);
+  await p;
+  assert.equal(landed.length, 1);
+
+  const q = board.animateMove({ path: ['-1,0', '2,0'], kind: 'slide', toKey: '2,0' });
+  board.draw(2000);
+  board.finishAnimations();
+  await q;
+  assert.equal(landed.length, 1, 'a snapped flight makes no landing');
+});
