@@ -1740,6 +1740,8 @@ body:has(#menu-screen.active):not(:has(#rules-overlay.active)) #toast.has-action
   filter: drop-shadow(0 0 6px var(--rim)) drop-shadow(0 0 18px color-mix(in srgb, var(--rim) 45%, transparent));
 }
 #win-emblem .sprite { width: 72%; height: 72%; }
+/* Lost on time: a stopwatch in the danger red (menu-icon sprites take their colour from CSS) */
+#win-emblem.icon-emblem .sprite { width: 64%; height: 64%; color: #ff6170; filter: drop-shadow(0 0 4px rgba(255,48,72,.8)); }
 #win-kicker { font-size: 6px; letter-spacing: 3px; color: var(--ui-dim); }
 #win-headline {
   font-size: clamp(16px, 5.5vw, 26px);

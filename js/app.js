@@ -21,7 +21,7 @@ import * as net from './net.js';
 import { sfx } from './audio.js';
 import {
   createClock, endTurn, remainingFor, isFlagged, pause as pauseClock, resume as resumeClock, flag as flagClock,
-  rebaseClock, formatClock, LOW_TIME_MS,
+  rebaseClock, formatClock, LOW_TIME_MS, announcedPass,
 } from './clock.js';
 
 // ── Piece display definitions ──────────────────────────
@@ -727,14 +727,16 @@ function announceTurn(landingMs = 0, dangers = [], landed = null) {
     if (dangers.length) raiseDangerAlarm(dangers, landed, { banner: false });
     else playTurnChime(landingMs);
     const stuck = gameState;
+    // The pass counts from the moment the banner goes up: the ~1.7 s announcement is nobody's time.
+    const passAt = Date.now();
     passTimer = setTimeout(() => {
       passTimer = null;
       if (gameState !== stuck) return; // undone or quit meanwhile
       const now = Date.now();
-      if (isFlagged(clock, stuck.turn, now)) { flagLocal(now); return; }
+      if (isFlagged(clock, stuck.turn, passAt)) { flagLocal(passAt); return; }
       moveLog.push(logEntry(stuck, { type: ActionType.PASS }));
       gameState = applyAction(stuck, { type: ActionType.PASS });
-      clock = endTurn(clock, stuck.turn, now);
+      clock = announcedPass(clock, stuck.turn, passAt, now);
       if (getAllLegalActions(gameState).mustPass) {
         // Neither side can act: the game can never progress.
         gameState = { ...gameState, winner: 'DRAW' };

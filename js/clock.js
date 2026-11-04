@@ -83,6 +83,15 @@ export function endTurn(clock, player, now) {
   return { ...clock, remaining, active: other(player), turnStartedAt: clock.running ? now : null };
 }
 
+/**
+ * A forced pass announced at `announcedAt` and applied at `now`: the stuck side's turn ends at the
+ * announcement, the next side's starts when the pass is applied (the banner in between is nobody's time).
+ */
+export function announcedPass(clock, player, announcedAt, now) {
+  const next = endTurn(clock, player, announcedAt);
+  return next?.running ? { ...next, turnStartedAt: now } : next;
+}
+
 /** Stop the clock, folding the time spent so far into the active side's remaining. */
 export function pause(clock, now) {
   if (!clock || !clock.running) return clock;

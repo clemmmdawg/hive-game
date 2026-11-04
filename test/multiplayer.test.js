@@ -469,3 +469,49 @@ test('online clock: a reconnect mid-turn gets the running clock with the right r
     assert.ok(left <= 5000 - 300 && left > 5000 - 1500, `left ${left}`);
   } finally { await srv.stop(); }
 });
+
+test('server clock: a 30+0 game nobody moves in ends on TIMEOUT, not an idle ROOM_CLOSED', () => {
+  mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000_000 });
+  try {
+    const a = fakeSocket(), b = fakeSocket();
+    handleMessage(a, { type: 'CREATE_ROOM', settings: { clock: { enabled: true, type: 'FISCHER', time: 30 * 60_000, increment: 0 } } });
+    const { code } = last(a, 'ROOM_CREATED');
+    handleMessage(b, { type: 'JOIN_ROOM', code });
+    mock.timers.tick(30 * 60_000 + 5);
+    assert.equal(last(b, 'GAME_OVER')?.reason, 'TIMEOUT');
+    assert.equal(last(b, 'ROOM_CLOSED'), undefined);
+    assert.ok(getRoom(code), 'the room outlives the flag (players can still see the result)');
+  } finally { mock.timers.reset(); }
+});
+
+test('server clock: banked time over 30 min (15+10) still ends on TIMEOUT, not idle cleanup', () => {
+  mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  try {
+    const a = fakeSocket(), b = fakeSocket();
+    handleMessage(a, { type: 'CREATE_ROOM', settings: { clock: { enabled: true, type: 'FISCHER', time: 15 * 60_000, increment: 10_000 } } });
+    const { code } = last(a, 'ROOM_CREATED');
+    handleMessage(b, { type: 'JOIN_ROOM', code });
+    const room = getRoom(code);
+    room.clock = { ...room.clock, remaining: { 1: 35 * 60_000, 2: 15 * 60_000 } }; // P1 banked increments
+    handleMessage(a, { type: 'PLACE_PIECE', pieceType: 'ANT', to: '0,0' }); // re-arms both deadlines
+    handleMessage(b, { type: 'PLACE_PIECE', pieceType: 'ANT', to: '1,0' });
+    const p1Left = remainingFor(room.clock, 1, Date.now());
+    assert.ok(p1Left > 30 * 60_000);
+    mock.timers.tick(p1Left + 5);
+    assert.equal(last(a, 'GAME_OVER')?.reason, 'TIMEOUT');
+    assert.equal(last(a, 'ROOM_CLOSED'), undefined);
+  } finally { mock.timers.reset(); }
+});
+
+test('server clock: RESIGN after the side to move has flagged (timer not yet run) resolves as TIMEOUT', () => {
+  mock.timers.enable({ apis: ['Date'], now: 0 });
+  try {
+    const a = fakeSocket(), b = fakeSocket();
+    handleMessage(a, { type: 'CREATE_ROOM', settings: { clock: { enabled: true, type: 'FISCHER', time: 5 * 60_000, increment: 0 } } });
+    handleMessage(b, { type: 'JOIN_ROOM', code: last(a, 'ROOM_CREATED').code });
+    mock.timers.tick(5 * 60_000 + 10);
+    handleMessage(b, { type: 'RESIGN' }); // P2 resigns, but P1 already ran out
+    const over = last(a, 'GAME_OVER');
+    assert.deepEqual([over.winner, over.reason], [2, 'TIMEOUT']);
+  } finally { mock.timers.reset(); }
+});

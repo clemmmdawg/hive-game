@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {
   CLOCK_PRESETS, CLOCK_OFF, presetSettings, presetIdOf, normalizeClockSettings,
   createClock, startTurn, endTurn, remainingFor, isFlagged, pause, resume, flag,
-  rebaseClock, restoreClock, formatClock, LOW_TIME_MS,
+  rebaseClock, restoreClock, formatClock, LOW_TIME_MS, announcedPass,
 } from '../js/clock.js';
 
 const MIN = 60_000;
@@ -148,4 +148,15 @@ test('formatClock: m:ss over 10 s (minutes zero-padded), ss.t below', () => {
   assert.equal(formatClock(0), '00.0');
   assert.equal(formatClock(-50), '00.0');
   assert.equal(LOW_TIME_MS, 10_000);
+});
+
+test('announcedPass: a forced pass is charged up to the banner, the next side starts when it is applied', () => {
+  const c = startTurn(createClock(s10p5), 0);
+  const p = announcedPass(c, 1, 3000, 4700); // banner at 3 s, pass applied at 4.7 s
+  assert.equal(p.remaining[1], 10 * MIN - 3000 + 5000, 'the 1.7 s banner is not charged to the stuck side');
+  assert.equal(p.active, 2);
+  assert.equal(remainingFor(p, 2, 4700), 10 * MIN, 'nor to the next side');
+  const held = announcedPass(pause(c, 3500), 1, 3000, 4700);
+  assert.equal(held.running, false, 'a clock held meanwhile stays held');
+  assert.equal(announcedPass(null, 1, 0, 0), null);
 });

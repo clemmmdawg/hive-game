@@ -60,7 +60,7 @@ export function winCopy({ state, mode, myPlayer, reason }) {
     return {
       headline,
       reason: online ? (loser === myPlayer ? 'You ran out of time.' : 'Your opponent ran out of time.') : `Player ${loser} ran out of time.`,
-      emblem: PieceType.QUEEN,
+      emblem: 'STOPWATCH',
     };
   }
   if (reason === 'RESIGN') {
@@ -273,6 +273,7 @@ export function createWinFx(ctx) {
     $('win-headline').textContent = copy.headline;
     $('win-reason').textContent   = copy.reason;
     $('win-emblem').innerHTML     = spriteSVG(copy.emblem); // on a .mini-tile in the winner's rim
+    $('win-emblem').classList.toggle('icon-emblem', copy.emblem === 'STOPWATCH');
     $('btn-rematch').hidden       = ctx.mode() !== 'LOCAL';
     $('btn-replay').hidden        = !log.length || !replayForGame(log, state);
     screen.setAttribute('aria-hidden', 'false');

@@ -13,10 +13,12 @@
  */
 
 import { randomUUID } from 'crypto';
+import { remainingFor } from '../js/clock.js';
 
 const CODE_CHARS   = 'BCDFGHJKLMNPQRSTVWXYZ23456789';
 export const WAIT_TIMEOUT = 10 * 60 * 1000; // 10 min — waiting for 2nd player
 export const IDLE_TIMEOUT = 30 * 60 * 1000; // 30 min — game inactivity
+export const CLOCK_GRACE  = 60 * 1000;      // a timed game's idle deadline stays this far past the running flag
 
 /** @type {Map<string, Room>} */
 const rooms = new Map();
@@ -199,8 +201,12 @@ function touchActivity(room) {
   if (room.idleTimer) clearTimeout(room.idleTimer);
   // Until a second player has claimed a seat the room is only waiting for them.
   // The wait deadline is absolute from creation, so resuming cannot extend it.
+  // A timed game in progress is never idle-closed before its running clock can flag (30+0, or banked
+  // increments): the deadline stays past the side to move's remaining time.
+  const clockLeft = room.clock?.running && room.gameState && !room.gameState.winner
+    ? remainingFor(room.clock, room.clock.active, Date.now()) + CLOCK_GRACE : 0;
   const delay = room.tokens[1]
-    ? IDLE_TIMEOUT
+    ? Math.max(IDLE_TIMEOUT, clockLeft)
     : Math.max(0, room.createdAt + WAIT_TIMEOUT - Date.now());
   room.idleTimer = setTimeout(() => cleanupRoom(room.code), delay);
   room.idleTimer.unref?.();

@@ -208,6 +208,7 @@ export function handleMessage(socket, msg, options = {}) {
       room.history   = [];
       room.clock     = startTurn(createClock(room.settings.clock), Date.now());
       scheduleFlag(room);
+      touchActivity(room); // the idle deadline now covers the running clock
 
       // Tell each player their assigned number
       sendTo(room, 1, { type: 'PLAYER_ASSIGNMENT', player: 1, token: room.tokens[0] });
@@ -290,6 +291,11 @@ export function handleMessage(socket, msg, options = {}) {
     // ── Resign ─────────────────────────────────────────────────────────────
     case 'RESIGN': {
       const room = getRoom(socket._hiveRoom);
+      // A flag that fell before this message (its timer not yet run) decides the game first.
+      if (room?.gameState && !room.gameState.winner && isFlagged(room.clock, room.gameState.turn, Date.now())) {
+        flagRoom(room, Date.now());
+        return;
+      }
       const resign = resolveResign(room?.gameState ?? null, socket._hivePlayer);
       if (!resign.valid) { socket.send(err(resign.reason)); return; }
 
