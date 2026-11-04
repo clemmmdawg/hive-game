@@ -92,14 +92,12 @@ function occupied(board, q, r) { return board.has(hexKey(q, r)); }
 /**
  * Freedom to Move / Gate check.
  *
- * A piece moving from (fromQ,fromR) to an adjacent (toQ,toR) is blocked if
- * both common-neighbor stacks are at least as tall as the tallest of the
- * two endpoint stacks. This naturally handles ground-level sliding (both
- * gates occupied blocks a height-1 piece) and beetle climbing (a gate of
- * height 3 is needed to block a beetle moving between two height-2 stacks).
- *
- * The FROM stack height is measured BEFORE the piece leaves (normal), because
- * that's its physical height while initiating the move.
+ * A piece moving from (fromQ,fromR) to an adjacent (toQ,toR) travels at the
+ * higher of its current level (fromH, measured with the piece still in place)
+ * and its landing level (toH + 1). It is blocked only if BOTH common-neighbor
+ * stacks reach that level. Ground slides need both gates occupied; a beetle
+ * climbing onto a single piece passes over single-height gates and is only
+ * blocked by two stacks of height 2.
  */
 export function canSlide(board, fromQ, fromR, toQ, toR, fromHOverride) {
   const dq = toQ - fromQ, dr = toR - fromR;
@@ -115,7 +113,7 @@ export function canSlide(board, fromQ, fromR, toQ, toR, fromHOverride) {
 
   const fromH = (fromHOverride !== undefined) ? fromHOverride : heightAt(board, fromQ, fromR);
   const toH   = heightAt(board, toQ,   toR);
-  const need  = Math.max(fromH, toH);
+  const need  = Math.max(fromH, toH + 1);
   if (need === 0) return true; // zero-height piece; no gate can block it
 
   // Blocked only if BOTH gates are at least as tall as the highest endpoint
@@ -413,38 +411,42 @@ function pillbugMoves(board, fromKey) {
  * Returns an array of { from: hexKey, to: hexKey } throw actions.
  *
  * Restrictions:
+ *   - Cannot throw a piece that is part of a stack
  *   - Cannot throw a piece that was moved by the OPPONENT on their last turn
  *     (state.lastOpponentMovedHex)
  *   - Cannot throw a piece that is an articulation point (would split hive)
  *   - The destination must be adjacent to the pillbug and empty
  *   - The destination cannot be the source hex of the piece being thrown
- *   - Freedom of movement: the destination must be slidable-into from the
- *     pillbug's perspective (gate check between pillbug and destination)
- *   - A piece that was just thrown cannot move on the immediately following turn
+ *   - Freedom of movement: the piece cannot be lifted onto, or lowered off,
+ *     the pillbug through a gate of stacked pieces
+ *   - A piece that was just thrown cannot move (or throw) on the following turn
  */
 function pillbugThrows(board, pillbugKey, lastOpponentMovedHex) {
   const { q, r } = parseKey(pillbugKey);
+  const liftH = heightAt(board, q, r) + 1; // level of the piece while on top of the pillbug
   const throws = [];
 
   // Collect adjacent occupied hexes as throw candidates
   for (const n of neighbors(q, r)) {
     const nk = hexKey(n.q, n.r);
-    if (!occupied(board, n.q, n.r)) continue;
+    const stack = board.get(nk);
+    if (!stack) continue;
+    if (stack.length > 1) continue;                // stacked pieces cannot be thrown
     if (nk === lastOpponentMovedHex) continue;     // opponent just moved this
     if (isArticulationPoint(board, nk)) continue;  // would disconnect hive
+
+    // The piece climbs onto the pillbug and then down the other side, so both
+    // legs are subject to the gate rule at pillbug height.
+    const lifted = new Map(board);
+    lifted.delete(nk);
+    if (!canSlide(lifted, n.q, n.r, q, r, 1)) continue;
 
     // Destination: any other empty hex adjacent to pillbug
     for (const dest of neighbors(q, r)) {
       const destKey = hexKey(dest.q, dest.r);
       if (destKey === nk) continue;                           // source ≠ dest
       if (occupied(board, dest.q, dest.r)) continue;         // must be empty
-
-      // The piece travels over the pillbug, so it needs to be able to
-      // leave its current hex and enter the destination hex at pillbug height.
-      // Simplified check: the destination gate from the pillbug's position.
-      // We use canSlide from nk→destKey using a virtual board where nk is empty.
-      // (The piece rises up over the pillbug and descends — treated as height 2.)
-      // In practice the standard gate check suffices for most positions.
+      if (!canSlide(lifted, q, r, dest.q, dest.r, liftH)) continue;
       throws.push({ from: nk, to: destKey });
     }
   }
@@ -635,6 +637,22 @@ export function getLegalMoves(state, fromKey) {
 }
 
 /**
+ * Explain why the piece at fromKey has no legal moves, for UI hints.
+ * Returns null when the piece can move, otherwise one of:
+ *   'EMPTY' | 'NOT_YOUR_PIECE' | 'QUEEN_NOT_PLACED' | 'JUST_THROWN' | 'ONE_HIVE' | 'NO_MOVES'
+ * Pillbug throws are not considered; a pinned pillbug may still throw.
+ */
+export function getMoveBlocker(state, fromKey) {
+  const stack = state.board.get(fromKey);
+  if (!stack) return 'EMPTY';
+  if (topOf(stack).player !== state.turn) return 'NOT_YOUR_PIECE';
+  if (!state.queenPlaced[state.turn]) return 'QUEEN_NOT_PLACED';
+  if (fromKey === state.pillbugThrewHex) return 'JUST_THROWN';
+  if (isArticulationPoint(state.board, fromKey)) return 'ONE_HIVE';
+  return getLegalMoves(state, fromKey).length ? null : 'NO_MOVES';
+}
+
+/**
  * Get all legal pillbug throws available to the current player.
  *
  * A pillbug (or mosquito adjacent to a pillbug) can throw instead of moving.
@@ -649,6 +667,7 @@ export function getLegalThrows(state) {
   for (const [key, stack] of board.entries()) {
     const piece = topOf(stack);
     if (piece.player !== turn) continue;
+    if (key === state.pillbugThrewHex) continue; // a just-thrown piece can't use its ability
     // NOTE: do NOT check isArticulationPoint on the pillbug here —
     // the pillbug does not move when throwing, so it staying connected is irrelevant.
     // The AP check on the THROWN PIECE is handled inside pillbugThrows().

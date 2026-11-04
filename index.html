@@ -2,11 +2,13 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="theme-color" content="#05050f">
+  <meta name="description" content="Hive — the abstract strategy board game. Pass-and-play or online with a room code.">
   <title>HIVE</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -18,6 +20,11 @@
   <div id="menu-screen" aria-hidden="true">
     <main id="menu-shell">
       <div id="menu-brand">
+        <svg id="menu-logo" viewBox="0 0 120 72" aria-hidden="true">
+          <polygon class="logo-hex p1" points="20,6 40,6 50,23 40,40 20,40 10,23"/>
+          <polygon class="logo-hex gold" points="50,23 70,23 80,40 70,57 50,57 40,40"/>
+          <polygon class="logo-hex p2" points="80,6 100,6 110,23 100,40 80,40 70,23"/>
+        </svg>
         <p class="menu-eyebrow">THE ABSTRACT STRATEGY GAME</p>
         <div id="menu-title" aria-label="Hive">
           <span class="title-letter t-p1" aria-hidden="true">H</span><span
@@ -29,33 +36,52 @@
       </div>
 
       <section id="menu-card" aria-label="Game setup">
+        <button id="btn-continue" class="continue-card" type="button" hidden>
+          <span class="continue-icon" aria-hidden="true">▶</span>
+          <span class="continue-text">
+            <span class="continue-title">CONTINUE GAME</span>
+            <span class="continue-sub" id="continue-sub"></span>
+          </span>
+        </button>
+
         <p class="section-kicker">CHOOSE HOW TO PLAY</p>
-        <div id="mode-row">
+        <div id="mode-row" role="group" aria-label="Game mode">
           <button class="mode-btn selected" data-mode="LOCAL" aria-pressed="true">
-            <span class="mode-icon" aria-hidden="true">🏠</span>
+            <span class="mode-icon" data-sprite="HOUSE" aria-hidden="true"></span>
             <span class="mode-label">LOCAL</span>
             <span class="mode-sub">PASS &amp; PLAY</span>
           </button>
           <button class="mode-btn" data-mode="HOST" aria-pressed="false">
-            <span class="mode-icon" aria-hidden="true">📡</span>
+            <span class="mode-icon" data-sprite="SIGNAL" aria-hidden="true"></span>
             <span class="mode-label">HOST</span>
             <span class="mode-sub">CREATE ROOM</span>
           </button>
           <button class="mode-btn" data-mode="JOIN" aria-pressed="false">
-            <span class="mode-icon" aria-hidden="true">🎮</span>
+            <span class="mode-icon" data-sprite="GAMEPAD" aria-hidden="true"></span>
             <span class="mode-label">JOIN</span>
             <span class="mode-sub">ENTER CODE</span>
           </button>
         </div>
 
         <div id="settings-panel"></div>
-        <button id="btn-start" class="ready">START GAME</button>
+        <button id="btn-start" class="btn btn-primary">START GAME</button>
 
-        <div id="online-panel" aria-live="polite">
+        <div id="online-panel" aria-live="polite" hidden>
           <p id="online-status"></p>
-          <button id="btn-cancel-online" style="display:none">CANCEL</button>
+          <div id="room-share" hidden>
+            <p class="room-label">ROOM CODE</p>
+            <p id="room-code" class="room-code"></p>
+            <div class="room-actions">
+              <button id="btn-copy-code" class="btn btn-ghost btn-small" type="button">COPY CODE</button>
+              <button id="btn-share-link" class="btn btn-ghost btn-small" type="button">SHARE LINK</button>
+            </div>
+            <p class="room-waiting"><span class="dot-pulse" aria-hidden="true"></span>WAITING FOR OPPONENT</p>
+          </div>
+          <button id="btn-cancel-online" class="btn btn-ghost btn-small" type="button">CANCEL</button>
         </div>
-        <button id="btn-rules" type="button">HOW TO PLAY</button>
+        <p id="menu-error" role="alert" hidden></p>
+
+        <button id="btn-rules" class="btn-link" type="button">HOW TO PLAY</button>
       </section>
       <p id="menu-footnote">NO BOARD. NO CAPTURES. JUST STRATEGY.</p>
     </main>
@@ -69,10 +95,10 @@
           <p class="rules-kicker">FIELD MANUAL</p>
           <h2 id="rules-title">HOW TO PLAY</h2>
         </div>
-        <button id="btn-close-rules" type="button" aria-label="Close rules">✕</button>
+        <button id="btn-close-rules" class="icon-btn" type="button" aria-label="Close rules"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
       </header>
 
-      <div id="rules-content">
+      <div id="rules-content" tabindex="0">
         <section>
           <h3>OBJECTIVE</h3>
           <p>Completely surround your opponent’s Queen Bee. The six surrounding pieces can belong to either player.</p>
@@ -93,14 +119,24 @@
         <section class="rules-piece-guide">
           <h3>PIECE GUIDE</h3>
           <dl>
-            <div><dt>QUEEN</dt><dd>Slides one space.</dd></div>
-            <div><dt>BEETLE</dt><dd>Moves one space and can climb onto the hive.</dd></div>
-            <div><dt>GRASSHOPPER</dt><dd>Jumps in a straight line over one or more pieces.</dd></div>
-            <div><dt>ANT</dt><dd>Slides any distance around the hive.</dd></div>
-            <div><dt>SPIDER</dt><dd>Slides exactly three spaces.</dd></div>
-            <div><dt>MOSQUITO</dt><dd>Copies the movement of an adjacent piece.</dd></div>
-            <div><dt>LADYBUG</dt><dd>Moves two spaces over the hive, then one space down.</dd></div>
-            <div><dt>PILLBUG</dt><dd>Slides one space or relocates an adjacent piece.</dd></div>
+            <div><dt><span class="dt-sprite" data-sprite="QUEEN" aria-hidden="true"></span>QUEEN</dt><dd>Slides one space.</dd></div>
+            <div><dt><span class="dt-sprite" data-sprite="BEETLE" aria-hidden="true"></span>BEETLE</dt><dd>Moves one space and can climb onto the hive.</dd></div>
+            <div><dt><span class="dt-sprite" data-sprite="GRASSHOPPER" aria-hidden="true"></span>GRASSHOPPER</dt><dd>Jumps in a straight line over one or more pieces.</dd></div>
+            <div><dt><span class="dt-sprite" data-sprite="ANT" aria-hidden="true"></span>ANT</dt><dd>Slides any distance around the hive.</dd></div>
+            <div><dt><span class="dt-sprite" data-sprite="SPIDER" aria-hidden="true"></span>SPIDER</dt><dd>Slides exactly three spaces.</dd></div>
+            <div><dt><span class="dt-sprite" data-sprite="MOSQUITO" aria-hidden="true"></span>MOSQUITO</dt><dd>Copies the movement of an adjacent piece.</dd></div>
+            <div><dt><span class="dt-sprite" data-sprite="LADYBUG" aria-hidden="true"></span>LADYBUG</dt><dd>Moves two spaces over the hive, then one space down.</dd></div>
+            <div><dt><span class="dt-sprite" data-sprite="PILLBUG" aria-hidden="true"></span>PILLBUG</dt><dd>Slides one space or relocates an adjacent piece.</dd></div>
+          </dl>
+        </section>
+
+        <section class="rules-controls">
+          <h3>CONTROLS</h3>
+          <dl>
+            <div><dt>TAP</dt><dd>Select a piece, then tap a green hex. Amber rings mark pieces a pillbug can throw.</dd></div>
+            <div><dt>DRAG · PINCH</dt><dd>Pan and zoom the board. Scroll wheel zooms on desktop.</dd></div>
+            <div><dt><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="6"/><path d="M12 2v5M12 17v5M2 12h5M17 12h5"/></svg> RECENTER</dt><dd>Fit the whole hive back in view.</dd></div>
+            <div><dt>KEYS</dt><dd><kbd>Esc</kbd> cancel · <kbd>Z</kbd> undo (local) · <kbd>C</kbd> recenter · <kbd>+</kbd>/<kbd>−</kbd> zoom</dd></div>
           </dl>
         </section>
       </div>
@@ -109,49 +145,81 @@
 
   <!-- GAME UI -->
   <header id="hud">
-    <div id="player-tag" class="p1">P1</div>
-    <div id="status-text">SELECT A PIECE</div>
-    <button class="hud-btn hud-action hidden" id="btn-pass">PASS</button>
-    <button class="hud-btn hidden" id="btn-cancel" aria-label="Cancel selection">✕</button>
-    <button class="hud-btn" id="btn-resign" aria-label="Open game menu">☰</button>
+    <div id="turn-chip" class="p1" aria-live="polite">
+      <span class="chip-hex" aria-hidden="true"></span>
+      <span class="chip-text">
+        <span id="chip-label">P1</span>
+        <span id="chip-sub">TURN 1</span>
+      </span>
+    </div>
+    <div id="status-text" aria-live="polite">SELECT A PIECE</div>
+    <div id="hud-actions">
+      <button class="hud-btn hud-action hidden" id="btn-pass" type="button">PASS</button>
+      <button class="hud-btn hidden" id="btn-undo" type="button" aria-label="Undo last move" title="Undo (Z)"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 7H4V2"/><path d="M4.5 7A8 8 0 1 1 5 16"/></svg></button>
+      <button class="hud-btn hidden" id="btn-cancel" type="button" aria-label="Cancel selection" title="Cancel (Esc)"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      <button class="hud-btn" id="btn-menu" type="button" aria-label="Game menu" aria-haspopup="menu" aria-expanded="false" aria-controls="game-menu"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+    </div>
   </header>
+
+  <nav id="game-menu" role="menu" aria-label="Game menu" hidden>
+    <button role="menuitem" type="button" data-action="rules"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2z"/><path d="M4 19V5"/></svg> HOW TO PLAY</button>
+    <button role="menuitem" type="button" data-action="recenter"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="6"/><path d="M12 2v5M12 17v5M2 12h5M17 12h5"/></svg> RECENTER VIEW</button>
+    <button role="menuitem" type="button" data-action="restart" data-local-only><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg> RESTART GAME</button>
+    <button role="menuitem" type="button" data-action="rematch" data-finished-only hidden><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg> REMATCH</button>
+    <button role="menuitem" type="button" data-action="quit" class="danger"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3v8"/><path d="M6.4 6.6a8 8 0 1 0 11.2 0"/></svg> <span id="menu-quit-label">QUIT TO MENU</span></button>
+  </nav>
 
   <div id="piece-desc" aria-live="polite"></div>
   <div id="piece-tooltip" role="tooltip" aria-hidden="true">
     <strong id="piece-tooltip-name"></strong>
     <span id="piece-tooltip-copy"></span>
+    <ol id="piece-tooltip-stack" hidden></ol>
   </div>
 
   <canvas id="board" aria-label="Hive game board"></canvas>
   <canvas id="emoji-layer" aria-hidden="true"></canvas>
-  <div id="board-hint" aria-live="polite">DRAG TO PAN · PINCH OR SCROLL TO ZOOM</div>
+  <div id="board-hint" aria-hidden="true">DRAG TO PAN · PINCH OR SCROLL TO ZOOM</div>
 
-  <footer id="tray">
-    <div id="tray-pieces"></div>
-  </footer>
-
-  <div id="interstitial" aria-hidden="true" role="button" tabindex="-1">
-    <div class="inter-hex-ring" id="inter-ring"></div>
-    <p id="inter-headline"></p>
-    <p id="inter-sub">TAP TO CONTINUE</p>
+  <div id="turn-banner" aria-hidden="true">
+    <span class="banner-hex" id="banner-emoji"></span>
+    <span id="banner-text"></span>
   </div>
 
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <button id="btn-recenter" class="float-btn" type="button" aria-label="Recenter board" title="Recenter (C)"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="6"/><path d="M12 2v5M12 17v5M2 12h5M17 12h5"/></svg></button>
+
+  <footer id="tray">
+    <div id="reserve-row" aria-label="Opponent's remaining pieces">
+      <span id="reserve-label"></span>
+      <span id="reserve-pieces"></span>
+    </div>
+    <div id="tray-pieces" role="toolbar" aria-label="Your pieces"></div>
+  </footer>
+
   <canvas id="confetti-layer" aria-hidden="true"></canvas>
-  <div id="win-screen" aria-hidden="true">
-    <p id="win-headline"></p>
-    <div id="win-actions">
-      <button id="btn-to-menu">MAIN MENU</button>
+  <div id="win-screen" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="win-headline">
+    <div id="win-card">
+      <div id="win-emblem" aria-hidden="true"></div>
+      <p id="win-kicker">GAME OVER</p>
+      <p id="win-headline"></p>
+      <p id="win-reason"></p>
+      <div id="win-actions">
+        <button id="btn-rematch" class="btn btn-primary" type="button">REMATCH</button>
+        <button id="btn-view-board" class="btn btn-ghost" type="button">VIEW BOARD</button>
+        <button id="btn-to-menu" class="btn btn-ghost" type="button">MAIN MENU</button>
+      </div>
     </div>
   </div>
 
-  <!-- RESIGN CONFIRM -->
-  <div id="resign-confirm" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="resign-question">
+  <!-- CONFIRM DIALOG -->
+  <div id="resign-confirm" aria-hidden="true" role="alertdialog" aria-modal="true" aria-labelledby="resign-question" aria-describedby="resign-sub">
     <div id="resign-dialog">
       <p id="resign-question">QUIT TO MENU?</p>
-      <p id="resign-sub">current game will be lost</p>
+      <p id="resign-sub">This game will be lost.</p>
       <div id="resign-btns">
-        <button id="btn-resign-yes">YES, QUIT</button>
-        <button id="btn-resign-no">KEEP PLAYING</button>
+        <button id="btn-resign-no" class="btn btn-ghost" type="button">KEEP PLAYING</button>
+        <button id="btn-resign-yes" class="btn btn-danger" type="button">YES, QUIT</button>
       </div>
     </div>
   </div>

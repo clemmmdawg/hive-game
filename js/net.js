@@ -20,6 +20,7 @@ let _url             = null;
 let _handlers        = {};   // type → handler function
 let _reconnectDelay  = 2000;
 let _reconnecting    = false;
+let _reconnectTimer  = null;
 let _intentionalClose = false;
 
 const MAX_DELAY = 16_000;
@@ -42,6 +43,7 @@ export function connect(url) {
       : location.pathname.substring(0, location.pathname.lastIndexOf('/') + 1);
     url = `${proto}//${location.host}${path}`;
   }
+  _closeSocket();
   _url              = url;
   _intentionalClose = false;
   _reconnectDelay   = 2000;
@@ -60,11 +62,7 @@ export function send(type, payload = {}) {
 /** Close the connection without triggering reconnect logic. */
 export function disconnect() {
   _intentionalClose = true;
-  if (_socket) {
-    _socket.close();
-    _socket = null;
-  }
-  _reconnecting = false;
+  _closeSocket();
 }
 
 /**
@@ -94,30 +92,45 @@ export function isConnected() {
 function _open() {
   if (_reconnecting) return;
 
-  _socket = new WebSocket(_url);
+  // Every listener checks it still belongs to the current socket, so a stale
+  // socket closing late can never dispatch events or schedule a reconnect.
+  const socket = new WebSocket(_url);
+  _socket = socket;
 
-  _socket.addEventListener('open', () => {
+  socket.addEventListener('open', () => {
+    if (socket !== _socket) return;
     _reconnectDelay = 2000; // reset backoff on success
-    _reconnecting   = false;
     console.log('[net] Connected to', _url);
     _dispatch('_connected', {});
   });
 
-  _socket.addEventListener('message', (event) => {
+  socket.addEventListener('message', (event) => {
+    if (socket !== _socket) return;
     let msg;
     try { msg = JSON.parse(event.data); } catch { return; }
     _dispatch(msg.type, msg);
   });
 
-  _socket.addEventListener('close', () => {
-    if (_intentionalClose) return;
+  socket.addEventListener('close', () => {
+    if (socket !== _socket || _intentionalClose) return;
+    _socket = null;
     _dispatch('_disconnected', {});
     _scheduleReconnect();
   });
 
-  _socket.addEventListener('error', () => {
+  socket.addEventListener('error', () => {
     // 'error' is always followed by 'close'; handle everything there.
   });
+}
+
+/** Drop the current socket and any pending reconnect without dispatching events. */
+function _closeSocket() {
+  if (_reconnectTimer) clearTimeout(_reconnectTimer);
+  _reconnectTimer = null;
+  _reconnecting   = false;
+  const socket = _socket;
+  _socket = null;
+  if (socket && socket.readyState <= WebSocket.OPEN) socket.close();
 }
 
 function _scheduleReconnect() {
@@ -127,8 +140,9 @@ function _scheduleReconnect() {
   _reconnectDelay = Math.min(_reconnectDelay * 2, MAX_DELAY);
 
   console.log(`[net] Reconnecting in ${delay}ms…`);
-  setTimeout(() => {
-    _reconnecting = false;
+  _reconnectTimer = setTimeout(() => {
+    _reconnectTimer = null;
+    _reconnecting   = false;
     if (!_intentionalClose) _open();
   }, delay);
 }

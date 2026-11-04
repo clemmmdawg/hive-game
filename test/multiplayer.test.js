@@ -41,3 +41,27 @@ test('pass is rejected while any legal action exists', () => {
   const result = validateAction(state, { type: ActionType.PASS }, 1);
   assert.equal(result.reason, 'CANNOT_PASS');
 });
+
+test('static server only resolves files meant for the browser', async () => {
+  const { resolveStaticPath } = await import('../server/static.js');
+  const root = '/srv/hive';
+  assert.equal(resolveStaticPath(root, '/'), '/srv/hive/index.html');
+  assert.equal(resolveStaticPath(root, '/index.html?room=ABCD'), '/srv/hive/index.html');
+  assert.equal(resolveStaticPath(root, '/js/app.js'), '/srv/hive/js/app.js');
+  assert.equal(resolveStaticPath(root, '/assets/pieces/ant.png'), '/srv/hive/assets/pieces/ant.png');
+  for (const blocked of [
+    '/.git/config', '/server/server.js', '/package.json', '/node_modules/ws/index.js',
+    '/test/game.test.js', '/js/../server/rooms.js', '/js/%2e%2e/server/rooms.js',
+    '/../hive2/index.html', '/CLAUDE.md',
+  ]) {
+    assert.equal(resolveStaticPath(root, blocked), null, blocked);
+  }
+});
+
+test('resigning is rejected once the game already has a winner', async () => {
+  const { resolveResign } = await import('../server/validator.js');
+  const live = createGame({});
+  assert.deepEqual(resolveResign(live, 1), { valid: true, winner: 2 });
+  assert.deepEqual(resolveResign({ ...live, winner: 1 }, 2), { valid: false, reason: 'GAME_OVER' });
+  assert.deepEqual(resolveResign(null, 1), { valid: false, reason: 'NO_ACTIVE_GAME' });
+});
