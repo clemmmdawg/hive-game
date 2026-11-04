@@ -131,7 +131,8 @@ let winTimer     = null;
 let winFxTimer   = null;   // shockwave + dim when the winning move did not fly
 let winTouchdown = null;   // …or run by board.onLand when the winning piece touches down
 let holdResult   = false;  // the winning piece is still in the air: the HUD keeps the result for the impact
-let dangerTimer  = null;   // queen-in-danger alarm, held back until the piece lands
+let dangerTimer  = null;   // queen-in-danger alarm for a move that did not fly
+let landingAlarm = null;   // …or raised by board.onLand when the piece that caused it touches down
 let turnSoundTimer = null; // "your turn" chime, held back until the opponent's piece lands
 let connectionNotice = null; // shown in place of the status line while offline
 let opponentAway = false;
@@ -257,7 +258,7 @@ function cancelTimers() {
   if (turnSoundTimer) clearTimeout(turnSoundTimer);
   if (winFxTimer) clearTimeout(winFxTimer);
   if (dangerTimer) clearTimeout(dangerTimer);
-  passTimer = winTimer = turnSoundTimer = winFxTimer = dangerTimer = winTouchdown = null;
+  passTimer = winTimer = turnSoundTimer = winFxTimer = dangerTimer = winTouchdown = landingAlarm = null;
   holdResult = false;
 }
 
@@ -535,10 +536,11 @@ function onStateChanged(prev, { animate = true, move = null } = {}) {
   syncBoardRenderer();
   const won = !!gameState.winner;
   const flying = !!(lastMove && animate && move && !board.reducedMotion);
+  const dangers = animate && !won ? newDangers(prev ? queenPressure(prev) : null, queenPressure(gameState)) : [];
   // The winning move plays in slow motion (see winTiming).
-  if (flying) board.animateMove({ ...move, toKey: lastMove.to, player: lastMove.player, speed: won ? 0.4 : 1 });
-  else if (lastMove && animate) board.markArrival(lastMove.to);
-  if (lastMove && animate) playMoveSound(move?.kind, board.hiddenTop.has(lastMove.to));
+  const landed = flying ? board.animateMove({ ...move, toKey: lastMove.to, player: lastMove.player, speed: won ? 0.4 : 1 }) : null;
+  if (!flying && lastMove && animate) board.markArrival(lastMove.to);
+  if (lastMove && animate) playMoveSound(move?.kind, board.hiddenTop.has(lastMove.to), { alarm: dangers.length > 0 });
   board.reveal(board.pieces.keys());
   holdResult = won && flying;
   syncUI();
@@ -550,8 +552,7 @@ function onStateChanged(prev, { animate = true, move = null } = {}) {
     return;
   }
   const landingMs = flying ? moveDuration(move.kind, move.path.length - 1) : 0;
-  const dangers = animate ? newDangers(prev ? queenPressure(prev) : null, queenPressure(gameState)) : [];
-  announceTurn(landingMs, dangers);
+  announceTurn(landingMs, dangers, landed);
 }
 
 /**
@@ -606,15 +607,24 @@ function hideBoardDim() {
 /**
  * Departure whoosh for a flying move; the landing thump (`place`, with the haptic)
  * comes from board.onLand at touchdown. A piece that does not fly (reduced motion,
- * no route) just lands at once.
+ * no route) just lands at once — without its buzz when an alarm follows, so the
+ * alarm's own pattern is what the player feels.
  */
-function playMoveSound(kind, inFlight) {
-  if (!inFlight) { sfx.play('place'); return; }
+function playMoveSound(kind, inFlight, { alarm = false } = {}) {
+  if (!inFlight) { sfx.play('place', { haptic: !alarm }); return; }
   if (kind && kind !== 'place') sfx.play(kind, { haptic: false });
 }
+
+/**
+ * Touchdown of a flown move: the thump, then whatever was waiting for it (the win
+ * impact, a queen-danger alarm). An alarm brings its own haptic, so the 12 ms
+ * landing buzz steps aside rather than cutting the alarm's pattern short.
+ */
 board.onLand = () => {
-  sfx.play('place');
-  winTouchdown?.();
+  const alarms = [winTouchdown, landingAlarm].filter(Boolean);
+  landingAlarm = null;
+  sfx.play('place', { haptic: !alarms.length });
+  for (const fire of alarms) fire();
 };
 
 /**
@@ -623,13 +633,13 @@ board.onLand = () => {
  * `dangers`: players whose queen this move put one side from surrounded (newDangers);
  * their alarm replaces the turn banner and chime.
  */
-function announceTurn(landingMs = 0, dangers = []) {
+function announceTurn(landingMs = 0, dangers = [], landed = null) {
   if (!gameState || gameState.winner) return;
   const turn = gameState.turn;
 
   if (gameMode === 'ONLINE') {
     const mustPass = turn === myPlayer && getAllLegalActions(gameState).mustPass;
-    if (dangers.length) raiseDangerAlarm(dangers, landingMs, { banner: !mustPass });
+    if (dangers.length) raiseDangerAlarm(dangers, landed, { banner: !mustPass });
     if (turn === myPlayer) {
       if (mustPass || !dangers.length) showBanner(mustPass ? 'NO MOVES — TAP PASS' : 'YOUR TURN', mustPass ? 'gold' : `p${turn}`);
       if (!dangers.length) playTurnChime(landingMs);
@@ -639,7 +649,7 @@ function announceTurn(landingMs = 0, dangers = []) {
 
   if (getAllLegalActions(gameState).mustPass) {
     showBanner(`P${turn} HAS NO MOVES — PASSING`, 'gold', PieceType.QUEEN, 1600);
-    if (dangers.length) raiseDangerAlarm(dangers, landingMs, { banner: false });
+    if (dangers.length) raiseDangerAlarm(dangers, landed, { banner: false });
     else playTurnChime(landingMs);
     const stuck = gameState;
     passTimer = setTimeout(() => {
@@ -656,19 +666,23 @@ function announceTurn(landingMs = 0, dangers = []) {
     return;
   }
 
-  if (dangers.length) raiseDangerAlarm(dangers, landingMs);
+  if (dangers.length) raiseDangerAlarm(dangers, landed);
   else showBanner(`PLAYER ${turn}'S TURN`, `p${turn}`, PieceType.QUEEN, 1100);
 }
 
 /**
- * A queen just reached five occupied sides: once the piece lands, the `danger`
- * sting, a red banner, and a jolt of the HUD meter. Fires once per transition
- * (the caller passes only newDangers()).
+ * A queen just reached five occupied sides: the `danger` sting, a red banner, and
+ * a jolt of the HUD meter. Fires once per transition (the caller passes only
+ * newDangers()). `landed` is the flight of the move that caused it: the alarm
+ * goes off at its touchdown (board.onLand), or when it is snapped home without
+ * one; a move that did not fly raises it at once.
  */
-function raiseDangerAlarm(players, landingMs, { banner = true } = {}) {
+function raiseDangerAlarm(players, landed, { banner = true } = {}) {
   if (dangerTimer) clearTimeout(dangerTimer);
-  dangerTimer = setTimeout(() => {
+  const fire = () => {
+    if (dangerTimer) clearTimeout(dangerTimer);
     dangerTimer = null;
+    if (landingAlarm === fire) landingAlarm = null;
     if (!gameState || gameState.winner) return;
     sfx.play('danger');
     if (banner) {
@@ -681,7 +695,10 @@ function raiseDangerAlarm(players, landingMs, { banner = true } = {}) {
       void meter.offsetWidth; // restart the one-shot animation
       meter.classList.add('alarm');
     }
-  }, landingMs);
+  };
+  if (!landed) { dangerTimer = setTimeout(fire, 0); return; }
+  landingAlarm = fire;
+  landed.then(() => { if (landingAlarm === fire) fire(); }); // snapped home: no touchdown came
 }
 
 /**
