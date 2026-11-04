@@ -9,6 +9,7 @@ import {
   getMoveBlocker,
 } from '../js/game.js';
 
+const ANT_EDGE_SET = ['-1,0', '-1,3', '-2,1', '-2,2', '-2,3', '0,1', '0,3', '1,0', '1,2', '2,0', '2,1'];
 const P = (player, type) => ({ player, type });
 
 /** Build a mid-game state with both queens flagged as placed. */
@@ -126,4 +127,68 @@ test('getMoveBlocker reports a piece with no legal destinations', () => {
   ]);
   // 0,1 is the only empty neighbor; its gates -1,1 and 1,0 are both occupied.
   assert.equal(getMoveBlocker(state, '0,0'), 'NO_MOVES');
+});
+
+// ── Ground slides keep hive contact ──────────────────────────────────────────
+
+function isolatedMover(type) {
+  // 0,0 touches the hive only through the far side; 1,0 touches nothing.
+  return position([
+    ['0,0',  [P(1, type)]],
+    ['-1,1', [P(2, PieceType.QUEEN)]],
+    ['-1,2', [P(1, PieceType.QUEEN)]],
+    ['0,2',  [P(2, PieceType.ANT)]],
+    ['1,1',  [P(1, PieceType.ANT)]],
+  ], { pillbug: true });
+}
+
+test('beetle may still climb, but cannot slide to a hex that loses contact', () => {
+  const moves = getLegalMoves(isolatedMover(PieceType.BEETLE), '0,0').sort();
+  assert.deepEqual(moves, ['-1,0', '-1,1', '0,1']);
+});
+
+for (const type of [PieceType.QUEEN, PieceType.PILLBUG]) {
+  test(`${type} cannot slide to a hex that loses contact with the hive`, () => {
+    const moves = getLegalMoves(isolatedMover(type), '0,0').sort();
+    assert.deepEqual(moves, ['-1,0', '0,1']);
+  });
+}
+
+test('spider cannot take a step that loses contact with the hive', () => {
+  assert.deepEqual(getLegalMoves(isolatedMover(PieceType.SPIDER), '0,0').sort(), ['-2,2', '2,0']);
+});
+
+test('ant reaches 1,0 only by walking around the hive edge', () => {
+  const moves = getLegalMoves(isolatedMover(PieceType.ANT), '0,0').sort();
+  assert.ok(moves.includes('1,0'));
+  assert.ok(!moves.includes('0,0'));
+  assert.deepEqual(moves, ANT_EDGE_SET);
+});
+
+test('ladybug cannot cross between two height-2 stacks', () => {
+  // Step 2 from 1,0 to 2,0 passes between 1,1 and 2,-1 (both height 2, level 2).
+  const gate = (a, b) => [P(a, PieceType.QUEEN), P(b, PieceType.BEETLE)];
+  const build = (g1, g2) => position([
+    ['0,0',  [P(1, PieceType.LADYBUG)]],
+    ['1,0',  [P(2, PieceType.ANT)]],
+    ['2,0',  [P(1, PieceType.ANT)]],
+    ['1,1',  g1],
+    ['2,-1', g2],
+  ]);
+  assert.ok(!getLegalMoves(build(gate(1, 2), gate(2, 1)), '0,0').includes('3,0'));
+  // One single-height gate leaves the crossing open.
+  assert.ok(getLegalMoves(build([P(1, PieceType.QUEEN)], gate(2, 1)), '0,0').includes('3,0'));
+});
+
+test('pillbug cannot throw the piece the opponent just placed', () => {
+  const state = position([
+    ['0,0',  [P(1, PieceType.PILLBUG)]],
+    ['1,0',  [P(2, PieceType.ANT)]],
+    ['-1,0', [P(1, PieceType.QUEEN)]],
+  ], { pillbug: true });
+  state.turn = 1;
+  state.lastOpponentMovedHex = '1,0';
+  assert.ok(!getLegalThrows(state).some(t => t.from === '1,0'));
+  state.lastOpponentMovedHex = null;
+  assert.ok(getLegalThrows(state).some(t => t.from === '1,0'));
 });

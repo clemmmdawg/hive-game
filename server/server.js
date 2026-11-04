@@ -39,6 +39,7 @@ import {
   touchActivity,
 } from './rooms.js';
 
+import { logEntry } from '../js/notation.js';
 import { validateAction, resolveResign } from './validator.js';
 import { resolveStaticPath } from './static.js';
 
@@ -52,20 +53,8 @@ const DEFAULT_SETTINGS = Object.freeze({
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const ROOT      = join(__dirname, '..');
-const PORT      = readPort(process.argv.slice(2), process.env.PORT);
-
-function readPort(args, envPort) {
-  const flagIndex = args.findIndex(arg => arg === '--port' || arg === '-p');
-  const raw = flagIndex >= 0 ? args[flagIndex + 1] : args[0] ?? envPort ?? '3000';
-  const port = Number(raw);
-
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-    console.error(`Invalid port: ${raw}. Use an integer from 1 to 65535.`);
-    process.exit(1);
-  }
-
-  return port;
-}
+const HEARTBEAT_MS = 30_000;
+const MAX_PAYLOAD  = 64 * 1024; // no legitimate message is anywhere near this
 
 // ── MIME types ───────────────────────────────────────────────────────────────
 
@@ -81,9 +70,9 @@ const MIME = {
   '.woff2':       'font/woff2',
 };
 
-// ── HTTP static server ───────────────────────────────────────────────────────
+// ── HTTP static server + WebSocket server ────────────────────────────────────
 
-const httpServer = createServer((req, res) => {
+function serveStatic(req, res) {
   const filePath = resolveStaticPath(ROOT, req.url);
   if (!filePath) {
     res.writeHead(404, { 'Content-Type': 'text/plain' });
@@ -100,39 +89,72 @@ const httpServer = createServer((req, res) => {
     res.writeHead(404, { 'Content-Type': 'text/plain' });
     res.end('Not found');
   }
-});
+}
 
-// ── WebSocket server ─────────────────────────────────────────────────────────
+/**
+ * Build the HTTP + WebSocket servers (not yet listening). A heartbeat pings
+ * every client each `heartbeatMs`; a client that has not answered the previous
+ * ping is terminated so half-open TCP connections free their seat.
+ */
+export function createHiveServer({ heartbeatMs = HEARTBEAT_MS } = {}) {
+  const httpServer = createServer(serveStatic);
+  const wss = new WebSocketServer({ server: httpServer, maxPayload: MAX_PAYLOAD });
 
-const wss = new WebSocketServer({ server: httpServer });
+  wss.on('connection', (socket) => {
+    socket.isAlive = true;
+    socket.on('pong', () => { socket.isAlive = true; });
 
-wss.on('connection', (socket) => {
-  socket.on('message', (raw) => {
-    let msg;
-    try { msg = JSON.parse(raw.toString()); } catch { return; }
-    handleMessage(socket, msg);
+    socket.on('message', (raw) => {
+      let msg;
+      try { msg = JSON.parse(raw.toString()); } catch { try { socket.send(err('INVALID_MESSAGE')); } catch {} return; }
+      try {
+        handleMessage(socket, msg);
+      } catch (e) {
+        console.error('[server] handler error:', e);
+        try { socket.send(err('INVALID_MESSAGE')); } catch {}
+      }
+    });
+
+    socket.on('close', () => {
+      // A socket superseded by RESUME_ROOM has been detached (_hiveRoom null).
+      const room = getRoom(socket._hiveRoom);
+      if (room) {
+        const playerNum  = socket._hivePlayer;
+        const opponent   = playerNum === 1 ? 2 : 1;
+        removeSocket(socket);
+        sendTo(room, opponent, { type: 'OPPONENT_DISCONNECTED' });
+      }
+    });
+
+    socket.on('error', () => {}); // suppress uncaught errors; 'close' fires after
   });
 
-  socket.on('close', () => {
-    const room = getRoom(socket._hiveRoom);
-    if (room) {
-      const playerNum  = socket._hivePlayer;
-      const opponent   = playerNum === 1 ? 2 : 1;
-      removeSocket(socket);
-      sendTo(room, opponent, { type: 'OPPONENT_DISCONNECTED' });
+  const heartbeat = setInterval(() => {
+    for (const client of wss.clients) {
+      if (client.isAlive === false) { client.terminate(); continue; }
+      client.isAlive = false;
+      try { client.ping(); } catch {}
     }
-  });
+  }, heartbeatMs);
+  heartbeat.unref?.();
+  wss.on('close', () => clearInterval(heartbeat));
+  httpServer.on('close', () => clearInterval(heartbeat));
 
-  socket.on('error', () => {}); // suppress uncaught errors; 'close' fires after
-});
+  return { httpServer, wss };
+}
 
 // ── Message dispatch ─────────────────────────────────────────────────────────
 
-function handleMessage(socket, msg) {
+export function handleMessage(socket, msg) {
+  if (!msg || typeof msg !== 'object' || typeof msg.type !== 'string') {
+    socket.send(err('INVALID_MESSAGE'));
+    return;
+  }
   switch (msg.type) {
 
     // ── Host creates a new room ────────────────────────────────────────────
     case 'CREATE_ROOM': {
+      if (socket._hiveRoom) { socket.send(err('ALREADY_IN_ROOM')); return; }
       const settings = normalizeSettings(msg.settings);
       const room     = createRoom(settings);
 
@@ -155,6 +177,7 @@ function handleMessage(socket, msg) {
 
     // ── Second player joins an existing room ───────────────────────────────
     case 'JOIN_ROOM': {
+      if (socket._hiveRoom) { socket.send(err('ALREADY_IN_ROOM')); return; }
       const code = String(msg.code ?? '').toUpperCase().trim();
       const room = getRoom(code);
 
@@ -179,6 +202,7 @@ function handleMessage(socket, msg) {
 
       // Both players present — start the game
       room.gameState = createGame(room.settings);
+      room.history   = [];
       const snap     = serializeState(room.gameState);
 
       // Tell each player their assigned number
@@ -186,7 +210,7 @@ function handleMessage(socket, msg) {
       sendTo(room, 2, { type: 'PLAYER_ASSIGNMENT', player: 2, token: room.tokens[1] });
 
       // Broadcast the initial game state to both
-      broadcast(room, { type: 'GAME_START', gameState: snap, settings: room.settings });
+      broadcast(room, { type: 'GAME_START', gameState: snap, settings: room.settings, history: [] });
 
       console.log(`[server] Room ${room.code} game started`);
       break;
@@ -196,6 +220,10 @@ function handleMessage(socket, msg) {
     case 'RESUME_ROOM': {
       const code  = String(msg.code ?? '').toUpperCase().trim();
       const token = String(msg.token ?? '');
+      if (socket._hiveRoom && socket._hiveToken !== token) {
+        socket.send(err('ALREADY_IN_ROOM'));
+        return;
+      }
       const result = resumeRoom(code, token, socket);
       if (result.error) { socket.send(err(result.error)); return; }
 
@@ -206,8 +234,11 @@ function handleMessage(socket, msg) {
         token: result.token,
         gameState: result.room.gameState ? serializeState(result.room.gameState) : null,
         settings: result.room.settings,
+        history: result.room.history,
+        ...(result.room.endReason ? { endReason: result.room.endReason } : {}),
       }));
 
+      console.log(`[server] Room ${code} player ${result.playerNum} resumed`);
       const opponent = result.playerNum === 1 ? 2 : 1;
       sendTo(result.room, opponent, { type: 'OPPONENT_RECONNECTED' });
       break;
@@ -230,14 +261,17 @@ function handleMessage(socket, msg) {
         return;
       }
 
+      room.history.push(logEntry(room.gameState, action));
       room.gameState = applyAction(room.gameState, action);
       touchActivity(room);
 
       const snap = serializeState(room.gameState);
-      broadcast(room, { type: 'GAME_STATE', gameState: snap });
+      broadcast(room, { type: 'GAME_STATE', gameState: snap, history: room.history });
 
       if (room.gameState.winner) {
-        broadcast(room, { type: 'GAME_OVER', winner: room.gameState.winner });
+        const winner = room.gameState.winner;
+        room.endReason = winner === 'DRAW' ? 'DRAW' : 'QUEEN';
+        broadcast(room, { type: 'GAME_OVER', winner, reason: room.endReason });
         console.log(`[server] Room ${room.code} game over — winner: ${room.gameState.winner}`);
       }
       break;
@@ -251,6 +285,7 @@ function handleMessage(socket, msg) {
 
       const winner = resign.winner;
       room.gameState = { ...room.gameState, winner };
+      room.endReason = 'RESIGN';
       touchActivity(room);
 
       broadcast(room, { type: 'GAME_OVER', winner, reason: 'RESIGN' });
@@ -285,8 +320,9 @@ function err(reason) {
   return JSON.stringify({ type: 'ERROR', reason });
 }
 
-function normalizeSettings(input = {}) {
-  const expansions = input && typeof input.expansions === 'object' ? input.expansions : {};
+function normalizeSettings(raw) {
+  const input = raw && typeof raw === 'object' ? raw : {};
+  const expansions = input.expansions && typeof input.expansions === 'object' ? input.expansions : {};
   return {
     expansions: {
       mosquito: !!expansions.mosquito,
@@ -298,9 +334,3 @@ function normalizeSettings(input = {}) {
     clock: { ...DEFAULT_SETTINGS.clock },
   };
 }
-
-// ── Boot ─────────────────────────────────────────────────────────────────────
-
-httpServer.listen(PORT, () => {
-  console.log(`HIVE server listening on http://localhost:${PORT}`);
-});

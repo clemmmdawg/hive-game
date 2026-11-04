@@ -4,12 +4,17 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Hive">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="theme-color" content="#05050f">
   <meta name="description" content="Hive — the abstract strategy board game. Pass-and-play or online with a room code.">
   <title>HIVE</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" type="image/png" sizes="32x32" href="assets/icons/favicon-32.png">
+  <link rel="icon" type="image/svg+xml" href="assets/icons/icon.svg">
+  <link rel="apple-touch-icon" href="assets/icons/apple-touch-icon-180.png">
+  <link rel="preload" href="assets/fonts/press-start-2p-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -18,6 +23,7 @@
 
   <!-- MENU SCREEN -->
   <div id="menu-screen" aria-hidden="true">
+    <button id="btn-sound-menu" class="icon-btn" type="button" aria-pressed="true" aria-label="Sound on — mute" title="Mute (M)"><svg class="icon icon-sound-on" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4.2 4.2 0 0 1 0 6"/><path d="M18.3 6.3a8 8 0 0 1 0 11.4"/></svg><svg class="icon icon-sound-off" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M16 9.5l5 5M21 9.5l-5 5"/></svg></button>
     <main id="menu-shell">
       <div id="menu-brand">
         <svg id="menu-logo" viewBox="0 0 120 72" aria-hidden="true">
@@ -88,7 +94,7 @@
   </div>
 
   <!-- RULES DIALOG -->
-  <div id="rules-overlay" aria-hidden="true">
+  <div id="rules-overlay" aria-hidden="true" inert>
     <section id="rules-dialog" role="dialog" aria-modal="true" aria-labelledby="rules-title">
       <header id="rules-header">
         <div>
@@ -119,14 +125,14 @@
         <section class="rules-piece-guide">
           <h3>PIECE GUIDE</h3>
           <dl>
-            <div><dt><span class="dt-sprite" data-sprite="QUEEN" aria-hidden="true"></span>QUEEN</dt><dd>Slides one space.</dd></div>
-            <div><dt><span class="dt-sprite" data-sprite="BEETLE" aria-hidden="true"></span>BEETLE</dt><dd>Moves one space and can climb onto the hive.</dd></div>
-            <div><dt><span class="dt-sprite" data-sprite="GRASSHOPPER" aria-hidden="true"></span>GRASSHOPPER</dt><dd>Jumps in a straight line over one or more pieces.</dd></div>
-            <div><dt><span class="dt-sprite" data-sprite="ANT" aria-hidden="true"></span>ANT</dt><dd>Slides any distance around the hive.</dd></div>
-            <div><dt><span class="dt-sprite" data-sprite="SPIDER" aria-hidden="true"></span>SPIDER</dt><dd>Slides exactly three spaces.</dd></div>
-            <div><dt><span class="dt-sprite" data-sprite="MOSQUITO" aria-hidden="true"></span>MOSQUITO</dt><dd>Copies the movement of an adjacent piece.</dd></div>
-            <div><dt><span class="dt-sprite" data-sprite="LADYBUG" aria-hidden="true"></span>LADYBUG</dt><dd>Moves two spaces over the hive, then one space down.</dd></div>
-            <div><dt><span class="dt-sprite" data-sprite="PILLBUG" aria-hidden="true"></span>PILLBUG</dt><dd>Slides one space or relocates an adjacent piece.</dd></div>
+            <div><dt style="--sp: var(--sp-queen)"><span class="mini-tile guide-tile"><span class="dt-sprite" data-sprite="QUEEN" aria-hidden="true"></span></span>QUEEN</dt><dd>Slides one space.</dd></div>
+            <div><dt style="--sp: var(--sp-beetle)"><span class="mini-tile guide-tile"><span class="dt-sprite" data-sprite="BEETLE" aria-hidden="true"></span></span>BEETLE</dt><dd>Moves one space and can climb onto the hive.</dd></div>
+            <div><dt style="--sp: var(--sp-grasshopper)"><span class="mini-tile guide-tile"><span class="dt-sprite" data-sprite="GRASSHOPPER" aria-hidden="true"></span></span>GRASSHOPPER</dt><dd>Jumps in a straight line over one or more pieces.</dd></div>
+            <div><dt style="--sp: var(--sp-ant)"><span class="mini-tile guide-tile"><span class="dt-sprite" data-sprite="ANT" aria-hidden="true"></span></span>ANT</dt><dd>Slides any distance around the hive.</dd></div>
+            <div><dt style="--sp: var(--sp-spider)"><span class="mini-tile guide-tile"><span class="dt-sprite" data-sprite="SPIDER" aria-hidden="true"></span></span>SPIDER</dt><dd>Slides exactly three spaces.</dd></div>
+            <div><dt style="--sp: var(--sp-mosquito)"><span class="mini-tile guide-tile"><span class="dt-sprite" data-sprite="MOSQUITO" aria-hidden="true"></span></span>MOSQUITO</dt><dd>Copies the movement of an adjacent piece.</dd></div>
+            <div><dt style="--sp: var(--sp-ladybug)"><span class="mini-tile guide-tile"><span class="dt-sprite" data-sprite="LADYBUG" aria-hidden="true"></span></span>LADYBUG</dt><dd>Moves two spaces over the hive, then one space down.</dd></div>
+            <div><dt style="--sp: var(--sp-pillbug)"><span class="mini-tile guide-tile"><span class="dt-sprite" data-sprite="PILLBUG" aria-hidden="true"></span></span>PILLBUG</dt><dd>Slides one space or relocates an adjacent piece.</dd></div>
           </dl>
         </section>
 
@@ -136,7 +142,7 @@
             <div><dt>TAP</dt><dd>Select a piece, then tap a green hex. Amber rings mark pieces a pillbug can throw.</dd></div>
             <div><dt>DRAG · PINCH</dt><dd>Pan and zoom the board. Scroll wheel zooms on desktop.</dd></div>
             <div><dt><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="6"/><path d="M12 2v5M12 17v5M2 12h5M17 12h5"/></svg> RECENTER</dt><dd>Fit the whole hive back in view.</dd></div>
-            <div><dt>KEYS</dt><dd><kbd>Esc</kbd> cancel · <kbd>Z</kbd> undo (local) · <kbd>C</kbd> recenter · <kbd>+</kbd>/<kbd>−</kbd> zoom</dd></div>
+            <div><dt>KEYS</dt><dd><kbd>Esc</kbd> cancel · <kbd>Z</kbd> undo (local) · <kbd>C</kbd> recenter · <kbd>+</kbd>/<kbd>−</kbd> zoom · <kbd>M</kbd> sound</dd></div>
           </dl>
         </section>
       </div>
@@ -152,7 +158,14 @@
         <span id="chip-sub">TURN 1</span>
       </span>
     </div>
-    <div id="status-text" aria-live="polite">SELECT A PIECE</div>
+    <div id="queen-meters">
+      <span class="qm p1" id="qm-1" role="img" aria-label="Player 1 queen not placed"></span>
+      <span class="qm p2" id="qm-2" role="img" aria-label="Player 2 queen not placed"></span>
+    </div>
+    <div id="hud-center">
+      <div id="status-text" aria-live="polite">SELECT A PIECE</div>
+      <div id="piece-desc" aria-live="polite"></div>
+    </div>
     <div id="hud-actions">
       <button class="hud-btn hud-action hidden" id="btn-pass" type="button">PASS</button>
       <button class="hud-btn hidden" id="btn-undo" type="button" aria-label="Undo last move" title="Undo (Z)"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 7H4V2"/><path d="M4.5 7A8 8 0 1 1 5 16"/></svg></button>
@@ -162,14 +175,15 @@
   </header>
 
   <nav id="game-menu" role="menu" aria-label="Game menu" hidden>
+    <button role="menuitem" type="button" data-action="moves"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6h1M4 12h1M4 18h1"/></svg> MOVES</button>
     <button role="menuitem" type="button" data-action="rules"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2z"/><path d="M4 19V5"/></svg> HOW TO PLAY</button>
     <button role="menuitem" type="button" data-action="recenter"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="6"/><path d="M12 2v5M12 17v5M2 12h5M17 12h5"/></svg> RECENTER VIEW</button>
+    <button role="menuitemcheckbox" aria-checked="true" type="button" data-action="sound" title="Toggle sound (M)"><svg class="icon icon-sound-on" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4.2 4.2 0 0 1 0 6"/><path d="M18.3 6.3a8 8 0 0 1 0 11.4"/></svg><svg class="icon icon-sound-off" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M16 9.5l5 5M21 9.5l-5 5"/></svg> <span id="menu-sound-label">SOUND: ON</span></button>
     <button role="menuitem" type="button" data-action="restart" data-local-only><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg> RESTART GAME</button>
     <button role="menuitem" type="button" data-action="rematch" data-finished-only hidden><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg> REMATCH</button>
     <button role="menuitem" type="button" data-action="quit" class="danger"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3v8"/><path d="M6.4 6.6a8 8 0 1 0 11.2 0"/></svg> <span id="menu-quit-label">QUIT TO MENU</span></button>
   </nav>
 
-  <div id="piece-desc" aria-live="polite"></div>
   <div id="piece-tooltip" role="tooltip" aria-hidden="true">
     <strong id="piece-tooltip-name"></strong>
     <span id="piece-tooltip-copy"></span>
@@ -178,6 +192,7 @@
 
   <canvas id="board" aria-label="Hive game board"></canvas>
   <canvas id="emoji-layer" aria-hidden="true"></canvas>
+  <div id="board-dim" aria-hidden="true"></div>
   <div id="board-hint" aria-hidden="true">DRAG TO PAN · PINCH OR SCROLL TO ZOOM</div>
 
   <div id="turn-banner" aria-hidden="true">
@@ -197,15 +212,68 @@
     <div id="tray-pieces" role="toolbar" aria-label="Your pieces"></div>
   </footer>
 
+  <!-- GAME REVIEW: move list sheet, replay / preview controls -->
+  <button id="review-pill" type="button" hidden>
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    <span id="review-pill-label">BACK TO GAME</span>
+  </button>
+
+  <footer id="replay-bar" aria-label="Replay controls" hidden>
+    <div class="rb-head">
+      <div id="rb-label" aria-live="polite">
+        <span id="rb-tile" class="mini-tile" aria-hidden="true"></span>
+        <span class="rb-text">
+          <span id="rb-count">START</span>
+          <span id="rb-notation"></span>
+        </span>
+      </div>
+      <div class="rb-tools">
+        <button id="rb-moves" class="hud-btn" type="button" aria-label="Move list" title="Move list"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6h1M4 12h1M4 18h1"/></svg></button>
+        <button id="rb-copy" class="hud-btn" type="button" aria-label="Copy moves" title="Copy moves"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg></button>
+      </div>
+    </div>
+    <input id="rb-slider" type="range" min="0" max="0" step="1" value="0" aria-label="Move">
+    <div class="rb-transport" role="group" aria-label="Step through the game">
+      <button id="rb-first" class="rb-btn" type="button" aria-label="First position" title="Start (Home)"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 5v14"/><path d="M18 5.5v13L9 12z"/></svg></button>
+      <button id="rb-prev" class="rb-btn" type="button" aria-label="Previous move" title="Previous (←)"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M16 5.5v13L6.5 12z"/></svg></button>
+      <button id="rb-play" class="rb-btn rb-play" type="button" aria-label="Play" title="Play / pause (Space)"><svg class="icon icon-play" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 5.5v13l10.5-6.5z"/></svg><svg class="icon icon-pause" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8.5 5.5v13M15.5 5.5v13"/></svg></button>
+      <button id="rb-next" class="rb-btn" type="button" aria-label="Next move" title="Next (→)"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 5.5v13L17.5 12z"/></svg></button>
+      <button id="rb-last" class="rb-btn" type="button" aria-label="Last position" title="End (End)"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M18 5v14"/><path d="M6 5.5v13L15 12z"/></svg></button>
+    </div>
+  </footer>
+
+  <div id="moves-sheet" aria-hidden="true" inert>
+    <section id="moves-panel" role="dialog" aria-modal="true" aria-labelledby="moves-title">
+      <span class="sheet-grip" aria-hidden="true"></span>
+      <header id="moves-header">
+        <div>
+          <p class="rules-kicker">GAME RECORD</p>
+          <h2 id="moves-title">MOVES</h2>
+        </div>
+        <span id="moves-count"></span>
+        <button id="btn-close-moves" class="icon-btn" type="button" aria-label="Close move list"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </header>
+      <p id="moves-note" hidden></p>
+      <div id="moves-scroll">
+        <ol id="moves-list" aria-label="Moves, oldest first"></ol>
+      </div>
+      <footer id="moves-actions">
+        <button id="btn-copy-moves" class="btn btn-ghost btn-small" type="button"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg> COPY MOVES</button>
+        <button id="btn-moves-replay" class="btn btn-primary btn-small" type="button"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 5.5v13l10.5-6.5z"/></svg> REPLAY</button>
+      </footer>
+    </section>
+  </div>
+
   <canvas id="confetti-layer" aria-hidden="true"></canvas>
-  <div id="win-screen" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="win-headline">
+  <div id="win-screen" aria-hidden="true" inert role="dialog" aria-modal="true" aria-labelledby="win-headline">
     <div id="win-card">
-      <div id="win-emblem" aria-hidden="true"></div>
+      <div id="win-emblem" class="mini-tile" aria-hidden="true"></div>
       <p id="win-kicker">GAME OVER</p>
       <p id="win-headline"></p>
       <p id="win-reason"></p>
       <div id="win-actions">
         <button id="btn-rematch" class="btn btn-primary" type="button">REMATCH</button>
+        <button id="btn-replay" class="btn btn-ghost" type="button"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 5.5v13l10.5-6.5z"/></svg> REPLAY</button>
         <button id="btn-view-board" class="btn btn-ghost" type="button">VIEW BOARD</button>
         <button id="btn-to-menu" class="btn btn-ghost" type="button">MAIN MENU</button>
       </div>
@@ -213,7 +281,7 @@
   </div>
 
   <!-- CONFIRM DIALOG -->
-  <div id="resign-confirm" aria-hidden="true" role="alertdialog" aria-modal="true" aria-labelledby="resign-question" aria-describedby="resign-sub">
+  <div id="resign-confirm" aria-hidden="true" inert role="alertdialog" aria-modal="true" aria-labelledby="resign-question" aria-describedby="resign-sub">
     <div id="resign-dialog">
       <p id="resign-question">QUIT TO MENU?</p>
       <p id="resign-sub">This game will be lost.</p>

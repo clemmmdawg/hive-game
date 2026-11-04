@@ -1,6 +1,6 @@
 // menu.js — Main menu, settings panel, rules dialog, confirm dialog
 // Exports: initMenu(callbacks), showMenu(opts), hideMenu(), leaveOnlineSession(),
-//          showConfirm(opts, onConfirm), showRules(), isOverlayOpen()
+//          showConfirm(opts, onConfirm), showRules(), isOverlayOpen(), copyText(text)
 
 import * as net from './net.js';
 import { spriteSVG } from './sprites.js';
@@ -80,14 +80,18 @@ export function showMenu({ notice } = {}) {
   _renderContinue();
 }
 
-/** Leave any online session and clear reconnect credentials. */
-export function leaveOnlineSession() {
+/**
+ * Leave any online session and clear reconnect credentials, unless
+ * `keepSaved` (the seat was taken by another tab; the token stays so the
+ * player can reclaim it later).
+ */
+export function leaveOnlineSession({ keepSaved = false } = {}) {
   net.disconnect();
   _roomCode = null;
   _myPlayer = null;
   _playerToken = null;
   _onlinePending = false;
-  storageSet(SESSION_KEY, null);
+  if (!keepSaved) storageSet(SESSION_KEY, null);
 }
 
 /** Fade the menu out. */
@@ -118,12 +122,14 @@ export function showConfirm({ title, body, confirmLabel, cancelLabel = 'KEEP PLA
   $('resign-sub').textContent      = body;
   yes.textContent = confirmLabel;
   no.textContent  = cancelLabel;
+  el.inert = false;
   el.classList.add('active');
   el.setAttribute('aria-hidden', 'false');
 
   function cleanup() {
     el.classList.remove('active');
     el.setAttribute('aria-hidden', 'true');
+    el.inert = true;
     yes.removeEventListener('click', handleYes);
     no.removeEventListener('click',  handleNo);
     el.removeEventListener('keydown', handleKeydown);
@@ -156,9 +162,11 @@ export function showRules() {
   const overlay = $('rules-overlay');
   if (overlay.classList.contains('active')) return;
   _rulesPreviousFocus = document.activeElement;
+  overlay.inert = false;
   overlay.classList.add('active');
   overlay.setAttribute('aria-hidden', 'false');
-  _inertedForRules = [...document.body.children].filter(el => el !== overlay && !el.inert);
+  // Modal: everything else is inert while it is open, except the toast (an update's RELOAD stays live).
+  _inertedForRules = [...document.body.children].filter(el => el !== overlay && el.id !== 'toast' && !el.inert);
   for (const el of _inertedForRules) el.inert = true;
   document.addEventListener('keydown', _handleRulesKeydown, true);
   $('btn-close-rules').focus();
@@ -203,6 +211,7 @@ function _hideRules() {
   if (!overlay.classList.contains('active')) return;
   overlay.classList.remove('active');
   overlay.setAttribute('aria-hidden', 'true');
+  overlay.inert = true; // its close button and scroll area leave the tab order while it is closed
   for (const el of _inertedForRules) el.inert = false;
   _inertedForRules = [];
   document.removeEventListener('keydown', _handleRulesKeydown, true);
@@ -236,9 +245,17 @@ function _handleStart() {
   }
 }
 
+/** Online modes need the network: say so instead of hanging on a socket that cannot open. */
+function _offline() {
+  if (navigator.onLine !== false) return false;
+  _showError('OFFLINE — LOCAL PLAY ONLY');
+  return true;
+}
+
 // ── HOST flow ───────────────────────────────────────────
 
 function _startHostFlow() {
+  if (_offline()) return;
   _beginOnline('CONNECTING…');
 
   net.on('_connected', () => {
@@ -264,6 +281,7 @@ function _startHostFlow() {
 // ── JOIN flow ───────────────────────────────────────────
 
 function _startJoinFlow() {
+  if (_offline()) return;
   const code = _joinCode.toUpperCase().trim();
   if (code.length !== 4) {
     _showError('Enter the 4-character room code from your host.');
@@ -292,12 +310,12 @@ function _attachOnlineGameHandlers() {
     _saveSession();
   });
 
-  net.on('GAME_START', ({ gameState, settings }) => {
+  net.on('GAME_START', ({ gameState, settings, history }) => {
     _onlinePending = false;
     // Wire up in-game net handlers before handing off
     _callbacks.onNetReady();
     hideMenu();
-    _callbacks.onOnlineStart(settings, _myPlayer, gameState);
+    _callbacks.onOnlineStart(settings, _myPlayer, gameState, null, history ?? []);
   });
 
   net.on('_disconnected', () => {
@@ -309,7 +327,7 @@ function _attachOnlineGameHandlers() {
 
   net.on('WAITING_FOR_OPPONENT', ({ code }) => _showRoom(code));
 
-  net.on('ROOM_RESUMED', ({ player, token, gameState, settings }) => {
+  net.on('ROOM_RESUMED', ({ player, token, gameState, settings, endReason, history }) => {
     _myPlayer = player;
     _playerToken = token;
     _saveSession();
@@ -317,14 +335,14 @@ function _attachOnlineGameHandlers() {
       _onlinePending = false;
       _callbacks.onNetReady();
       hideMenu();
-      _callbacks.onOnlineStart(settings, player, gameState);
+      _callbacks.onOnlineStart(settings, player, gameState, endReason ?? null, history ?? []);
     } else {
       _showRoom(_roomCode);
     }
   });
 
   net.on('ERROR', ({ reason }) => {
-    leaveOnlineSession();
+    leaveOnlineSession({ keepSaved: reason === 'SEAT_TAKEN' });
     _resetOnlinePanel();
     _syncModeButtons();
     _showError(_friendlyError(reason));
@@ -399,22 +417,30 @@ async function _shareLink() {
   _copy(link, $('btn-share-link'), 'COPY LINK');
 }
 
-async function _copy(text, button, label) {
-  let ok = false;
+/**
+ * Put `text` on the clipboard: the async Clipboard API, or a hidden textarea + execCommand where it is
+ * missing (insecure origins such as plain http on a LAN IP). Resolves true when the copy worked.
+ */
+export async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);
-    ok = true;
+    return true;
   } catch {
-    // Insecure origins (plain http on a LAN IP) have no clipboard API.
     const area = document.createElement('textarea');
     area.value = text;
     area.setAttribute('readonly', '');
     area.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
     document.body.append(area);
     area.select();
+    let ok;
     try { ok = document.execCommand('copy'); } catch { ok = false; }
     area.remove();
+    return ok;
   }
+}
+
+async function _copy(text, button, label) {
+  const ok = await copyText(text);
   button.textContent = ok ? 'COPIED ✓' : 'COPY FAILED';
   setTimeout(() => { button.textContent = label; }, 1600);
 }
@@ -476,6 +502,7 @@ function _tryResumeSavedSession() {
   let saved;
   try { saved = JSON.parse(storageGet(SESSION_KEY)); } catch { return; }
   if (!saved?.code || !saved?.token) return;
+  if (_offline()) return; // keep the saved seat for when the network is back
 
   _roomCode = String(saved.code).toUpperCase().replace(CODE_CHARS, '').slice(0, 4);
   _playerToken = String(saved.token);
@@ -505,8 +532,9 @@ function _friendlyError(reason) {
     ROOM_NOT_FOUND:       'Room not found. Check the code and try again.',
     ROOM_FULL:            'That room already has two players.',
     INVALID_RESUME_TOKEN: 'Your saved seat is no longer valid.',
-    SEAT_OCCUPIED:        'This seat is already connected in another tab.',
+    ALREADY_IN_ROOM:      'You are already in a room — leave it first.',
     NO_ACTIVE_GAME:       'That game is no longer active.',
+    SEAT_TAKEN:           'GAME OPENED IN ANOTHER TAB',
   };
   return messages[reason] ?? 'Unable to connect. Please try again.';
 }

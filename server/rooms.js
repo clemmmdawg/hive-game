@@ -15,8 +15,8 @@
 import { randomUUID } from 'crypto';
 
 const CODE_CHARS   = 'BCDFGHJKLMNPQRSTVWXYZ23456789';
-const WAIT_TIMEOUT = 10 * 60 * 1000; // 10 min — waiting for 2nd player
-const IDLE_TIMEOUT = 30 * 60 * 1000; // 30 min — game inactivity
+export const WAIT_TIMEOUT = 10 * 60 * 1000; // 10 min — waiting for 2nd player
+export const IDLE_TIMEOUT = 30 * 60 * 1000; // 30 min — game inactivity
 
 /** @type {Map<string, Room>} */
 const rooms = new Map();
@@ -46,15 +46,18 @@ export function createRoom(settings) {
     sockets:      [null, null],   // index 0 = player 1, index 1 = player 2
     tokens:       [null, null],   // reconnect UUIDs parallel to sockets
     gameState:    null,           // set to a live GameState when game starts
+    history:      [],             // move log: { notation, player, turnNumber, action } per valid action (incl. PASS)
     settings,
+    endReason:    null,           // 'QUEEN' | 'RESIGN' | 'DRAW' once finished
     idleTimer:    null,
+    createdAt:    Date.now(),
     lastActivity: Date.now(),
   };
   rooms.set(code, room);
 
   // Expire the room if no second player arrives
   room.idleTimer = setTimeout(() => {
-    if (!room.sockets[1]) cleanupRoom(code);
+    if (!room.tokens[1]) cleanupRoom(code);
   }, WAIT_TIMEOUT);
   room.idleTimer.unref?.();
 
@@ -100,7 +103,14 @@ export function resumeRoom(code, token, socket) {
   if (slot === -1) return { error: 'INVALID_RESUME_TOKEN' };
 
   const current = room.sockets[slot];
-  if (current && current.readyState === WS_OPEN) return { error: 'SEAT_OCCUPIED' };
+  // The old socket may be half-open (dead TCP the server hasn't noticed yet):
+  // the token holder wins. Detach it so its late 'close' is a no-op.
+  if (current && current !== socket) {
+    current._hiveRoom   = null;
+    current._hivePlayer = null;
+    current._hiveToken  = null;
+    evictSocket(current);
+  }
 
   const playerNum = slot + 1;
   room.sockets[slot] = socket;
@@ -109,6 +119,24 @@ export function resumeRoom(code, token, socket) {
   socket._hiveToken  = token;
   touchActivity(room);
   return { playerNum, token, room };
+}
+
+/** Close code sent to a socket whose seat was reclaimed by a newer connection. */
+export const SEAT_TAKEN_CLOSE = 4001;
+
+/**
+ * Tell a superseded socket why it is being dropped so its client does not
+ * auto-reconnect and steal the seat back, then close it. A truly half-open
+ * socket never receives the frame, so it is terminated after a short grace.
+ */
+function evictSocket(sock) {
+  if (sock.readyState === WS_OPEN) {
+    try { sock.send(JSON.stringify({ type: 'ERROR', reason: 'SEAT_TAKEN' })); } catch {}
+    try { sock.close?.(SEAT_TAKEN_CLOSE, 'SEAT_TAKEN'); } catch {}
+  }
+  const killer = setTimeout(() => { try { sock.terminate?.(); } catch {} }, 2000);
+  killer.unref?.();
+  sock.once?.('close', () => clearTimeout(killer));
 }
 
 // ── Socket removal ───────────────────────────────────────────────────────────
@@ -167,7 +195,12 @@ export function sendTo(room, playerNum, message) {
 function touchActivity(room) {
   room.lastActivity = Date.now();
   if (room.idleTimer) clearTimeout(room.idleTimer);
-  room.idleTimer = setTimeout(() => cleanupRoom(room.code), IDLE_TIMEOUT);
+  // Until a second player has claimed a seat the room is only waiting for them.
+  // The wait deadline is absolute from creation, so resuming cannot extend it.
+  const delay = room.tokens[1]
+    ? IDLE_TIMEOUT
+    : Math.max(0, room.createdAt + WAIT_TIMEOUT - Date.now());
+  room.idleTimer = setTimeout(() => cleanupRoom(room.code), delay);
   room.idleTimer.unref?.();
 }
 

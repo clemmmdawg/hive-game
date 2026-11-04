@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { ActionType, PieceType, applyAction, createGame, getLegalPlacements } from '../js/game.js';
-import { statusText, describeLastMove } from '../js/hints.js';
+import { ActionType, PieceType, applyAction, createGame, getLegalPlacements, getLegalMoves, getLegalThrows } from '../js/game.js';
+import { statusText, dangerText, newDangers, describeLastMove, inferAction, winReasonFromServer, resumedWinReason, turnChipText } from '../js/hints.js';
 import { encodeLocalSave, decodeLocalSave, MAX_UNDO } from '../js/local-save.js';
 
 const P = (player, type) => ({ player, type });
@@ -11,6 +11,47 @@ function place(state, pieceType) {
   const [to] = getLegalPlacements(state, pieceType);
   return applyAction(state, { type: ActionType.PLACE, pieceType, to });
 }
+
+// ── Queen danger ─────────────────────────────────────────────────────────────
+
+/** P1 queen at 0,0 with `n` occupied neighbours (ordered round the queen); P2 queen out at 3,0. */
+function queenUnder(n, turn = 1) {
+  const ring = ['1,0', '1,-1', '0,-1', '-1,0', '-1,1', '0,1'];
+  const state = createGame({});
+  state.board = new Map([['0,0', [P(1, 'QUEEN')]], ['2,0', [P(2, 'ANT')]], ['3,0', [P(2, 'QUEEN')]]]);
+  ring.slice(0, n).forEach((k, i) => state.board.set(k, [P(i % 2 ? 1 : 2, 'ANT')]));
+  state.queenPlaced = { 1: true, 2: true };
+  state.turn = turn;
+  state.turnNumber = 12;
+  return state;
+}
+
+test('status: the mover is told their queen is in danger at five neighbours', () => {
+  assert.match(statusText({ state: queenUnder(5), phase: 'IDLE' }), /P1 QUEEN IN DANGER/);
+  assert.match(statusText({ state: queenUnder(5), phase: 'IDLE', mode: 'ONLINE', myPlayer: 1 }), /YOUR QUEEN IN DANGER/);
+});
+
+test('status: no danger copy at four neighbours, for the other player, or mid-selection', () => {
+  assert.doesNotMatch(statusText({ state: queenUnder(4), phase: 'IDLE' }), /DANGER/);
+  assert.doesNotMatch(statusText({ state: queenUnder(5, 2), phase: 'IDLE' }), /DANGER/);
+  assert.doesNotMatch(statusText({ state: queenUnder(5), phase: 'BOARD' }), /DANGER/);
+});
+
+test('dangerText names the queen from the viewer\'s side', () => {
+  assert.equal(dangerText(2), 'P2 QUEEN IN DANGER');
+  assert.equal(dangerText(2, { mode: 'ONLINE', myPlayer: 2 }), 'YOUR QUEEN IN DANGER');
+  assert.equal(dangerText(1, { mode: 'ONLINE', myPlayer: 2 }), 'ENEMY QUEEN IN DANGER');
+});
+
+test('newDangers: only an upward step onto five counts', () => {
+  assert.deepEqual(newDangers({ 1: 4, 2: 2 }, { 1: 5, 2: 2 }), [1]);
+  assert.deepEqual(newDangers({ 1: 3, 2: 4 }, { 1: 5, 2: 5 }), [1, 2]);
+  assert.deepEqual(newDangers({ 1: 5, 2: null }, { 1: 5, 2: 1 }), [], 'staying at five is not new');
+  assert.deepEqual(newDangers({ 1: 4, 2: 0 }, { 1: 6, 2: 0 }), [], 'six is the end, not a warning');
+  assert.deepEqual(newDangers({ 1: 5, 2: 0 }, { 1: 4, 2: 0 }), []);
+  assert.deepEqual(newDangers({ 1: null, 2: 0 }, { 1: 5, 2: 0 }), [1], 'placed straight into danger');
+  assert.deepEqual(newDangers(null, { 1: 5, 2: 0 }), [], 'no previous position (resume): no alarm');
+});
 
 // ── statusText ───────────────────────────────────────────────────────────────
 
@@ -100,4 +141,114 @@ test('last move is null after a pass and falls back to lastMovedHex on resume', 
   assert.equal(describeLastMove(prev, passed), null);
   assert.deepEqual(describeLastMove(null, prev), { from: null, to: '0,0', player: 1 });
   assert.equal(describeLastMove(null, createGame({})), null);
+});
+
+// ── inferAction ──────────────────────────────────────────────────────────────
+
+function expansionGame(entries, turn = 1) {
+  const state = createGame({ expansions: { mosquito: true, ladybug: true, pillbug: true } });
+  state.board = new Map(entries);
+  state.queenPlaced = { 1: true, 2: true };
+  state.turn = turn;
+  state.turnNumber = 10;
+  return state;
+}
+
+test('inferAction recovers a placement from two snapshots', () => {
+  const prev = place(createGame({}), PieceType.ANT);
+  const action = { type: ActionType.PLACE, pieceType: PieceType.SPIDER, to: getLegalPlacements(prev, PieceType.SPIDER)[0] };
+  assert.deepEqual(inferAction(prev, applyAction(prev, action)), action);
+});
+
+test('inferAction recovers a move, including a beetle climbing onto a stack', () => {
+  const prev = expansionGame([
+    ['0,0', [P(1, PieceType.BEETLE)]],
+    ['1,0', [P(2, PieceType.QUEEN)]],
+    ['-1,0', [P(1, PieceType.QUEEN)]],
+  ]);
+  for (const to of getLegalMoves(prev, '0,0')) {
+    const action = { type: ActionType.MOVE, from: '0,0', to };
+    assert.deepEqual(inferAction(prev, applyAction(prev, action)), action, `beetle to ${to}`);
+  }
+});
+
+test('inferAction tells a pillbug throw from a move (own and opponent pieces)', () => {
+  const prev = expansionGame([
+    ['0,0', [P(1, PieceType.PILLBUG)]],
+    ['1,0', [P(2, PieceType.ANT)]],
+    ['-1,0', [P(1, PieceType.QUEEN)]],
+    ['1,-1', [P(2, PieceType.QUEEN)]],
+  ]);
+  prev.lastOpponentMovedHex = null;
+  const throws = getLegalThrows(prev);
+  assert.ok(throws.some(t => t.from === '1,0') && throws.some(t => t.from === '-1,0'), 'both pieces are throwable');
+  for (const t of throws) {
+    const action = { type: ActionType.THROW, pillbugHex: t.pillbugHex, from: t.from, to: t.to };
+    assert.deepEqual(inferAction(prev, applyAction(prev, action)), action, `throw ${t.from}→${t.to}`);
+  }
+});
+
+test('inferAction returns null for passes and unrelated snapshots', () => {
+  const a = place(createGame({}), PieceType.ANT);
+  const b = place(a, PieceType.ANT);
+  const c = place(b, PieceType.QUEEN);
+  assert.equal(inferAction(null, a), null);
+  assert.equal(inferAction(a, null), null);
+  assert.equal(inferAction(a, a), null, 'same state');
+  assert.equal(inferAction(a, c), null, 'two plies apart');
+  assert.equal(inferAction(c, a), null, 'going backwards (undo / resume)');
+  assert.equal(inferAction(b, applyAction(b, { type: ActionType.PASS })), null, 'pass');
+  assert.equal(inferAction(createGame({}), c), null, 'a different game');
+});
+
+// ── end-of-game copy ─────────────────────────────────────────────────────────
+
+test('statusText explains a stalemate draw, a queen draw and a resignation', () => {
+  const state = createGame({});
+  assert.match(statusText({ state: { ...state, winner: 'DRAW' }, winReason: 'STALEMATE' }), /NO MOVES/);
+  assert.match(statusText({ state: { ...state, winner: 'DRAW' }, winReason: 'QUEEN' }), /BOTH QUEENS SURROUNDED/);
+  assert.match(statusText({ state: { ...state, winner: 'DRAW' } }), /BOTH QUEENS SURROUNDED/);
+  assert.match(statusText({ state: { ...state, winner: 1 }, winReason: 'RESIGN' }), /RESIGNED/);
+  assert.match(statusText({ state: { ...state, winner: 2 }, winReason: 'RESIGN', mode: 'ONLINE', myPlayer: 2 }), /RESIGNED/);
+  assert.match(statusText({ state: { ...state, winner: 1 }, winReason: 'RESIGN', mode: 'ONLINE', myPlayer: 2 }), /YOU RESIGNED/);
+});
+
+test('winReasonFromServer maps server end reasons onto client win reasons', () => {
+  assert.equal(winReasonFromServer('QUEEN'), 'QUEEN');
+  assert.equal(winReasonFromServer('RESIGN'), 'RESIGN');
+  assert.equal(winReasonFromServer('DRAW'), 'QUEEN');
+  assert.equal(winReasonFromServer(null), null);
+  assert.equal(winReasonFromServer(undefined), null);
+  assert.equal(winReasonFromServer('???'), null);
+});
+
+test('resumedWinReason keeps the server end reason only for a finished game', () => {
+  assert.equal(resumedWinReason({ winner: 2 }, 'RESIGN'), 'RESIGN');
+  assert.equal(resumedWinReason({ winner: 'DRAW' }, 'DRAW'), 'QUEEN');
+  assert.equal(resumedWinReason({ winner: null }, 'RESIGN'), null);
+  assert.equal(resumedWinReason({ winner: 1 }, undefined), null);
+});
+
+test('turnChipText shows the result once the game is over', () => {
+  const live = { winner: null, turn: 2 };
+  assert.equal(turnChipText({ state: live, mode: 'LOCAL' }), 'P2');
+  assert.equal(turnChipText({ state: live, mode: 'ONLINE', myPlayer: 2 }), 'YOU');
+  assert.equal(turnChipText({ state: live, mode: 'ONLINE', myPlayer: 1 }), 'OPP');
+  assert.equal(turnChipText({ state: { winner: 1, turn: 2 }, mode: 'LOCAL' }), 'P1 WINS');
+  assert.equal(turnChipText({ state: { winner: 1, turn: 2 }, mode: 'ONLINE', myPlayer: 1 }), 'YOU WIN');
+  assert.equal(turnChipText({ state: { winner: 1, turn: 2 }, mode: 'ONLINE', myPlayer: 2 }), 'YOU LOSE');
+  assert.equal(turnChipText({ state: { winner: 'DRAW', turn: 2 }, mode: 'LOCAL' }), 'DRAW');
+});
+
+test('local save v2 round-trips the move log; v1 saves decode with an empty one', () => {
+  const state = createGame({});
+  const moveLog = [{ notation: 'wA1', player: 1, turnNumber: 1, action: { type: 'PLACE', pieceType: 'ANT', to: '0,0' } }];
+  const v2 = decodeLocalSave(encodeLocalSave({ settings: {}, state, history: [], moveLog }));
+  assert.deepEqual(v2.moveLog, moveLog);
+  assert.deepEqual(decodeLocalSave(encodeLocalSave({ settings: {}, state, history: [] })).moveLog, []);
+  const v1 = JSON.parse(encodeLocalSave({ settings: {}, state, history: [], moveLog }));
+  v1.v = 1; delete v1.moveLog;
+  assert.deepEqual(decodeLocalSave(JSON.stringify(v1)).moveLog, []);
+  v1.v = 2; v1.moveLog = 'junk';
+  assert.deepEqual(decodeLocalSave(JSON.stringify(v1)).moveLog, []);
 });

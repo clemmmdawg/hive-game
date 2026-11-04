@@ -24,6 +24,7 @@ let _reconnectTimer  = null;
 let _intentionalClose = false;
 
 const MAX_DELAY = 16_000;
+const SEAT_TAKEN_CLOSE = 4001; // server close code: seat reclaimed elsewhere
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -108,11 +109,16 @@ function _open() {
     if (socket !== _socket) return;
     let msg;
     try { msg = JSON.parse(event.data); } catch { return; }
+    // Another connection reclaimed our seat: coming back would just steal it
+    // again, so treat the coming close as final.
+    if (msg.type === 'ERROR' && msg.reason === 'SEAT_TAKEN') _intentionalClose = true;
     _dispatch(msg.type, msg);
   });
 
-  socket.addEventListener('close', () => {
-    if (socket !== _socket || _intentionalClose) return;
+  socket.addEventListener('close', (event) => {
+    if (socket !== _socket) return;
+    if (event?.code === SEAT_TAKEN_CLOSE) _intentionalClose = true;
+    if (_intentionalClose) return;
     _socket = null;
     _dispatch('_disconnected', {});
     _scheduleReconnect();

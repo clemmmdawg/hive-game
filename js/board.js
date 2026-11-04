@@ -2,7 +2,8 @@
 // Depends on: hex.js (must load first)
 
 import { hexToPixel, pixelToHex, hexNeighbors, hexKey, parseKey } from './hex.js';
-import { drawSprite } from './sprites.js';
+import { drawSprite, bodyFill, SPECIES_COLOR } from './sprites.js';
+import { queenSides } from './game.js';
 
 const BG         = '#05050f';
 const P1         = '#ff2d78';
@@ -17,14 +18,275 @@ const FIT_PAD    = 16;   // px of breathing room around the hive when fitting
 const CAMERA_MS  = 380;
 const ARRIVAL_MS = 320;
 
-const SPRITE_SCALE = 1.5; // sprite art fills ~78% of its box; this sizes it to the hex
-const SPRITE_COLORS = {
-  1: { ink: '#ffd3e4', fill: '#2b0c1e', glow: P1 },
-  2: { ink: '#d2fdff', fill: '#06262c', glow: P2 },
+// ── Tile look ──
+const RIM       = 0.09;  // rim width as a fraction of the tile radius
+const LIP       = 0.10;  // how far the tile's side (thickness) shows below its face
+const GLYPH_BOX = 1.34;  // sprite box per tile radius (the art fills ~78% of its box)
+const FACE_HI   = '#141428';
+const FACE_LO   = '#07070f';
+const TILE = {
+  1: { rim: P1, rimHi: 'rgba(255,214,230,.75)', lip: '#3b0a20', lipEdge: 'rgba(255,45,120,.45)' },
+  2: { rim: P2, rimHi: 'rgba(214,253,255,.75)', lip: '#043239', lipEdge: 'rgba(0,245,255,.40)' },
+};
+
+/**
+ * Layout of a stack's tiles, bottom first, for a tile of radius `size`. Each
+ * layer up rises and shrinks a step; deeper layers are shaded darker. The rise
+ * and shrink are spread so even a 7-high stack stays within its cell.
+ * @returns {{dx:number, dy:number, scale:number, shade:number}[]}
+ */
+export function stackLayers(height, size) {
+  const steps = Math.max(1, height - 1);
+  const rise   = Math.min(0.13, 0.3 / steps);
+  const shrink = Math.min(0.035, 0.18 / steps);
+  return Array.from({ length: height }, (_, i) => ({
+    dx:    0,
+    dy:    i === 0 ? 0 : -(size * rise * i),
+    scale: 1 - shrink * i,
+    shade: 1 - Math.pow(0.6, height - 1 - i),
+  }));
+}
+
+// ── Hive layer cache ──
+// The hive (grid hints, tiles, stacks, glyphs, badges, static marks) is drawn
+// into offscreen layers and only re-rendered when its inputs change; each frame
+// blits the layers and draws the animated overlays on top.
+const LAYER_PAD      = 3;    // hexes of padding around the hive (grid hints, glows)
+const LAYER_MARGIN   = 0.25; // a viewport-clipped layer reaches this far past each edge
+const ZOOM_SETTLE_MS = 140;  // while zooming, blit the stale layer scaled; re-render once settled
+const ZOOM_REUSE_MIN = 0.4;  // …as long as the zoom stays within this ratio of the layer's scale
+const ZOOM_REUSE_MAX = 2.5;
+const MIN_LINE_PX    = 1.5;  // thinnest screen-px line for the selection ring and last-move ticks
+const BADGE_FULL_R   = 22;   // top-face radius (screen px) from which full stack badges show
+const BADGE_MIN_R    = 9;    // below this the stepped slabs alone show the height
+
+/**
+ * Content signature of the cached hive layer: everything the layer draws
+ * except the camera (scale/dpr/coverage are checked separately). Equal keys
+ * mean the cached pixels are still right. Cheap enough to build every frame,
+ * and it sees in-place mutation of `pieces`.
+ */
+export function hiveLayerKey({ pieces, ghosts, selectedHex, throwPick, lastMove, hiddenTop, hiddenStacks }) {
+  let s = '';
+  for (const [key, stack] of pieces) {
+    s += key + ':';
+    for (const p of stack) s += p.player + p.type + (p.image ? '*' : '') + '/';
+    s += ';';
+  }
+  const list = set => (set ? [...set].join(',') : '');
+  const lm = lastMove ? `${lastMove.from ?? ''}>${lastMove.to}@${lastMove.player}` : '';
+  return [s, list(ghosts), selectedHex ?? '', throwPick ?? '', lm, list(hiddenTop), list(hiddenStacks)].join('|');
+}
+
+/** Board-space box around the centres of `keys`, padded by `pad`; null if empty. */
+export function hiveBounds(keys, size, pad) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const key of keys) {
+    const { q, r } = parseKey(key);
+    const p = hexToPixel(q, r, size);
+    x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x);
+    y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y);
+  }
+  if (x0 === Infinity) return null;
+  return { x0: x0 - pad, y0: y0 - pad, x1: x1 + pad, y1: y1 + pad };
+}
+
+/** True when the part of `content` inside `view` lies within `layer` (all rects in board space). */
+export function layerCovers(layer, view, content) {
+  if (!content) return true;
+  const x0 = Math.max(view.x0, content.x0), x1 = Math.min(view.x1, content.x1);
+  const y0 = Math.max(view.y0, content.y0), y1 = Math.min(view.y1, content.y1);
+  if (x0 >= x1 || y0 >= y1) return true;
+  return x0 >= layer.x0 && x1 <= layer.x1 && y0 >= layer.y0 && y1 <= layer.y1;
+}
+
+/**
+ * Stack badge geometry for a top face of radius `r` screen px. Everything
+ * scales with the tile and stays inside it:
+ *  - 'full'    — a ×N pill (upper right) plus a hex chip per buried piece along the lower rim
+ *  - 'compact' — one small numeral disc tucked into the upper-right corner
+ *  - 'none'    — too small for text; the stepped slabs show the height
+ * `chipDist`/`angle` place the (first) chip relative to the face centre.
+ */
+export function badgeLayout(r) {
+  if (r < BADGE_MIN_R) return { mode: 'none', chipR: 0, chipDist: 0, angle: 0, font: 0 };
+  if (r < BADGE_FULL_R) {
+    return { mode: 'compact', chipR: r * 0.27, chipDist: r * 0.62, angle: -Math.PI * 0.31, font: r * 0.34 };
+  }
+  return {
+    mode: 'full', chipR: r * 0.21, chipDist: r * 0.73, angle: Math.PI * 0.1, step: Math.PI * 0.17,
+    font: Math.max(6, Math.round(r * 0.2)), pillX: r * 0.45, pillY: -r * 0.62,
+  };
+}
+
+/** Glow rings blitted every frame from pre-rendered sprites (no per-frame shadowBlur). R in board units. */
+const RINGS = {
+  ghost:    { R: 48, lw: 1.5, color: GHOST, blur: 16 },
+  ghostOcc: { R: 53, lw: 2.5, color: GHOST, blur: 22 },
+  amber:    { R: 53, lw: 3.5, color: AMBER, blur: 20 },
+  pick:     { R: 54, lw: 4,   color: '#fff4d1', glow: AMBER, blur: 24, minPx: MIN_LINE_PX * 1.4 },
+  sel:      { R: 55, lw: 2.5, color: '#ffffff', blur: 8,  minPx: MIN_LINE_PX },
+  selGlow:  { R: 55, lw: 2.5, color: '#ffffff', blur: 22, minPx: MIN_LINE_PX },
+  danger:   { R: 54, lw: 3,   color: '#ff3048', blur: 26, minPx: MIN_LINE_PX },
+  warn:     { R: 53, lw: 2,   color: AMBER,     blur: 18, minPx: MIN_LINE_PX },
 };
 
 const easeOutCubic = p => 1 - Math.pow(1 - p, 3);
 const easeOutBack  = p => 1 + 2.2 * Math.pow(p - 1, 3) + 1.2 * Math.pow(p - 1, 2);
+const easeInOutCubic = p => (p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2);
+const easeInOutSine  = p => -(Math.cos(Math.PI * p) - 1) / 2;
+
+// ── Move animation ──
+// Timing: ~120 ms per hex step; the tween plus the landing settle stay within 700 ms.
+const STEP_MS     = 120;
+const MOVE_MAX_MS = 700;
+export const LAND_MS = 150;                       // squash-and-settle after touchdown
+const MIN_MOVE_MS = { slide: 220, hop: 300, climb: 280, throw: 400, place: 270 };
+const LIFT        = {                              // arc height (× SIZE) and how much a lifted piece grows
+  slide: { h: 0.14, grow: 0.05 },
+  hop:   { h: 0.55, grow: 0.16, perStep: 0.12, max: 1.2 },
+  climb: { h: 0.5,  grow: 0.10 },
+  throw: { h: 1.3,  grow: 0.22 },
+  place: { h: 0.35, grow: 0.25 },                 // a short drop toward the viewer: mostly scale, little rise
+};
+const SQUASH      = { slide: 0.05, hop: 0.13, climb: 0.11, throw: 0.14, place: 0.17 };
+const SPARKS      = { slide: 10, place: 12, hop: 14, climb: 14, throw: 16 };
+const NUDGE_PX    = { climb: 2.5, throw: 3 };      // camera nudge on heavy landings (screen px)
+const NUDGE_MS    = 220;
+const RIPPLE_MS   = 480;
+const FLASH_MS    = 170;
+const MAX_PARTICLES = 96;
+const USER_CAMERA_GRACE_MS = 1200;                 // reveal() leaves the camera alone this long after a user pan/zoom
+/** reveal() never zooms out so far that a tile's radius drops below this (screen px). */
+export const REVEAL_MIN_TILE_PX = 17;
+
+/** Tween duration (ms, without the LAND_MS settle) for a move of `steps` hexes. */
+export function moveDuration(kind, steps) {
+  const min = MIN_MOVE_MS[kind] ?? MIN_MOVE_MS.slide;
+  if (kind === 'place') return min;
+  return Math.min(MOVE_MAX_MS - LAND_MS, Math.max(min, STEP_MS * steps));
+}
+
+// ── Win sequence ──
+// The winning move flies at 0.4× speed (capped so long routes still fit), a white
+// shockwave rings out of the surrounded queen at touchdown, the board dims, and
+// the result card follows — all inside WIN_REVEAL_MAX_MS.
+export const WIN_REVEAL_MAX_MS = 1600;
+const WIN_SPEED       = 0.4;
+const WIN_FLIGHT_MAX  = 1000;  // ms: longest slow-motion flight
+const WIN_HOLD_MS     = 380;   // settled piece + shockwave before the card
+const WIN_INSTANT_MS  = 300;   // no flight (pass, resign, reduced motion)
+const SHOCK_MS        = 1100;
+const SHOCK_SPARKS    = 22;
+
+/** Tween duration of a move played at `speed` (< 1 is slower), capped at WIN_FLIGHT_MAX. */
+function slowDuration(kind, steps, speed) {
+  return Math.min(WIN_FLIGHT_MAX, Math.round(moveDuration(kind, steps) / speed));
+}
+
+/**
+ * Timeline of the win sequence, in ms from the winning action: `flightMs` the
+ * slow-motion tween (touchdown + shockwave), `landMs` the piece settled, `cardMs`
+ * the result card. Without a flight the card comes after WIN_INSTANT_MS.
+ */
+export function winTiming(kind, steps, { reducedMotion = false } = {}) {
+  if (!kind || reducedMotion) return { flightMs: 0, landMs: 0, cardMs: WIN_INSTANT_MS };
+  const flightMs = slowDuration(kind, Math.max(1, steps), WIN_SPEED);
+  const landMs   = flightMs + LAND_MS;
+  return { flightMs, landMs, cardMs: Math.min(WIN_REVEAL_MAX_MS, landMs + WIN_HOLD_MS) };
+}
+
+// ── Queen danger pips ──
+export const PIP_DIST = 0.72;   // pip centre, × top-face radius, toward each neighbour (inside the rim: adjacent queens' pips stay apart)
+const PIP_R    = 0.115;  // pip radius, × top-face radius
+const PIP_MIN_PX = 2.4;  // never smaller than this on screen
+const PIP_LEVEL = {      // occupied sides → lit colour (RGB) and pulse speed (rad/ms; 0 = steady)
+  calm:   { rgb: '255,210,63', pulse: 0 },     // queen gold
+  4:      { rgb: '255,179,0',  pulse: 1 / 260 },
+  5:      { rgb: '255,48,72',  pulse: 1 / 120 },
+  6:      { rgb: '255,48,72',  pulse: 0 },
+};
+
+/**
+ * Danger-meter geometry for every queen on the board (counts from game.js
+ * queenSides): which of its six sides are occupied (`lit`, in neighbors() order,
+ * aligned with `dirs`, unit vectors toward each neighbour in board space), how many, and the visible stack height it sits under. Hexes in
+ * `hidden` have their top piece in flight: an empty hex it is flying to does
+ * not count yet, and a flying queen gets no meter until it lands.
+ * @returns {{key:string, player:1|2, count:number, lit:boolean[], dirs:{x:number,y:number}[], height:number}[]}
+ */
+export function queenPips(pieces, hidden = new Set()) {
+  const height = key => (pieces.get(key)?.length ?? 0) - (hidden.has(key) ? 1 : 0);
+  const out = [];
+  for (const { key, player, sides, lit } of queenSides(pieces, k => height(k) > 0)) {
+    const stack = pieces.get(key);
+    if (stack.findIndex(p => p.type === 'QUEEN') >= height(key)) continue; // the queen herself is in the air
+    const { q, r } = parseKey(key);
+    const c = hexToPixel(q, r, 1);
+    const dirs = sides.map(k => {
+      const n = parseKey(k);
+      const p = hexToPixel(n.q, n.r, 1);
+      const len = Math.hypot(p.x - c.x, p.y - c.y);
+      return { x: (p.x - c.x) / len, y: (p.y - c.y) / len };
+    });
+    out.push({ key, player, count: lit.filter(Boolean).length, lit, dirs, height: height(key) });
+  }
+  return out;
+}
+
+/** Pulse 0..1 of a queen's danger pips at time t: amber/red levels pulse, others (and reduced motion) hold steady at 1. */
+export function pipPulse(count, t, reducedMotion = false) {
+  const level = PIP_LEVEL[count] ?? PIP_LEVEL.calm;
+  return level.pulse && !reducedMotion ? 0.5 + 0.5 * Math.sin(t * level.pulse) : 1;
+}
+
+/** Height profile 0..1 of a move at progress u: arcs for hops/throws, a hover for slides, a fall for drops. */
+function liftCurve(kind, u, n) {
+  const arc = 4 * u * (1 - u);
+  if (kind === 'place') return 1 - u * (0.35 + 0.65 * u); // thrown down, then gravity
+  if (kind === 'slide') return Math.min(1, arc * 2);   // pick up, glide, set down
+  if (kind === 'climb' && n > 2) return Math.min(1, arc * 1.8); // ladybug: up, across the top, down
+  return arc;                                          // hop / throw / climb: parabola
+}
+
+/**
+ * Position along a move at progress `t` (0..1): constant speed along the
+ * polyline `points` (board space), plus `lift` 0..1 for arc height and scale.
+ * Easing is the caller's job (it passes an eased t).
+ * @returns {{x:number, y:number, lift:number}}
+ */
+export function tweenPoint(points, t, kind) {
+  const u = Math.max(0, Math.min(1, t));
+  const lift = liftCurve(kind, u, points.length);
+  if (points.length === 1 || u === 0) return { x: points[0].x, y: points[0].y, lift };
+  if (u === 1) { const last = points.at(-1); return { x: last.x, y: last.y, lift }; }
+  const lens = [];
+  let total = 0;
+  for (let i = 1; i < points.length; i++) {
+    const d = Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+    lens.push(d);
+    total += d;
+  }
+  let dist = u * total;
+  for (let i = 0; i < lens.length; i++) {
+    if (dist <= lens[i] || i === lens.length - 1) {
+      const k = lens[i] ? Math.min(1, dist / lens[i]) : 1;
+      const a = points[i], b = points[i + 1];
+      return { x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k, lift };
+    }
+    dist -= lens[i];
+  }
+  return { x: points.at(-1).x, y: points.at(-1).y, lift };
+}
+
+/** Progress easing per move kind. */
+function moveEase(kind, p) {
+  if (kind === 'place') return p;           // gravity lives in the lift curve
+  if (kind === 'slide') return easeInOutCubic(p);
+  return easeInOutSine(p);                  // arcs: gentle take-off and touchdown
+}
+
+const now = () => globalThis.performance?.now() ?? Date.now();
 
 export class Board {
   /**
@@ -62,9 +324,38 @@ export class Board {
     /** @type {{from:string|null, to:string, player:1|2}|null} most recent action */
     this.lastMove    = null;
 
+    /** @type {string|null} piece picked for a pillbug throw (lifted, bright ring) */
+    this.throwPick   = null;
+    /** @type {Set<string>} hexes whose top piece is left out of the hive layer (drawn in flight) */
+    this.hiddenTop   = new Set();
+    /** @type {{piece:{player:1|2,type:string}, x:number, y:number, lift?:number, scale?:number}[]}
+     *  pieces drawn live each frame at board-space (x, y), e.g. while moving */
+    this.floating    = [];
+
     this.reducedMotion = !!globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
     this._camera  = null; // { from, to, start } while animating a recenter
     this._arrival = null; // { key, start } while a newly arrived piece pops in
+    this._userCameraAt = -Infinity; // last user pan / pinch / wheel / zoom key (performance.now())
+    this._userZoomed   = false;     // the user picked a zoom (pinch / wheel / keys) since the last recenter
+
+    // ── Move animation + impact FX ──
+    this._flights  = [];   // pieces in flight (see animateMove)
+    /** @type {{x:number,y:number,vx:number,vy:number,born:number,life:number,color:string}[]} landing sparks (board space) */
+    this.particles = [];
+    this._ripples  = [];   // { x, y, r, color, born } landing rings
+    this._nudge    = null; // { born, amp } camera nudge
+    this._shockwaves = [];  // { x, y, r, born } win shockwaves (board space)
+    this._tiles    = new Map(); // player → { S, half, canvas } pre-rendered tile for flights
+    this._lastT    = null;
+
+    // ── Hive layer cache (see draw) ──
+    this._layer      = null;      // { board, glyphs, key, rect, scale, dpr, faces, bx0, by0, id }
+    this._dirty      = true;
+    this._rings      = new Map(); // kind → { S, canvas } glow-ring sprites
+    this._prevScale  = this.scale;
+    this._zoomedAt   = -Infinity;
+    this._glyphStamp = null;      // what #emoji-layer currently shows
+    this._glyphsLive = false;
 
     // ── Starfield ──
     this._stars = Array.from({ length: 220 }, () => ({
@@ -90,6 +381,8 @@ export class Board {
     this.onHover = null;
     /** Fired once when the user first pans or zooms. */
     this.onViewChange = null;
+    /** Fired at touchdown of an animateMove flight: (kind, player) => void. */
+    this.onLand = null;
 
     this._bindEvents();
   }
@@ -116,6 +409,8 @@ export class Board {
       c.style.width  = `${w}px`;
       c.style.height = `${h}px`;
     }
+    this._dirty = true;
+    this._glyphStamp = null; // resizing cleared #emoji-layer
     if (prevW) {
       this.tx += (w - prevW) / 2;
       this.ty += (h - prevH) / 2;
@@ -129,6 +424,7 @@ export class Board {
 
   /** Fit the whole hive into the area between the HUD and tray. */
   recenter(animate = true) {
+    this._userZoomed = false;
     const target = this._fitTarget();
     if (!animate || this.reducedMotion) {
       this._camera = null;
@@ -138,22 +434,114 @@ export class Board {
     this._camera = { from: { tx: this.tx, ty: this.ty, scale: this.scale }, to: target, start: null };
   }
 
-  /** Recenter only if some piece has drifted outside the visible area. */
-  ensureHiveVisible() {
-    const { top, bottom } = this.insets;
-    const pad = this.SIZE * this.scale * 0.6;
-    for (const key of this.pieces.keys()) {
-      const { x, y } = this.hexToScreen(key);
-      if (x < pad || x > this.W - pad || y < top + pad || y > this.H - bottom - pad) {
-        this.recenter(true);
-        return;
-      }
+  /**
+   * Gently bring `keys` (hex keys: legal targets, a moved piece, the hive) into
+   * the playable area between the insets: the smallest pan that shows them, or —
+   * only if they cannot fit at this zoom — a zoom-out to fit. Never zooms in, and
+   * leaves the camera alone while the user is panning or just did.
+   *
+   * The zoom-out has a floor: tiles never shrink below REVEAL_MIN_TILE_PX, and a
+   * zoom the user picked (pinch, wheel, keys) is kept until the next recenter().
+   * When the keys cannot all fit above the floor, the camera frames `anchor`
+   * (the selected or moved piece; default: the key nearest the view centre) and
+   * as many of its nearest keys as fit.
+   * `context` (e.g. the hive) is kept in view too when it moves anyway and it all
+   * fits, so a reveal does not push the rest of the hive out only to bring it back.
+   * @returns {boolean} true when the camera starts moving
+   */
+  reveal(keys, context = [], { anchor = null } = {}) {
+    const list = [...keys];
+    if (!list.length || this._pts.size || now() - this._userCameraAt < USER_CAMERA_GRACE_MS) return false;
+    const base  = this._camera?.to ?? { tx: this.tx, ty: this.ty, scale: this.scale };
+    const floor = this._userZoomed ? base.scale : Math.min(base.scale, REVEAL_MIN_TILE_PX / this.SIZE);
+    anchor ??= this._nearestToView(list, base);
+    const own = this._revealTarget(list, base, floor, anchor);
+    if (!own) return false;
+    const ctx = [...context];
+    const all = ctx.length ? this._revealTarget([...list, ...ctx], base, floor, anchor) : null;
+    const target = all?.complete ? all : own;
+    if (this.reducedMotion) {
+      this._camera = null;
+      Object.assign(this, { tx: target.tx, ty: target.ty, scale: target.scale });
+    } else {
+      this._camera = { from: { tx: this.tx, ty: this.ty, scale: this.scale }, to: { tx: target.tx, ty: target.ty, scale: target.scale }, start: null };
     }
+    return true;
+  }
+
+  /** The key in `keys` whose centre is nearest the middle of the playable area under camera `cam`. */
+  _nearestToView(keys, { tx, ty, scale }) {
+    const { top, bottom } = this.insets;
+    const cx = this.W / 2, cy = top + (this.H - top - bottom) / 2;
+    let best = keys[0], bestD = Infinity;
+    for (const key of keys) {
+      const { q, r } = parseKey(key);
+      const p = hexToPixel(q, r, this.SIZE);
+      const d = Math.hypot(tx + p.x * scale - cx, ty + p.y * scale - cy);
+      if (d < bestD) { best = key; bestD = d; }
+    }
+    return best;
+  }
+
+  /**
+   * Camera that shows `keys`, starting from camera `base` and never zooming below
+   * `floor`; null if they are already in view. `complete` is false when only
+   * `anchor` and its nearest keys could be framed.
+   * @returns {{tx:number, ty:number, scale:number, complete:boolean}|null}
+   */
+  _revealTarget(keys, { tx, ty, scale }, floor = MIN_SCALE, anchor = keys[0]) {
+    const box = hiveBounds(keys, this.SIZE, this.SIZE);
+    const { top, bottom } = this.insets;
+    const vx0 = FIT_PAD, vx1 = this.W - FIT_PAD;
+    const vy0 = top + FIT_PAD, vy1 = this.H - bottom - FIT_PAD;
+    const viewW = Math.max(1, vx1 - vx0), viewH = Math.max(1, vy1 - vy0);
+    /** Smallest pan from (x, y) at scale s that brings board box b into view. */
+    const pan = (b, x, y, s) => {
+      const sx0 = x + b.x0 * s, sx1 = x + b.x1 * s, sy0 = y + b.y0 * s, sy1 = y + b.y1 * s;
+      const dx = sx1 - sx0 > viewW ? (vx0 + vx1) / 2 - (sx0 + sx1) / 2 : sx0 < vx0 ? vx0 - sx0 : sx1 > vx1 ? vx1 - sx1 : 0;
+      const dy = sy1 - sy0 > viewH ? (vy0 + vy1) / 2 - (sy0 + sy1) / 2 : sy0 < vy0 ? vy0 - sy0 : sy1 > vy1 ? vy1 - sy1 : 0;
+      return { tx: x + dx, ty: y + dy };
+    };
+    const fits = (b, s) => (b.x1 - b.x0) * s <= viewW && (b.y1 - b.y0) * s <= viewH;
+
+    const sx0 = tx + box.x0 * scale, sx1 = tx + box.x1 * scale;
+    const sy0 = ty + box.y0 * scale, sy1 = ty + box.y1 * scale;
+    if (sx0 >= vx0 && sx1 <= vx1 && sy0 >= vy0 && sy1 <= vy1) return null;
+    if (fits(box, scale)) return { ...pan(box, tx, ty, scale), scale, complete: true };
+
+    const fit = Math.max(MIN_SCALE, Math.min(scale, viewW / (box.x1 - box.x0), viewH / (box.y1 - box.y0)));
+    if (fit >= floor) {
+      return {
+        tx: (vx0 + vx1) / 2 - ((box.x0 + box.x1) / 2) * fit,
+        ty: (vy0 + vy1) / 2 - ((box.y0 + box.y1) / 2) * fit,
+        scale: fit, complete: true,
+      };
+    }
+
+    // Too spread out to show at a readable size: zoom to the floor about the
+    // anchor, then frame it with as many of its nearest keys as fit.
+    const s = floor;
+    const a = parseKey(anchor);
+    const ap = hexToPixel(a.q, a.r, this.SIZE);
+    const x = tx + ap.x * (scale - s), y = ty + ap.y * (scale - s);
+    const near = keys.map(key => {
+      const { q, r } = parseKey(key);
+      const p = hexToPixel(q, r, this.SIZE);
+      return { key, d: Math.hypot(p.x - ap.x, p.y - ap.y) };
+    }).sort((m, n) => m.d - n.d);
+    let frame = [anchor];
+    for (const { key } of near) {
+      const next = [...frame, key];
+      if (fits(hiveBounds(next, this.SIZE, this.SIZE), s)) frame = next;
+    }
+    return { ...pan(hiveBounds(frame, this.SIZE, this.SIZE), x, y, s), scale: s, complete: false };
   }
 
   /** Zoom around the center of the playable area (keyboard / buttons). */
   zoomBy(ratio) {
     this._camera = null;
+    this._userCameraAt = now();
+    this._userZoomed = true;
     const cy = this.insets.top + (this.H - this.insets.top - this.insets.bottom) / 2;
     this._applyZoom(ratio, this.W / 2, cy);
   }
@@ -168,6 +556,337 @@ export class Board {
   /** Pop-in animation for a piece that just arrived at `key`. */
   markArrival(key) {
     this._arrival = this.reducedMotion ? null : { key, start: null };
+  }
+
+  /**
+   * White shockwave out of each hex in `keys` (the surrounded queen(s)): a flash
+   * on the tile, two expanding hex rings, a burst of white sparks and a camera
+   * punch. Nothing under reduced motion.
+   */
+  shockwave(keys) {
+    if (this.reducedMotion) return;
+    const t = now();
+    const k = this.SIZE / 50;
+    for (const key of keys) {
+      const stack = this.pieces.get(key);
+      const { q, r } = parseKey(key);
+      const c = hexToPixel(q, r, this.SIZE);
+      const top = stackLayers(stack?.length || 1, this.SIZE - 2).at(-1);
+      const x = c.x, y = c.y + top.dy, rad = (this.SIZE - 2) * top.scale;
+      this._shockwaves.push({ x, y, r: rad, born: null });
+      for (let i = 0; i < SHOCK_SPARKS; i++) {
+        const a = ((i + Math.random() * 0.6) / SHOCK_SPARKS) * Math.PI * 2;
+        const speed = (380 + Math.random() * 320) * k;
+        this.particles.push({
+          x: x + Math.cos(a) * rad * 0.9, y: y + Math.sin(a) * rad * 0.8,
+          vx: Math.cos(a) * speed, vy: Math.sin(a) * speed * 0.9,
+          born: t, life: 520 + Math.random() * 360, color: i % 3 ? '#ffffff' : '#ffd23f',
+        });
+      }
+    }
+    if (this.particles.length > MAX_PARTICLES) this.particles.splice(0, this.particles.length - MAX_PARTICLES);
+    this._nudge = { born: t, amp: 6 };
+  }
+
+  /**
+   * Fly the top piece of `toKey` along `path` (hex keys, from getMovePath). The
+   * piece is already in `pieces` at its destination; while in flight it is left
+   * out of the cached layer (`hiddenTop`) and drawn live from `floating`. On
+   * touchdown: squash-and-settle, a ripple in the player colour, sparks in the
+   * species colour and, for climbs/throws, a small camera nudge. Under reduced
+   * motion it resolves at once with no effects.
+   * `speed` below 1 plays it in slow motion (the winning move; see winTiming).
+   * @param {{path:string[], kind:'slide'|'hop'|'climb'|'throw'|'place', piece?:object, player?:1|2, toKey?:string, speed?:number}} move
+   * @returns {Promise<void>} resolves when the piece has settled (or finishAnimations ran)
+   */
+  animateMove({ path, kind, piece, player, toKey, speed = 1 }) {
+    this.finishAnimations();
+    toKey ??= path?.at(-1);
+    const stack = this.pieces.get(toKey);
+    piece ??= stack?.at(-1);
+    if (this.reducedMotion || !path?.length || !stack || !piece) return Promise.resolve();
+
+    const tileR = this.SIZE - 2;
+    const pts = path.map(k => { const { q, r } = parseKey(k); return hexToPixel(q, r, this.SIZE); });
+    const endL = stackLayers(stack.length, tileR).at(-1);
+    const startL = kind === 'place' ? endL : stackLayers((this.pieces.get(path[0])?.length ?? 0) + 1, tileR).at(-1);
+    const steps = Math.max(1, path.length - 1);
+    const spec = LIFT[kind] ?? LIFT.slide;
+    const liftH = this.SIZE * Math.min(spec.max ?? Infinity, spec.h + (spec.perStep ?? 0) * steps);
+
+    const entry = { piece, x: pts[0].x, y: pts[0].y + startL.dy, lift: kind === 'place' ? liftH : 0, scale: startL.scale, alpha: kind === 'place' ? 0 : 1 };
+    this.floating.push(entry);
+    this.hiddenTop.add(toKey);
+    return new Promise(resolve => {
+      this._flights.push({
+        toKey, piece, kind, pts, startL, endL, steps, liftH, grow: spec.grow, entry, resolve,
+        player: player ?? piece.player, start: null, landedAt: null,
+        dur: speed < 1 ? slowDuration(kind, steps, speed) : moveDuration(kind, steps),
+      });
+    });
+  }
+
+  /** Tween duration (ms) of the newest running flight; 0 when nothing is in the air. */
+  flightMs() {
+    return this._flights.at(-1)?.dur ?? 0;
+  }
+
+  /**
+   * Complete every running move at once: pieces snap home (no landing FX) and
+   * their promises resolve. `clearFx` also drops sparks, ripples and the nudge
+   * (undo: nothing may linger where the piece used to be).
+   */
+  finishAnimations({ clearFx = false } = {}) {
+    for (const f of [...this._flights]) this._endFlight(f);
+    this._arrival = null;
+    if (clearFx) {
+      this.particles = [];
+      this._ripples  = [];
+      this._nudge    = null;
+      this._shockwaves = [];
+    }
+  }
+
+  _endFlight(f) {
+    this._flights = this._flights.filter(x => x !== f);
+    this.floating = this.floating.filter(x => x !== f.entry);
+    if (!this._flights.some(x => x.toKey === f.toKey)) this.hiddenTop.delete(f.toKey);
+    f.resolve();
+  }
+
+  /** Advance every flight to time t (tween, then the landing settle). */
+  _stepFlights(t) {
+    for (const f of [...this._flights]) {
+      if (f.start === null) f.start = t;
+      const e = f.entry;
+      const p = (t - f.start) / f.dur;
+      if (p < 1) {
+        const u  = moveEase(f.kind, p);
+        const pt = tweenPoint(f.pts, u, f.kind);
+        // Vertical speed stretches the tile a touch while it rises or falls.
+        const du = 0.01;
+        const v  = (liftCurve(f.kind, Math.min(1, u + du), f.pts.length) - liftCurve(f.kind, Math.max(0, u - du), f.pts.length)) / (2 * du);
+        const st = f.kind === 'slide' ? 0 : Math.min(0.08, 0.02 * Math.abs(v));
+        Object.assign(e, {
+          x: pt.x,
+          y: pt.y + f.startL.dy + (f.endL.dy - f.startL.dy) * u,
+          lift: pt.lift * f.liftH,
+          scale: (f.startL.scale + (f.endL.scale - f.startL.scale) * u) * (1 + pt.lift * f.grow),
+          sx: 1 - st, sy: 1 + st,
+          alpha: f.kind === 'place' ? Math.min(1, p / 0.3) : 1,
+        });
+        continue;
+      }
+      if (f.landedAt === null) {
+        f.landedAt = f.start + f.dur;
+        this._land(f, t);
+      }
+      const q = (t - f.landedAt) / LAND_MS;
+      if (q >= 1) { this._endFlight(f); continue; }
+      const sq  = SQUASH[f.kind] * Math.exp(-4 * q) * Math.cos(q * Math.PI * 2.5);
+      const end = f.pts.at(-1);
+      Object.assign(e, { x: end.x, y: end.y + f.endL.dy, lift: 0, scale: f.endL.scale, sx: 1 + sq, sy: 1 - sq, alpha: 1 });
+    }
+  }
+
+  /** Touchdown effects for flight f at time t. */
+  _land(f, t) {
+    const end = f.pts.at(-1);
+    const x = end.x, y = end.y + f.endL.dy;
+    const r = (this.SIZE - 2) * f.endL.scale;
+    this._ripples.push({ x, y, r, color: f.player === 2 ? P2 : P1, born: t });
+    const color = SPECIES_COLOR[f.piece.type] ?? '#ffffff';
+    const n = SPARKS[f.kind] ?? 12;
+    const k = this.SIZE / 50;
+    for (let i = 0; i < n; i++) {
+      const a = ((i + Math.random() * 0.8) / n) * Math.PI * 2;
+      const speed = (230 + Math.random() * 220) * k;
+      const d = r * (0.8 + Math.random() * 0.15);
+      this.particles.push({
+        x: x + Math.cos(a) * d, y: y + Math.sin(a) * d * 0.9,
+        vx: Math.cos(a) * speed, vy: Math.sin(a) * speed * 0.9 - 40 * k,
+        born: t, life: 380 + Math.random() * 280, color,
+      });
+    }
+    if (this.particles.length > MAX_PARTICLES) this.particles.splice(0, this.particles.length - MAX_PARTICLES);
+    if (NUDGE_PX[f.kind]) this._nudge = { born: t, amp: NUDGE_PX[f.kind] };
+    this.onLand?.(f.kind, f.player);
+  }
+
+  /** Age the landing effects; drop finished ones. */
+  _stepFx(t, dt) {
+    const s = dt / 1000;
+    const drag = Math.exp(-4.5 * s);
+    this.particles = this.particles.filter(p => t - p.born < p.life);
+    for (const p of this.particles) {
+      p.x += p.vx * s; p.y += p.vy * s;
+      p.vx *= drag;    p.vy = p.vy * drag + 160 * s; // a little gravity
+    }
+    this._ripples = this._ripples.filter(r => t - r.born < RIPPLE_MS);
+    for (const w of this._shockwaves) w.born ??= t;
+    this._shockwaves = this._shockwaves.filter(w => t - w.born < SHOCK_MS);
+    if (this._nudge && t - this._nudge.born >= NUDGE_MS) this._nudge = null;
+  }
+
+  /** Screen offset of the camera nudge: a quick drop that springs back. */
+  _nudgeOffset(t) {
+    const n = this._nudge;
+    if (!n) return 0;
+    const q = (t - n.born) / NUDGE_MS;
+    return n.amp * Math.exp(-3.5 * q) * Math.sin(Math.PI * Math.min(1, q) * 2.5 + Math.PI / 2) * (q < 1 ? 1 : 0);
+  }
+
+  /** Ripple rings, impact flashes and sparks (board space, additive). */
+  _drawFx(ctx, t) {
+    if (!this._ripples.length && !this.particles.length) return;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineJoin = 'round';
+    for (const rp of this._ripples) {
+      const q = (t - rp.born) / RIPPLE_MS;
+      if (q < 0) continue;
+      if (t - rp.born < FLASH_MS) {   // the face flashes white on impact
+        this._hexPath(ctx, rp.x, rp.y, rp.r * 0.92);
+        ctx.globalAlpha = 0.32 * (1 - (t - rp.born) / FLASH_MS);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+      }
+      const R = rp.r * (1.02 + 0.95 * easeOutCubic(q));
+      const a = Math.pow(1 - q, 1.6);
+      this._hexPath(ctx, rp.x, rp.y, R);
+      ctx.strokeStyle = rp.color;
+      ctx.globalAlpha = 0.28 * a;
+      ctx.lineWidth = 10 * (1 - q) + 2;
+      ctx.stroke();
+      ctx.globalAlpha = 0.95 * a;
+      ctx.lineWidth = Math.max(MIN_LINE_PX / this.scale, 3 * (1 - q) + 0.8);
+      ctx.stroke();
+    }
+    ctx.lineCap = 'round';
+    const minW = MIN_LINE_PX / this.scale;
+    for (const p of this.particles) {
+      const q = (t - p.born) / p.life;
+      if (q < 0) continue;
+      const a = 1 - q;
+      // A coloured streak trailing behind the spark…
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(p.x - p.vx * 0.06, p.y - p.vy * 0.06);
+      ctx.globalAlpha = a * a;
+      ctx.strokeStyle = p.color;
+      ctx.lineWidth = Math.max(minW, 4.2 * (1 - q * 0.6));
+      ctx.stroke();
+      // …with a white-hot head while it is young.
+      if (q < 0.5) {
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y);
+        ctx.lineTo(p.x - p.vx * 0.02, p.y - p.vy * 0.02);
+        ctx.globalAlpha = 0.9 * (1 - q * 2);
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = Math.max(minW, 1.8);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  /**
+   * The danger meter: six small hex pips just inside each queen's top face, one
+   * per side, lit when that neighbour is occupied — queen gold while calm, an
+   * amber pulse at four, a fast red pulse plus a red halo round the tile at
+   * five (and a red wash on the face). Live overlay (cheap paths), so the cached layer never re-renders for it.
+   */
+  _drawQueenPips(ctx, t, faces) {
+    const meters = queenPips(this.pieces, this.hiddenTop);
+    if (!meters.length) return;
+    const tileR = this.SIZE - 2;
+    ctx.save();
+    ctx.lineJoin = 'round';
+    for (const m of meters) {
+      const { q, r } = parseKey(m.key);
+      const c = hexToPixel(q, r, this.SIZE);
+      const top = stackLayers(m.height, tileR).at(-1);
+      const fx = c.x, fy = c.y + top.dy, fr = tileR * top.scale;
+      const level = PIP_LEVEL[m.count] ?? PIP_LEVEL.calm;
+      const pulse = pipPulse(m.count, t, this.reducedMotion);
+      if (m.count === 5) {
+        this._tintFace(ctx, faces.get(m.key), '255,48,72', 0.25 + 0.75 * pulse);
+        this._blitRingAt(ctx, 'danger', fx, fy, 0.35 + 0.65 * pulse, 1 + 0.05 * pulse);
+      } else if (m.count === 4) {
+        this._blitRingAt(ctx, 'warn', fx, fy, 0.2 + 0.4 * pulse);
+      }
+      const pr = Math.max(fr * PIP_R, PIP_MIN_PX / this.scale);
+      const d  = fr * PIP_DIST;
+      for (let i = 0; i < 6; i++) {
+        const px = fx + m.dirs[i].x * d, py = fy + m.dirs[i].y * d;
+        ctx.globalCompositeOperation = 'source-over';
+        this._hexPath(ctx, px, py, pr * 1.18);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = 'rgba(2,2,8,.82)';     // socket
+        ctx.fill();
+        if (!m.lit[i]) {
+          ctx.strokeStyle = 'rgba(255,255,255,.22)';
+          ctx.lineWidth = Math.max(pr * 0.28, 0.8 / this.scale);
+          this._hexPath(ctx, px, py, pr * 0.82);
+          ctx.stroke();
+          continue;
+        }
+        ctx.globalCompositeOperation = 'lighter';
+        this._hexPath(ctx, px, py, pr * 2.1);   // soft bloom (no shadowBlur per frame)
+        ctx.globalAlpha = 0.16 + 0.22 * pulse;
+        ctx.fillStyle = `rgb(${level.rgb})`;
+        ctx.fill();
+        ctx.globalCompositeOperation = 'source-over';
+        this._hexPath(ctx, px, py, pr);
+        ctx.globalAlpha = 0.6 + 0.4 * pulse;
+        ctx.fill();
+        this._hexPath(ctx, px, py, pr * 0.42); // hot centre
+        ctx.globalAlpha = 0.55 * pulse;
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  /** Expanding white hex rings + a flash on the queen's tile (board space, additive). */
+  _drawShockwaves(ctx, t) {
+    if (!this._shockwaves.length) return;
+    const reach = Math.max(this.W, this.H) / this.scale * 0.85;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineJoin = 'round';
+    for (const w of this._shockwaves) {
+      const age = t - (w.born ?? t);
+      if (age < 160) {
+        this._hexPath(ctx, w.x, w.y, w.r * 0.95);
+        ctx.globalAlpha = 0.75 * (1 - age / 160);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+      }
+      if (age < 260) {   // a white blast over the neighbours (solid fills: a gradient per frame is too slow on phones)
+        const p = age / 260;
+        ctx.fillStyle = '#ffffff';
+        for (const [grow, alpha] of [[1.6, 0.16], [2.6, 0.08]]) {
+          this._hexPath(ctx, w.x, w.y, w.r * (1 + grow * easeOutCubic(p)));
+          ctx.globalAlpha = alpha * (1 - p);
+          ctx.fill();
+        }
+      }
+      for (const [delay, span, width] of [[0, 1, 1], [140, 0.62, 0.55]]) {
+        const q = (age - delay) / (SHOCK_MS - delay);
+        if (q <= 0 || q >= 1) continue;
+        const R = w.r + (reach * span - w.r) * easeOutCubic(q);
+        const a = Math.pow(1 - q, 1.4);
+        // One stroke per ring: a bright core with a translucent halo would double the fill cost.
+        this._hexPath(ctx, w.x, w.y, R);
+        ctx.strokeStyle = '#ffffff';
+        ctx.globalAlpha = 0.9 * a * width;
+        ctx.lineWidth = Math.max(MIN_LINE_PX / this.scale, (9 * (1 - q) + 1.5) * width);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
   }
 
   _fitTarget() {
@@ -219,32 +938,303 @@ export class Board {
 
   // ── Render loop ────────────────────────────────────────
 
-  draw(t) {
-    const ctx = this.ctx;
-    const W = this.W, H = this.H;
-    this._stepCamera(t);
+  /** Mark the cached hive layer stale; the next frame re-renders it. */
+  invalidate() {
+    this._dirty = true;
+  }
 
-    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+  /**
+   * Each frame: background + stars, then the cached hive layer (re-rendered only
+   * when its inputs changed), then the animated overlays — loose pieces (arrival
+   * pop, `floating`), selection / throw-pick rings, ghost and throw pulses. The
+   * glyph canvas is only touched when its layer moved or a loose piece is live.
+   */
+  draw(t) {
+    this._stepCamera(t);
+    if (this.scale !== this._prevScale) { this._prevScale = this.scale; this._zoomedAt = t; }
+    const dt = this._lastT === null ? 16 : Math.max(0, Math.min(50, t - this._lastT));
+    this._lastT = t;
+    this._stepFlights(t);
+    this._stepFx(t, dt);
+
+    // The landing nudge shifts this frame only; the camera itself stays put.
+    const nudge = this._nudgeOffset(t);
+    this.ty += nudge;
+    try {
+      this._drawFrame(t);
+    } finally {
+      this.ty -= nudge;
+    }
+  }
+
+  _drawFrame(t) {
+    const ctx = this.ctx;
+    const W = this.W, H = this.H, dpr = this.dpr;
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.globalAlpha = 1;
     ctx.fillStyle = BG;
     ctx.fillRect(0, 0, W, H);
-
     this._drawStars(ctx, W, H, t);
 
-    // Board-space drawing
-    ctx.save();
-    ctx.translate(this.tx, this.ty);
-    ctx.scale(this.scale, this.scale);
+    const loose = this._loosePieces(t);
+    const layer = this._currentLayer(t, loose);
+    loose.push(...this._parkedPieces(layer, loose));
 
-    this._drawGridHints(ctx);
-    this._drawLastMoveSource(ctx);
-    const pops = this._drawPieces(ctx, t);
-    this._drawLastMoveRing(ctx);
-    this._drawGhosts(ctx, t); // drawn after pieces so ghost rings overlay beetle targets
+    // Blit the layer, pixel-aligned (scaled only while a zoom settles).
+    const k  = this.scale / layer.scale;
+    const gx = Math.round((this.tx + layer.bx0 * this.scale) * dpr);
+    const gy = Math.round((this.ty + layer.by0 * this.scale) * dpr);
+    const gw = k === 1 ? layer.board.width  : layer.board.width  * k;
+    const gh = k === 1 ? layer.board.height : layer.board.height * k;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(layer.board, gx, gy, gw, gh);
 
-    ctx.restore();
+    // Animated overlays, in board space.
+    const S = dpr * this.scale;
+    ctx.setTransform(S, 0, 0, S, this.tx * dpr, this.ty * dpr);
+    const faces = new Map(layer.faces);
+    for (const lp of loose) if (lp.stack) this._drawStack(ctx, lp.key, lp.stack, lp.x, lp.y, lp.pop, faces);
+    // Marks on the hive go under anything in the air, so a flying piece covers them.
+    this._drawQueenPips(ctx, t, faces);
+    this._drawSelectionRing(ctx, t);
+    this._drawThrowPick(ctx, t, faces);
+    this._drawGhostPulses(ctx, t, faces);
+    for (const lp of loose) if (!lp.stack) this._drawFloating(ctx, lp, faces);
+    this._drawFx(ctx, t);
+    this._drawShockwaves(ctx, t);
 
-    // Emoji rendered on a completely separate canvas — zero shared state
-    this._drawEmojis(pops);
+    this._compositeGlyphs(layer, gx, gy, gw, gh, loose, faces);
+  }
+
+  /**
+   * Pieces drawn live this frame instead of from the layer: the stack popping
+   * in at `_arrival`, plus every `floating` piece (in flight, board space).
+   */
+  _loosePieces(t) {
+    const loose = [];
+    const a = this._arrival;
+    if (a && this.pieces.has(a.key)) {
+      const pop = this._arrivalScale(a.key, t);
+      if (this._arrival) {
+        const { q, r } = parseKey(a.key);
+        const p = hexToPixel(q, r, this.SIZE);
+        loose.push({ key: a.key, stack: this.pieces.get(a.key), x: p.x, y: p.y, pop });
+      }
+    }
+    for (const f of this.floating) loose.push({ key: null, ...f });
+    return loose;
+  }
+
+  /** The hive layer for this frame: the cached one if still valid, else a fresh render. */
+  _currentLayer(t, loose) {
+    const hiddenStacks = new Set(loose.filter(lp => lp.stack).map(lp => lp.key));
+    const key = hiveLayerKey({
+      pieces: this.pieces, ghosts: this.ghosts, selectedHex: this.selectedHex, throwPick: this.throwPick,
+      lastMove: this.lastMove, hiddenTop: this.hiddenTop, hiddenStacks,
+    });
+    const content = this._contentBounds();
+    const L = this._layer;
+    const moving = !!this._camera || t - this._zoomedAt < ZOOM_SETTLE_MS;
+    if (L && !this._dirty && L.dpr === this.dpr && layerCovers(L.rect, this._viewRect(0), content)) {
+      // While the camera moves, a piece that just settled (left hiddenTop /
+      // hiddenStacks) is drawn loose over the old layer instead of forcing a
+      // re-render mid-move; the layer catches up once the camera settles.
+      const usable = L.key === key || (moving && this._onlyRejoining(L, hiddenStacks));
+      if (usable) {
+        if (L.scale === this.scale) return L;
+        const ratio = this.scale / L.scale;
+        if (moving && ratio > ZOOM_REUSE_MIN && ratio < ZOOM_REUSE_MAX) return L;
+      }
+    }
+    return this._renderLayer(key, content, hiddenStacks);
+  }
+
+  /** True when layer L differs from the wanted one only by pieces it still hides. */
+  _onlyRejoining(L, hiddenStacks) {
+    const within = (small, big) => [...small].every(k => big.has(k));
+    if (!within(this.hiddenTop, L.hiddenTop) || !within(hiddenStacks, L.hiddenStacks)) return false;
+    return L.key === hiveLayerKey({
+      pieces: this.pieces, ghosts: this.ghosts, selectedHex: this.selectedHex, throwPick: this.throwPick,
+      lastMove: this.lastMove, hiddenTop: L.hiddenTop, hiddenStacks: L.hiddenStacks,
+    });
+  }
+
+  /** Pieces the layer still leaves out although they have settled (see _currentLayer). */
+  _parkedPieces(layer, loose) {
+    const parked = [];
+    const live = new Set(loose.filter(lp => lp.stack).map(lp => lp.key));
+    for (const key of layer.hiddenStacks) {
+      if (live.has(key) || !this.pieces.has(key)) continue;
+      const { q, r } = parseKey(key);
+      const p = hexToPixel(q, r, this.SIZE);
+      parked.push({ key, stack: this.pieces.get(key), x: p.x, y: p.y, pop: 1 });
+    }
+    for (const key of layer.hiddenTop) {
+      const stack = this.pieces.get(key);
+      if (this.hiddenTop.has(key) || !stack?.length) continue;
+      const { q, r } = parseKey(key);
+      const p = hexToPixel(q, r, this.SIZE);
+      const top = stackLayers(stack.length, this.SIZE - 2).at(-1);
+      parked.push({ key: null, piece: stack.at(-1), badgeStack: stack, x: p.x, y: p.y + top.dy, scale: top.scale });
+    }
+    return parked;
+  }
+
+  /** Board-space box of everything the layer can draw. */
+  _contentBounds() {
+    const keys = [...this.pieces.keys(), ...this.ghosts];
+    if (this.lastMove?.from) keys.push(this.lastMove.from);
+    if (!this.pieces.size) keys.push('0,0'); // the dashed first-placement hint
+    return hiveBounds(keys, this.SIZE, this.SIZE * LAYER_PAD);
+  }
+
+  /** Visible board-space rect, grown by `margin` × the viewport on every side. */
+  _viewRect(margin) {
+    const mx = this.W * margin, my = this.H * margin, s = this.scale;
+    return {
+      x0: (-mx - this.tx) / s,          y0: (-my - this.ty) / s,
+      x1: (this.W + mx - this.tx) / s,  y1: (this.H + my - this.ty) / s,
+    };
+  }
+
+  _makeCanvas() {
+    return globalThis.document.createElement('canvas');
+  }
+
+  /**
+   * Render the hive into the two layer canvases: tiles and marks for #board,
+   * glyphs and badges for #emoji-layer (separate contexts — the glyph content
+   * never shares state with the animated board canvas). The layer covers the
+   * hive, clipped to the viewport plus LAYER_MARGIN, at the current scale/dpr.
+   */
+  _renderLayer(key, content, hiddenStacks) {
+    const dpr = this.dpr, s = this.scale;
+    const L = this._layer ??= { board: this._makeCanvas(), glyphs: this._makeCanvas(), id: 0 };
+
+    const view = this._viewRect(LAYER_MARGIN);
+    const rect = content && {
+      x0: Math.max(content.x0, view.x0), y0: Math.max(content.y0, view.y0),
+      x1: Math.min(content.x1, view.x1), y1: Math.min(content.y1, view.y1),
+    };
+    const visible = rect && rect.x0 < rect.x1 && rect.y0 < rect.y1;
+    let devX0 = 0, devY0 = 0, w = 1, h = 1;
+    if (visible) {
+      devX0 = Math.floor((this.tx + rect.x0 * s) * dpr);
+      devY0 = Math.floor((this.ty + rect.y0 * s) * dpr);
+      w = Math.max(1, Math.ceil((this.tx + rect.x1 * s) * dpr) - devX0);
+      h = Math.max(1, Math.ceil((this.ty + rect.y1 * s) * dpr) - devY0);
+    }
+    for (const c of [L.board, L.glyphs]) {
+      if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+      else {
+        const g = c.getContext('2d');
+        g.setTransform(1, 0, 0, 1, 0, 0); // the last render left its board transform on the context
+        g.clearRect(0, 0, w, h);
+      }
+    }
+
+    let faces = new Map();
+    if (visible) {
+      const bctx = L.board.getContext('2d');
+      bctx.setTransform(dpr * s, 0, 0, dpr * s, this.tx * dpr - devX0, this.ty * dpr - devY0);
+      this._drawGridHints(bctx);
+      this._drawLastMoveSource(bctx);
+      faces = this._drawPieces(bctx, hiddenStacks);
+      this._drawLastMoveRing(bctx);
+      this._drawGhostBases(bctx);
+
+      const gctx = L.glyphs.getContext('2d');
+      gctx.setTransform(dpr, 0, 0, dpr, -devX0, -devY0);
+      this._drawGlyphs(gctx, faces);
+    }
+
+    Object.assign(L, {
+      key, dpr, scale: s, faces, id: L.id + 1,
+      hiddenTop: new Set(this.hiddenTop), hiddenStacks: new Set(hiddenStacks),
+      rect: visible ? rect : { x0: 0, y0: 0, x1: 0, y1: 0 },
+      bx0: (devX0 / dpr - this.tx) / s,
+      by0: (devY0 / dpr - this.ty) / s,
+    });
+    this._dirty = false;
+    return L;
+  }
+
+  /**
+   * Update #emoji-layer: blit the glyph layer where the board layer went, then
+   * draw live glyphs for loose pieces. Skipped entirely while nothing changed;
+   * while only loose pieces move, just the patches they covered last frame are
+   * restored from the layer (no full-canvas clear + blit per animation frame).
+   */
+  _compositeGlyphs(layer, gx, gy, gw, gh, loose, faces) {
+    const stamp = `${layer.id}|${gx}|${gy}|${gw}|${gh}`;
+    const live  = loose.length > 0;
+    if (!live && !this._glyphsLive && stamp === this._glyphStamp) return;
+
+    const ec = this.emojiCtx;
+    ec.setTransform(1, 0, 0, 1, 0, 0);
+    ec.globalAlpha = 1;
+    ec.globalCompositeOperation = 'source-over';
+    const patch = stamp === this._glyphStamp && gw === layer.glyphs.width && gh === layer.glyphs.height;
+    if (patch) {
+      for (const r of this._liveRects ?? []) {
+        ec.clearRect(r.x, r.y, r.w, r.h);
+        const sx = Math.max(0, r.x - gx), sy = Math.max(0, r.y - gy);
+        const sw = Math.min(gw, r.x + r.w - gx) - sx, sh = Math.min(gh, r.y + r.h - gy) - sy;
+        if (sw > 0 && sh > 0) ec.drawImage(layer.glyphs, sx, sy, sw, sh, gx + sx, gy + sy, sw, sh);
+      }
+    } else {
+      ec.clearRect(0, 0, this.emojiCanvas.width, this.emojiCanvas.height);
+      ec.drawImage(layer.glyphs, gx, gy, gw, gh);
+    }
+    this._glyphStamp = stamp;
+    this._glyphsLive = live;
+    this._liveRects  = [];
+    if (!live) return;
+
+    ec.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    const liveFaces = new Map();
+    const dpr = this.dpr, s = this.scale;
+    for (const lp of loose) {
+      const id = lp.key ?? lp;
+      const face = faces.get(id);
+      if (!face) continue;
+      liveFaces.set(id, face);
+      // Device-px box that covers the glyph, its glow and any stack badge.
+      const half = (face.r * s * 1.1 * Math.max(face.sx ?? 1, face.sy ?? 1) + 4) * dpr;
+      const cx = (this.tx + face.x * s) * dpr, cy = (this.ty + face.y * s) * dpr;
+      const x = Math.floor(cx - half), y = Math.floor(cy - half);
+      this._liveRects.push({ x, y, w: Math.ceil(cx + half) - x, h: Math.ceil(cy + half) - y });
+    }
+    // Settled pieces first; then each floating piece cuts its tile out of the
+    // glyphs beneath it (they sit on this canvas, above its tile on #board)
+    // before drawing its own glyph — so nothing below shows through it.
+    const settled = new Map(), airborne = [];
+    for (const [id, face] of liveFaces) {
+      if (face.sx !== undefined) airborne.push([id, face]);
+      else settled.set(id, face);
+    }
+    this._drawGlyphs(ec, settled);
+    for (const [id, face] of airborne) {
+      this._eraseTile(ec, face);
+      this._drawGlyphs(ec, new Map([[id, face]]));
+    }
+  }
+
+  /** Clear a floating tile's footprint (face and lip, squashed and faded like it) on a screen-px glyph context. */
+  _eraseTile(ec, face) {
+    const s = this.scale;
+    const r = face.r * s;
+    ec.save();
+    ec.translate(this.tx + face.x * s, this.ty + face.y * s);
+    ec.scale(face.sx ?? 1, face.sy ?? 1);
+    ec.globalAlpha = face.alpha ?? 1;
+    ec.globalCompositeOperation = 'destination-out';
+    this._hexPath(ec, 0, 0, r);
+    ec.fill();
+    this._hexPath(ec, 0, r * LIP, r);
+    ec.fill();
+    ec.restore();
   }
 
   // ── Private render helpers ─────────────────────────────
@@ -299,236 +1289,435 @@ export class Board {
     ctx.save();
     ctx.setLineDash([4, 6]);
     ctx.strokeStyle = lm.player === 1 ? 'rgba(255,45,120,.45)' : 'rgba(0,245,255,.45)';
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = Math.max(1.5, MIN_LINE_PX / this.scale);
     this._hexPath(ctx, p.x, p.y, this.SIZE - 6);
     ctx.stroke();
     ctx.restore();
   }
 
-  /** Gold corner ticks around the piece that moved last. */
+  /** Gold corner ticks around the piece that moved last (never thinner than MIN_LINE_PX). */
   _drawLastMoveRing(ctx) {
     const lm = this.lastMove;
-    if (!lm?.to || !this.pieces.has(lm.to)) return;
+    if (!lm?.to || !this.pieces.has(lm.to) || this.hiddenTop.has(lm.to)) return; // marks it once it lands
     const { q, r } = parseKey(lm.to);
     const p = hexToPixel(q, r, this.SIZE);
-    const R = this.SIZE + 4;
+    const R   = this.SIZE + 4;
+    const len = Math.max(11, 4 / this.scale);
     ctx.save();
     ctx.strokeStyle = GOLD;
-    ctx.globalAlpha = 0.8;
-    ctx.lineWidth   = 2;
+    ctx.globalAlpha = 0.9;
+    ctx.lineWidth   = Math.max(2.75, MIN_LINE_PX / this.scale);
     ctx.lineCap     = 'round';
+    ctx.lineJoin    = 'round';
     for (let i = 0; i < 6; i++) {
       const a = (Math.PI / 3) * i;
       const cx = p.x + R * Math.cos(a), cy = p.y + R * Math.sin(a);
       const a1 = a + (2 * Math.PI) / 3, a2 = a - (2 * Math.PI) / 3; // along the two edges
       ctx.beginPath();
-      ctx.moveTo(cx + 9 * Math.cos(a1), cy + 9 * Math.sin(a1));
+      ctx.moveTo(cx + len * Math.cos(a1), cy + len * Math.sin(a1));
       ctx.lineTo(cx, cy);
-      ctx.lineTo(cx + 9 * Math.cos(a2), cy + 9 * Math.sin(a2));
+      ctx.lineTo(cx + len * Math.cos(a2), cy + len * Math.sin(a2));
       ctx.stroke();
     }
     ctx.restore();
   }
 
-  _drawGhosts(ctx, t) {
-    const pulse = 0.38 + 0.30 * Math.sin(t / 360);
-
+  /** The static part of empty move/placement targets: faint fill and centre dot. */
+  _drawGhostBases(ctx) {
+    ctx.save();
+    ctx.shadowBlur  = 16;
+    ctx.shadowColor = GHOST;
     for (const key of this.ghosts) {
+      if (this.pieces.has(key)) continue;
       const { q, r } = parseKey(key);
       const p = hexToPixel(q, r, this.SIZE);
-      const isOccupied = this.pieces.has(key); // beetle can climb onto occupied hexes
+      this._hexPath(ctx, p.x, p.y, this.SIZE - 2);
+      ctx.fillStyle = 'rgba(57,255,20,0.09)';
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(57,255,20,0.55)';
+      ctx.fill();
+    }
+    ctx.restore();
+  }
 
-      ctx.save();
-      ctx.shadowBlur  = isOccupied ? 22 : 16;
-      ctx.shadowColor = GHOST;
-
-      if (!isOccupied) {
-        // Empty target: fill + border + center dot
-        this._hexPath(ctx, p.x, p.y, this.SIZE - 2);
-        ctx.fillStyle = 'rgba(57,255,20,0.09)';
-        ctx.fill();
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(57,255,20,0.55)';
-        ctx.fill();
-      }
-
-      // For occupied targets, draw a slightly larger ring so it sits outside the piece hex
-      const ringSize = isOccupied ? this.SIZE + 3 : this.SIZE - 2;
-      ctx.strokeStyle = GHOST;
-      ctx.lineWidth   = isOccupied ? 2.5 : 1.5;
-      ctx.globalAlpha = pulse;
-      this._hexPath(ctx, p.x, p.y, ringSize);
-      ctx.stroke();
-      ctx.restore();
+  /** Pulsing rings on move targets, beetle-climb tints, and amber throwable rings. */
+  _drawGhostPulses(ctx, t, faces) {
+    const pulse = 0.38 + 0.30 * Math.sin(t / 360);
+    for (const key of this.ghosts) {
+      const occupied = this.pieces.has(key); // beetle can climb onto occupied hexes
+      if (occupied) this._tintFace(ctx, faces.get(key), '57,255,20', pulse);
+      this._blitRing(ctx, occupied ? 'ghostOcc' : 'ghost', key, pulse);
     }
 
-    // Throwable pieces: amber ring — signals "tap this to throw it"
     if (this.throwTargets.size === 0) return;
     const amberPulse = 0.50 + 0.38 * Math.sin(t / 310);
-
     for (const key of this.throwTargets) {
-      const { q, r } = parseKey(key);
-      const p = hexToPixel(q, r, this.SIZE);
-
-      ctx.save();
-      ctx.shadowBlur  = 20;
-      ctx.shadowColor = AMBER;
-      ctx.strokeStyle = AMBER;
-      ctx.lineWidth   = 2.5;
-      ctx.globalAlpha = amberPulse;
-      this._hexPath(ctx, p.x, p.y, this.SIZE + 3);
-      ctx.stroke();
-      ctx.restore();
+      if (key === this.throwPick) continue;
+      this._tintFace(ctx, faces.get(key), '255,179,0', amberPulse);
+      this._blitRing(ctx, 'amber', key, amberPulse);
     }
   }
 
-  /** Returns a Map of hex key → arrival scale so glyphs pop in sync. */
-  _drawPieces(ctx, t) {
-    const pops = new Map();
-    for (const [key, stack] of this.pieces) {
-      const { q, r } = parseKey(key);
-      const p        = hexToPixel(q, r, this.SIZE);
-      const selected = key === this.selectedHex;
-      const topIdx   = stack.length - 1;
-      const pop      = this._arrivalScale(key, t);
-      if (pop !== 1) pops.set(key, pop);
+  /** The piece picked for a pillbug throw: lifted (in the layer), bright ring, warm face. */
+  _drawThrowPick(ctx, t, faces) {
+    if (!this.throwPick || !this.pieces.has(this.throwPick)) return;
+    const pulse = 0.5 + 0.5 * Math.sin(t / 240);
+    this._tintFace(ctx, faces.get(this.throwPick), '255,236,170', 0.35 + 0.25 * pulse);
+    this._blitRing(ctx, 'pick', this.throwPick, 0.85 + 0.15 * pulse);
+  }
 
-      // Pyramid: draw bottom-to-top, each piece centered at the same (p.x, p.y).
-      // Lower pieces use full SIZE; upper pieces shrink so lower ones form a visible frame.
-      for (let i = 0; i <= topIdx; i++) {
-        const piece   = stack[i];
-        const isTop   = i === topIdx;
-        const isP1    = piece.player === 1;
-        const color   = isP1 ? P1 : P2;
-        const fillRgb = isP1 ? '255,45,120' : '0,245,255';
-
-        // Bottom piece: full size. Each layer above it shrinks by 35%.
-        const hexR = (this.SIZE - 2) * Math.pow(0.65, topIdx - i) * (isTop ? pop : 1);
-
-        const idlePulse = 0.28 + 0.06 * Math.sin(t / 900 + (isP1 ? 0 : Math.PI));
-        const selPulse  = 0.50 + 0.50 * Math.sin(t / 240);
-        const fillAlpha = (selected && isTop) ? (0.30 + 0.18 * selPulse)
-                        : isTop               ? idlePulse
-                        :                       0.50;
-        const glowBlur  = (selected && isTop) ? (28 + 18 * selPulse)
-                        : isTop               ? (10 + 6 * idlePulse)
-                        :                       8;
-        const strokeW   = (selected && isTop) ? (2.2 + 1.2 * selPulse)
-                        : isTop               ? 1.8
-                        :                       2.0; // bottom piece border slightly thicker
-
-        ctx.save();
-
-        // Dark base fill first (blocks starfield bleedthrough)
-        ctx.shadowBlur = 0;
-        this._hexPath(ctx, p.x, p.y, hexR);
-        ctx.fillStyle  = '#09091a';
-        ctx.fill();
-
-        // Colored neon fill + glow
-        ctx.shadowBlur  = glowBlur;
-        ctx.shadowColor = (selected && isTop) ? '#ffffff' : color;
-        this._hexPath(ctx, p.x, p.y, hexR);
-        ctx.fillStyle   = `rgba(${fillRgb},${fillAlpha})`;
-        ctx.fill();
-        ctx.strokeStyle = (selected && isTop) ? '#ffffff' : color;
-        ctx.lineWidth   = strokeW;
-        ctx.stroke();
-
-        // Inner bevel line for a little depth
-        if (isTop) {
-          ctx.shadowBlur  = 0;
-          ctx.globalAlpha = 0.22;
-          ctx.lineWidth   = 1;
-          this._hexPath(ctx, p.x, p.y, hexR * 0.8);
-          ctx.stroke();
-          ctx.globalAlpha = 1;
-        }
-
-        // Selection ring (top piece only)
-        if (selected && isTop) {
-          ctx.globalAlpha = 0.35 + 0.65 * selPulse;
-          ctx.shadowBlur  = 24 * selPulse;
-          ctx.shadowColor = '#ffffff';
-          this._hexPath(ctx, p.x, p.y, this.SIZE + 5 + 3 * selPulse);
-          ctx.strokeStyle = '#ffffff';
-          ctx.lineWidth   = 1.2;
-          ctx.stroke();
-        }
-
-        ctx.restore();
-      }
-    }
-    return pops;
+  /** White pulsing ring outside the selected cell, drawn over every tile. */
+  _drawSelectionRing(ctx, t) {
+    if (!this.selectedHex || !this.pieces.has(this.selectedHex)) return;
+    const p = 0.5 + 0.5 * Math.sin(t / 240);
+    const grow = (RINGS.sel.R + 3 * p) / RINGS.sel.R;
+    this._blitRing(ctx, 'selGlow', this.selectedHex, 0.25 + 0.6 * p, grow);
+    this._blitRing(ctx, 'sel', this.selectedHex, 0.6 + 0.4 * p, grow);
   }
 
   /**
-   * Draw all piece glyphs (sprites, or PNG/emoji fallbacks) on the dedicated
-   * emojiCanvas — completely isolated from the board canvas state. No shadows,
-   * no animated fillStyle, no globalAlpha bleed.
+   * Blit a pre-rendered glow ring centred on hex `key` at `alpha`, grown by
+   * `grow`. Restores the board-space transform afterwards.
    */
-  _drawEmojis(pops) {
-    const ec = this.emojiCtx;
+  _blitRing(ctx, kind, key, alpha, grow = 1) {
+    const { q, r } = parseKey(key);
+    const p = hexToPixel(q, r, this.SIZE);
+    this._blitRingAt(ctx, kind, p.x, p.y, alpha, grow);
+  }
 
-    ec.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    ec.clearRect(0, 0, this.W, this.H);
-    if (this.pieces.size === 0) return;
+  /** _blitRing centred on board point (x, y). */
+  _blitRingAt(ctx, kind, x, y, alpha, grow = 1) {
+    const spr = this._ringSprite(kind);
+    const p = { x, y };
+    const dpr = this.dpr;
+    const w = spr.width * grow, h = spr.height * grow;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
+    ctx.drawImage(spr,
+      Math.round((this.tx + p.x * this.scale) * dpr - w / 2),
+      Math.round((this.ty + p.y * this.scale) * dpr - h / 2), w, h);
+    ctx.restore();
+  }
 
-    ec.globalAlpha              = 1;
-    ec.globalCompositeOperation = 'source-over';
-    ec.shadowBlur               = 0;
-    ec.shadowColor              = 'transparent';
-    ec.textAlign                = 'center';
-    ec.textBaseline             = 'middle';
+  /** A RINGS sprite rendered at the current scale × dpr (cached until that changes). */
+  _ringSprite(kind) {
+    const S = this.scale * this.dpr;
+    const cached = this._rings.get(kind);
+    if (cached?.S === S) return cached.canvas;
 
-    for (const [key, stack] of this.pieces) {
-      const { x: sx, y: sy } = this.hexToScreen(key);
-      const topIdx = stack.length - 1;
-      const pop    = pops.get(key) ?? 1;
+    const spec = RINGS[kind];
+    const lw   = Math.max(spec.lw, (spec.minPx ?? 0) / this.scale);
+    const half = Math.ceil((spec.R + lw) * S + spec.blur * 1.6 + 2);
+    const canvas = cached?.canvas ?? this._makeCanvas();
+    canvas.width = canvas.height = half * 2;
+    const g = canvas.getContext('2d');
+    g.setTransform(S, 0, 0, S, half, half);
+    g.shadowBlur  = spec.blur;
+    g.shadowColor = spec.glow ?? spec.color;
+    g.strokeStyle = spec.color;
+    g.lineWidth   = lw;
+    g.lineJoin    = 'round';
+    this._hexPath(g, 0, 0, spec.R);
+    g.stroke();
+    this._rings.set(kind, { S, canvas });
+    return canvas;
+  }
 
-      // Top piece: always full-size, centered
-      const visualSize = Math.round(this.SIZE * this.scale * 0.92 * pop);
-      this._drawPieceVisual(ec, stack[topIdx], sx, sy, visualSize);
+  /**
+   * Draw every stack as stepped 3D tiles. Stacks are painted back-to-front
+   * (top row first) so a tile's lip and a raised stack overlap the row behind.
+   * Stacks in `hiddenStacks` are skipped and `hiddenTop` hexes lose their top
+   * piece (both are drawn live as overlays instead).
+   * @returns {Map<string, {x:number, y:number, r:number, stack:Array}>} top-face
+   *          geometry in board space, so the glyph layer lines up with lifts.
+   */
+  _drawPieces(ctx, hiddenStacks = new Set()) {
+    const faces = new Map();
+    const order = [...this.pieces.keys()].map(key => {
+      const { q, r } = parseKey(key);
+      return { key, p: hexToPixel(q, r, this.SIZE) };
+    }).sort((a, b) => a.p.y - b.p.y || a.p.x - b.p.x);
 
-      // Buried pieces: badges fanned toward the lower-right, deeper = further out.
-      if (topIdx > 0) {
-        const badgeSize = Math.round(this.SIZE * this.scale * 0.34);
-
-        for (let i = 0; i < topIdx; i++) {
-          const depth   = topIdx - i; // 1 for just-below-top, higher for deeper
-          const dist    = this.SIZE * this.scale * (0.44 + (depth - 1) * 0.20);
-          const badgeSx = sx + dist * 0.60;
-          const badgeSy = sy + dist * 0.58 + 1;
-
-          // Dark disc in the owner's color keeps the badge legible over the glow
-          ec.beginPath();
-          ec.arc(badgeSx, badgeSy, badgeSize * 0.62, 0, Math.PI * 2);
-          ec.fillStyle   = 'rgba(9,9,26,.92)';
-          ec.fill();
-          ec.lineWidth   = Math.max(1, badgeSize * 0.07);
-          ec.strokeStyle = stack[i].player === 1 ? P1 : P2;
-          ec.stroke();
-
-          this._drawPieceVisual(ec, stack[i], badgeSx, badgeSy, badgeSize);
-        }
-      }
+    for (const { key, p } of order) {
+      if (hiddenStacks.has(key)) continue;
+      let stack = this.pieces.get(key);
+      if (this.hiddenTop.has(key)) stack = stack.slice(0, -1);
+      if (stack.length) this._drawStack(ctx, key, stack, p.x, p.y, 1, faces);
     }
+    return faces;
+  }
+
+  /** One stack at (x0, y0); `pop` scales the top tile (arrival). Records its top face. */
+  _drawStack(ctx, key, stack, x0, y0, pop, faces) {
+    const tileR    = this.SIZE - 2;
+    const selected = key === this.selectedHex;
+    const picked   = key === this.throwPick;
+    const layers   = stackLayers(stack.length, tileR);
+    const topIdx   = stack.length - 1;
+    for (let i = 0; i <= topIdx; i++) {
+      const L     = layers[i];
+      const isTop = i === topIdx;
+      const lift  = isTop && (selected || picked) ? tileR * (picked ? 0.12 : 0.06) : 0;
+      const x = x0 + L.dx, y = y0 + L.dy - lift;
+      const r = tileR * L.scale * (isTop ? pop : 1);
+      this._drawTile(ctx, x, y, r, stack[i].player, {
+        shade: L.shade, selected: isTop && selected, picked: isTop && picked, lift,
+      });
+      if (isTop) faces.set(key, { x, y, r, stack });
+    }
+  }
+
+  /**
+   * A single in-flight piece from `floating` (board space), keyed by its entry:
+   * a soft shadow on the ground below, then the pre-rendered tile raised by
+   * `lift`, grown by `scale`, squashed by `sx`/`sy` and faded by `alpha`.
+   */
+  _drawFloating(ctx, f, faces) {
+    const tileR = this.SIZE - 2;
+    const r     = tileR * (f.scale ?? 1);
+    const lift  = f.lift ?? 0;
+    const sx = f.sx ?? 1, sy = f.sy ?? 1, alpha = f.alpha ?? 1;
+    ctx.save();
+    if (lift > 0.5) {
+      const h = Math.min(1, lift / (this.SIZE * 1.5));
+      const g = ctx.createRadialGradient(f.x, f.y + r * LIP, 0, f.x, f.y + r * LIP, r * (1.05 - 0.25 * h));
+      g.addColorStop(0, `rgba(0,0,0,${(0.55 * (1 - 0.6 * h) * alpha).toFixed(3)})`);
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.ellipse(f.x, f.y + r * LIP, r * (1.05 - 0.25 * h), r * (0.8 - 0.2 * h), 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    const spr = this._tileSprite(f.piece.player);
+    const k = r / tileR;
+    ctx.globalAlpha = alpha;
+    ctx.translate(f.x, f.y - lift);
+    ctx.scale(k * sx, k * sy);
+    ctx.drawImage(spr.canvas, -spr.half / spr.S, -spr.half / spr.S, (2 * spr.half) / spr.S, (2 * spr.half) / spr.S);
+    ctx.restore();
+    faces.set(f, { x: f.x, y: f.y - lift, r, stack: f.badgeStack ?? [f.piece], sx, sy, alpha });
+  }
+
+  /** A player's plain tile, pre-rendered (glow and all) so flights never blur per frame. */
+  _tileSprite(player) {
+    const S = this.scale * this.dpr * 1.25; // headroom: lifted pieces grow
+    const cached = this._tiles.get(player);
+    if (cached && cached.S / S > 0.8 && cached.S / S < 1.25) return cached;
+    const R = this.SIZE - 2;
+    const half = Math.ceil(R * 1.55 * S);
+    const canvas = cached?.canvas ?? this._makeCanvas();
+    canvas.width = canvas.height = half * 2;
+    const g = canvas.getContext('2d');
+    g.setTransform(S, 0, 0, S, half, half);
+    this._drawTile(g, 0, 0, R, player, {});
+    const spr = { S, half, canvas };
+    this._tiles.set(player, spr);
+    return spr;
+  }
+
+  /** Pulsing colour wash + inner ring on a tile's face (glyph stays on top). */
+  _tintFace(ctx, face, rgb, pulse) {
+    if (!face) return;
+    const inner = face.r * (1 - RIM * 1.6);
+    ctx.save();
+    ctx.shadowBlur = 0;
+    this._hexPath(ctx, face.x, face.y, inner);
+    ctx.fillStyle = `rgba(${rgb},${(0.10 + 0.14 * pulse).toFixed(3)})`;
+    ctx.fill();
+    ctx.strokeStyle = `rgba(${rgb},${(0.45 + 0.4 * pulse).toFixed(3)})`;
+    ctx.lineWidth   = Math.max(1.5, face.r * 0.05);
+    ctx.lineJoin    = 'round';
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /**
+   * One tile: soft drop shadow, a player-tinted lip for thickness, a dark
+   * bevelled face, a thick glowing rim in the owner's colour and a top-edge
+   * highlight. `shade` (0..1) darkens buried slabs; `selected` gives the rim a
+   * white glow, `picked` (pillbug throw) a hot amber one.
+   */
+  _drawTile(ctx, x, y, r, player, { shade = 0, selected = false, picked = false, lift = 0 }) {
+    const pal   = TILE[player] ?? TILE[1];
+    const rimW  = r * RIM;
+    const lipDy = r * LIP;
+
+    ctx.save();
+
+    // Contact shadow: grounds the tile; grows when the tile is lifted.
+    ctx.shadowColor   = 'rgba(0,0,0,.75)';
+    ctx.shadowBlur    = r * 0.22 + lift * 2;
+    ctx.shadowOffsetY = r * 0.06 + lift;
+    this._hexPath(ctx, x, y + lipDy, r);
+    ctx.fillStyle = pal.lip;
+    ctx.fill();
+    ctx.shadowColor = 'transparent';
+    ctx.shadowBlur = 0;
+    ctx.shadowOffsetY = 0;
+
+    // Lip edge: a faint player-colour line so the slab reads as solid.
+    ctx.strokeStyle = pal.lipEdge;
+    ctx.lineWidth   = Math.max(1, r * 0.03);
+    ctx.stroke();
+
+    // Rim with neon glow (the glow is what makes ownership readable at a glance).
+    this._hexPath(ctx, x, y, r - rimW / 2);
+    ctx.shadowColor = picked ? AMBER : selected ? '#ffffff' : pal.rim;
+    ctx.shadowBlur  = shade ? r * 0.12 : (selected || picked) ? r * 0.58 : r * 0.29;
+    ctx.strokeStyle = pal.rim;
+    ctx.lineWidth   = rimW;
+    ctx.lineJoin    = 'round';
+    ctx.stroke();
+    ctx.shadowColor = 'transparent';
+    ctx.shadowBlur  = 0;
+
+    // Face: dark radial gradient, lit from above.
+    const face = ctx.createRadialGradient(x, y - r * 0.35, r * 0.05, x, y, r);
+    face.addColorStop(0, FACE_HI);
+    face.addColorStop(1, FACE_LO);
+    this._hexPath(ctx, x, y, r - rimW);
+    ctx.fillStyle = face;
+    ctx.fill();
+
+    // Inner bevel: light catches the upper inside edges, shadow on the lower ones.
+    const inner = r - rimW - Math.max(0.75, r * 0.02);
+    ctx.lineWidth = Math.max(1, r * 0.035);
+    ctx.strokeStyle = 'rgba(255,255,255,.20)';
+    this._hexEdges(ctx, x, y, inner, [3, 4, 5]);   // upper-left, top, upper-right
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(0,0,0,.45)';
+    this._hexEdges(ctx, x, y, inner, [0, 1, 2]);   // lower edges
+    ctx.stroke();
+
+    // Specular line along the top of the rim.
+    ctx.strokeStyle = picked ? '#fff4d1' : selected ? 'rgba(255,255,255,.9)' : pal.rimHi;
+    ctx.lineWidth   = Math.max(0.75, rimW * 0.28);
+    this._hexEdges(ctx, x, y, r - rimW * 0.62, [3, 4, 5]);
+    ctx.stroke();
+
+    // Buried slabs: darken everything drawn above.
+    if (shade > 0) {
+      this._hexPath(ctx, x, y + lipDy * 0.5, r + 1);
+      ctx.fillStyle = `rgba(4,4,12,${(shade * 0.7).toFixed(3)})`;
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+
+  /**
+   * Draw piece glyphs (sprites, or PNG/emoji fallbacks) plus stack badges for
+   * `faces` (board space) onto a glyph context whose transform maps screen CSS
+   * px. Used for the glyph layer and for live loose pieces on #emoji-layer.
+   * @param {Map<*, {x:number, y:number, r:number, stack:Array}>} faces
+   */
+  _drawGlyphs(ec, faces) {
+    ec.globalAlpha  = 1;
+    ec.shadowBlur   = 0;
+    ec.shadowColor  = 'transparent';
+    ec.textAlign    = 'center';
+    ec.textBaseline = 'middle';
+
+    const s = this.scale;
+    for (const face of faces.values()) {
+      const { stack } = face;
+      let sx = this.tx + face.x * s;
+      let sy = this.ty + face.y * s;
+      const r  = face.r * s;
+      const shaped = face.sx !== undefined || face.alpha !== undefined; // in-flight piece
+      if (shaped) {
+        ec.save();
+        ec.translate(sx, sy);
+        ec.scale(face.sx ?? 1, face.sy ?? 1);
+        ec.globalAlpha = face.alpha ?? 1;
+        sx = sy = 0;
+      }
+      this._drawPieceVisual(ec, stack.at(-1), sx, sy, r * GLYPH_BOX);
+      if (stack.length > 1) this._drawStackBadge(ec, stack, sx, sy, r);
+      if (shaped) ec.restore();
+    }
+  }
+
+  /**
+   * Stack height cue, sized by badgeLayout(r): at normal zoom a "×N" pill on the
+   * upper right plus a chip per buried piece (owner rim, species glyph) along
+   * the lower rim; zoomed out, one small numeral disc in the upper-right corner.
+   */
+  _drawStackBadge(ec, stack, sx, sy, r) {
+    const B = badgeLayout(r);
+    if (B.mode === 'none') return;
+    const topIdx = stack.length - 1;
+    const topRim = (TILE[stack[topIdx].player] ?? TILE[1]).rim;
+
+    if (B.mode === 'compact') {
+      const cx = sx + B.chipDist * Math.cos(B.angle);
+      const cy = sy + B.chipDist * Math.sin(B.angle);
+      ec.beginPath();
+      ec.arc(cx, cy, B.chipR, 0, Math.PI * 2);
+      ec.fillStyle = 'rgba(7,7,15,.94)';
+      ec.fill();
+      ec.lineWidth = Math.max(0.75, B.chipR * 0.18);
+      ec.strokeStyle = topRim;
+      ec.stroke();
+      ec.font = `${B.font.toFixed(1)}px 'Press Start 2P', monospace`;
+      ec.fillStyle = '#ffffff';
+      ec.fillText(String(stack.length), cx + B.font * 0.06, cy + B.font * 0.08);
+      return;
+    }
+
+    // Buried-piece chips, nearest-to-top first, fanning clockwise around the lower rim.
+    for (let i = topIdx - 1, n = 0; i >= 0; i--, n++) {
+      const a  = B.angle + n * B.step;
+      const cx = sx + B.chipDist * Math.cos(a);
+      const cy = sy + B.chipDist * Math.sin(a);
+      const pal = TILE[stack[i].player] ?? TILE[1];
+      this._hexPath(ec, cx, cy, B.chipR);
+      ec.fillStyle = FACE_LO;
+      ec.fill();
+      ec.lineWidth = Math.max(1, B.chipR * 0.2);
+      ec.lineJoin = 'round';
+      ec.strokeStyle = pal.rim;
+      ec.stroke();
+      this._drawPieceVisual(ec, stack[i], cx, cy, B.chipR * 1.9);
+    }
+
+    // ×N pill.
+    const font = B.font;
+    const label = `×${stack.length}`;
+    ec.font = `${font}px 'Press Start 2P', monospace`;
+    const w  = ec.measureText(label).width + font * 0.9;
+    const h  = font * 1.7;
+    const px = sx + B.pillX, py = sy + B.pillY;
+    ec.beginPath();
+    if (ec.roundRect) ec.roundRect(px - w / 2, py - h / 2, w, h, h / 2);
+    else ec.rect(px - w / 2, py - h / 2, w, h);
+    ec.fillStyle = 'rgba(7,7,15,.94)';
+    ec.fill();
+    ec.lineWidth = Math.max(1, font * 0.16);
+    ec.strokeStyle = topRim;
+    ec.stroke();
+    ec.fillStyle = '#ffffff';
+    ec.fillText(label, px + font * 0.06, py + font * 0.08);
   }
 
   _drawPieceVisual(ctx, piece, x, y, size) {
     if (piece.image?.complete && piece.image.naturalWidth) {
-      const ratio = Math.min(size / piece.image.naturalWidth, size / piece.image.naturalHeight);
+      const box   = size * 0.7; // PNG art fills its whole box; sprites only ~78% of theirs
+      const ratio = Math.min(box / piece.image.naturalWidth, box / piece.image.naturalHeight);
       const width = piece.image.naturalWidth * ratio;
       const height = piece.image.naturalHeight * ratio;
       ctx.drawImage(piece.image, x - width / 2, y - height / 2, width, height);
       return;
     }
 
-    if (drawSprite(ctx, piece.type, x, y, size * SPRITE_SCALE, SPRITE_COLORS[piece.player] ?? SPRITE_COLORS[1])) return;
+    const ink = SPECIES_COLOR[piece.type] ?? '#ffffff';
+    if (drawSprite(ctx, piece.type, x, y, size, { ink, fill: bodyFill(ink), glow: ink })) return;
 
     // Last resort (no Path2D): the piece's emoji.
-    ctx.font = `${Math.round(size * 0.64)}px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", serif`;
+    ctx.font = `${Math.round(size * 0.45)}px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", serif`;
     ctx.fillStyle = '#ffffff';
     ctx.fillText(piece.emoji ?? '?', x, y);
   }
@@ -546,6 +1735,20 @@ export class Board {
       i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
     }
     ctx.closePath();
+  }
+
+  /**
+   * Path of selected edges of a flat-top hexagon. Edge i runs from vertex i to
+   * vertex i+1 (vertex 0 at east, clockwise in screen space): 0 lower-right,
+   * 1 bottom, 2 lower-left, 3 upper-left, 4 top, 5 upper-right.
+   */
+  _hexEdges(ctx, cx, cy, size, edges) {
+    ctx.beginPath();
+    for (const e of edges) {
+      const a0 = (Math.PI / 3) * e, a1 = (Math.PI / 3) * (e + 1);
+      ctx.moveTo(cx + size * Math.cos(a0), cy + size * Math.sin(a0));
+      ctx.lineTo(cx + size * Math.cos(a1), cy + size * Math.sin(a1));
+    }
   }
 
   // ── Coordinate conversion ──────────────────────────────
@@ -601,6 +1804,8 @@ export class Board {
         if (this._pinchLast > 0) {
           const mid = this._pinchMid();
           this._applyZoom(d / this._pinchLast, mid.x, mid.y);
+          this._userCameraAt = now();
+          this._userZoomed = true;
         }
         this._pinchLast = d;
         return;
@@ -612,6 +1817,7 @@ export class Board {
         if (this._hasMoved || Math.hypot(dx, dy) > 6) {
           if (!this._hasMoved) this.onViewChange?.();
           this._hasMoved = true;
+          this._userCameraAt = now();
           this.tx = this._dragOrigin.tx + dx;
           this.ty = this._dragOrigin.ty + dy;
         }
@@ -656,6 +1862,8 @@ export class Board {
       e.preventDefault();
       this.onHover?.(null);
       this._camera = null;
+      this._userCameraAt = now();
+      this._userZoomed = true;
       this.onViewChange?.();
       const delta = Math.max(-120, Math.min(120, e.deltaY));
       this._applyZoom(Math.exp(-delta * 0.0015), e.clientX, e.clientY);

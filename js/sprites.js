@@ -1,14 +1,28 @@
-// sprites.js — Neon line-art insect sprites, shared by the DOM (inline SVG) and
-// the board canvas (Path2D). All art lives on a 64×64 grid, top-down, head up.
+// sprites.js — Neon Bestiary insect sprites, shared by the DOM (inline SVG) and
+// the board canvas (Path2D). All art lives on a 64×64 grid. Top-down with the head
+// up, except the grasshopper, ant and mosquito, which read better side-on (head left).
 //
 // Every sprite has three layers, drawn in this order:
-//   body — closed shapes: filled with a dark tint of the ink, then outlined
-//   line — open strokes: legs, antennae, stripes, wing veins
-//   dot  — solid fills in the ink colour: eyes and spots
+//   body — closed shapes: filled with the ink at ~40% over the dark page, then outlined
+//   line — open strokes: legs, antennae, wing veins, plate edges
+//   dot  — solid fills in the ink colour (fill-rule evenodd, so a shape drawn inside
+//          another becomes a hole): eyes, stripes, marks, the ladybug's spotted dome
 // Keeping one stroke width and one layer recipe is what makes the set read as a family.
 
 export const GRID   = 64;
 export const STROKE = 2.6;
+
+/** Each species' glyph colour. Player ownership is shown by rims/frames, never the glyph. */
+export const SPECIES_COLOR = Object.freeze({
+  QUEEN:       '#ffd23f',
+  BEETLE:      '#b07cff',
+  GRASSHOPPER: '#a6ff3d',
+  ANT:         '#4d8dff',
+  SPIDER:      '#ff7a3d',
+  MOSQUITO:    '#d8dcef',
+  LADYBUG:     '#ff4040',
+  PILLBUG:     '#2fe0a8',
+});
 
 // ── Shape helpers (absolute coordinates, 64-grid) ─────────────────────────
 
@@ -35,124 +49,142 @@ const pair = (...paths) => paths.flatMap(d => [d, mirror(d)]);
 export const SPRITES = {
   QUEEN: {
     body: [
-      ...pair('M26 25C18 16 8 18 9 25C10 31 20 31 26 28Z'),    // wings
-      ellipse(32, 43, 9, 12),                                 // abdomen
-      ellipse(32, 27, 6.5, 5.5),                              // thorax
-      circle(32, 17, 5.5),                                    // head
-      'M27 11L28 5.5L30.5 8.5L32 4.5L33.5 8.5L36 5.5L37 11Z', // crown
+      ...pair('M27 25C20 15 7 13 5 20C3 27 15 31 27 29Z'),     // forewings
+      ...pair('M27 31C20 31 11 34 11.5 39C12 44 21 41 27 34Z'),  // hindwings
+      'M29.6 56L32 62L34.4 56Z',                                // stinger
+      ellipse(32, 45, 10, 12.5),                                // abdomen
+      ellipse(32, 28.5, 7, 6),                                  // thorax
+      circle(32, 18, 5.5),                                      // head
+      'M25.5 13L24.5 5L28.8 8.6L32 3L35.2 8.6L39.5 5L38.5 13Z', // crown
     ],
     line: [
-      'M23.8 38Q32 41 40.2 38', 'M23 44Q32 47 41 44', 'M24.7 50Q32 53 39.3 50', // stripes
-      'M32 55L32 59',                                         // stinger
-      ...pair('M27 31L21 36', 'M28 14Q24 11 21 12'),          // legs, antennae
+      ...pair('M24 22Q16 21 10 21.5'),                          // wing veins
+      ...pair('M29 13.5Q26 10 22 10'),                          // antennae
     ],
-    dot: [circle(29.6, 16.8, 1.3), circle(34.4, 16.8, 1.3)],
+    dot: [
+      'M22.6 40.5Q32 43.5 41.4 40.5L41.9 44Q32 47 22.1 44Z',    // stripes
+      'M22.3 48.5Q32 51.5 41.7 48.5L40.2 52.5Q32 55.5 23.8 52.5Z',
+      circle(29.8, 18.4, 1.3), circle(34.2, 18.4, 1.3),         // eyes
+    ],
   },
 
   BEETLE: {
     body: [
-      'M24 29L40 29Q46 32 45.5 44Q44 56 32 57Q20 56 18.5 44Q18 32 24 29Z', // shell
-      'M22 24Q22 20 26 20L38 20Q42 20 42 24L42 26Q42 28 38 28L26 28Q22 28 22 26Z', // pronotum
-      'M26 20Q26 12 32 12Q38 12 38 20Z',                                   // head
+      ...pair('M31 27C21 27 15 34 15 43C15 52 22 58.5 31 59.5Z'), // split elytra
+      'M20.5 27.5Q20.5 18 32 18Q43.5 18 43.5 27.5Z',            // pronotum
+      'M26.5 18.5Q26.5 11 32 11Q37.5 11 37.5 18.5Z',            // head
     ],
     line: [
-      'M32 29L32 57',                                         // wing seam
-      ...pair('M28.5 14Q25 8 28 3.5'),                        // horns
-      ...pair('M22 25L15 22L11 16', 'M19.5 36L12 36L8 31', 'M20 47L13 51L10 57'), // legs
+      ...pair('M29.5 12Q27 5.5 21 4.5'),                        // antennae
+      ...pair('M21.5 23L14.5 20.5L13 13.5', 'M16 39L8.5 38L5.5 31.5', 'M18.5 51L12 54.5L11 61'), // legs
+      ...pair('M21 35Q19 41 21 47'),                            // shell gloss
     ],
-    dot: [circle(29, 16.5, 1.2), circle(35, 16.5, 1.2), circle(26, 37, 1.1), circle(38, 37, 1.1)],
+    dot: [circle(29.4, 15.2, 1.2), circle(34.6, 15.2, 1.2)],
   },
 
+  // Side view, head left
   GRASSHOPPER: {
     body: [
-      ...pair('M27.5 24.5Q15 29 14.5 46Q17.5 50 21.5 46.5Q23.5 33 30 27.5Z'), // hind femurs
-      'M26.5 26L37.5 26Q37 44 32 58Q27 44 26.5 26Z',          // abdomen
-      'M27 17L37 17L38 26L26 26Z',                            // pronotum
-      ellipse(32, 12, 4.5, 5),                                // head
+      'M25 27L49 28Q58 30 60 35Q57 39 47 39L25 39Z',            // abdomen
+      'M30.5 37Q29 31 39 23L48.5 13.5Q52.5 11 52 16L43 31Q38.5 39 30.5 37Z', // hind femur
+      'M15.5 25Q23 20.5 30.5 24.5Q31.5 31 30 38Q23 41.5 16 37.5Z', // pronotum
+      'M17.5 25.5Q13 20.5 8.5 23.5Q4.5 27 5.5 34Q7 41 12.5 41Q17.5 40 18 34Z', // head
     ],
     line: [
-      ...pair('M28.5 28Q29.5 42 32 54'),                      // folded wings
-      ...pair('M30 8C27 3 22 1 15 3'),                        // antennae
-      ...pair('M16.5 48L21 59'),                              // hind tibiae
-      ...pair('M27 19L21 16L19 11', 'M27 23L20 25L16 22'),    // front + mid legs
+      'M31 28.5L55 31',                                         // wing edge
+      'M35 31.5L45.5 20',                                       // femur ridge
+      'M50.5 15.5L54.5 49.5L60 51.5',                           // hind tibia
+      'M12.5 23Q15 12 27 6.5', 'M10.5 23.5Q8.5 13 14 6',        // antennae
+      'M18.5 39L15 47L10 48.5', 'M26 39.5L25 48L20.5 51',       // front + mid legs
     ],
-    dot: [circle(29.6, 11, 1.3), circle(34.4, 11, 1.3)],
+    dot: [circle(10.5, 29, 2.4)],                               // eye
   },
 
+  // Side view, head left
   ANT: {
     body: [
-      ellipse(32, 47, 8, 10),                                 // gaster
-      circle(32, 35.5, 2.2),                                  // petiole
-      ellipse(32, 27, 4, 6),                                  // thorax
-      circle(32, 14, 6),                                      // head
+      ellipse(47.5, 33, 11.5, 9),                               // gaster
+      ellipse(36.5, 33.5, 2.6, 3.2),                            // petiole
+      'M20.5 30Q23 25 29 26.5Q34.5 28 34.5 32.5Q32 37 25 36.5Q20 36 20.5 30Z', // thorax
+      ellipse(12.5, 29, 7, 6.2),                                // head
     ],
     line: [
-      ...pair('M29.5 8.5Q30 5 32 5'),                         // mandibles
-      ...pair('M28.5 10L24 3L18 5'),                          // elbowed antennae
-      ...pair('M28.5 23L20 19L15 12', 'M28 27L18 28L12 25', 'M28.5 31L20 37L15 45'), // legs
-      'M25 44Q32 46.5 39 44', 'M25.5 50Q32 52.5 38.5 50',     // gaster bands
+      'M6.5 32.5Q3 36 6.5 38.5',                                // mandible
+      'M14 23L17 13L9.5 8',                                     // elbowed antenna
+      'M23.5 35.5L17 41L13.5 50.5', 'M28 36.5L27.5 43L30 51', 'M32.5 35L39.5 41.5L44.5 50.5', // legs
+      'M44.5 25Q41.5 33 44.5 41', 'M51 24.5Q48 33 51 41.5',     // gaster bands
     ],
-    dot: [circle(28.8, 13.5, 1.2), circle(35.2, 13.5, 1.2)],
+    dot: [circle(11, 27.5, 1.7)],
   },
 
   SPIDER: {
     body: [
-      ellipse(32, 42, 10, 12),                                // abdomen
-      circle(32, 22, 7),                                      // cephalothorax
+      ellipse(32, 42, 11.5, 13),                                // abdomen
+      ellipse(32, 23, 7.5, 7),                                  // cephalothorax
     ],
     line: [
-      'M27 38L32 42L37 38', 'M28 45L32 48L36 45',             // abdomen chevrons
-      ...pair('M29.5 15.5L28 11'),                            // fangs
-      ...pair('M26 18L16 10L12 3', 'M25.2 21L13 17L5 14', 'M25.2 24L13 29L6 34', 'M26.5 27L17 37L12 48'), // 8 legs
+      ...pair('M29.5 16.5Q27.5 12.5 29.5 10'),                  // pedipalps
+      ...pair('M26.5 19L18 11L18 2.5', 'M25 22.5L12.5 15L4 21',
+              'M25 26L12.5 28.5L5.5 38', 'M27 28.5L19 34L14 47'), // 8 legs
     ],
-    dot: [circle(29.4, 19.5, 1.2), circle(34.6, 19.5, 1.2), circle(31, 17.3, 0.8), circle(33, 17.3, 0.8)],
+    dot: [
+      'M28.5 35L35.5 35L32 41L35.5 47L28.5 47L32 41Z',           // hourglass
+      circle(29.6, 21, 1.2), circle(34.4, 21, 1.2),
+    ],
   },
 
+  // Side view, head left
   MOSQUITO: {
     body: [
-      ...pair('M28 23C20 26 14 36 15 44C16 46.5 19 45.5 21 42C24 36 27 29 28 23Z'), // wings
-      ellipse(32, 42, 3.2, 13),                               // abdomen
-      ellipse(32, 24, 4.5, 5),                                // thorax
-      circle(32, 16, 3.5),                                    // head
+      'M31 24Q41 13 56 11Q60.5 11.5 57 15Q46 20 33 27Z',        // far wing
+      'M34 28Q46 26.5 58 31.5Q60.5 33.5 57 34.5Q46 35.5 34 33Z', // abdomen
+      'M20 25Q26 18.5 33 22Q37.5 26 35.5 31Q30.5 35.5 23 33.5Q19 31.5 20 25Z', // thorax
+      circle(15.5, 27.5, 5.5),                                  // head
+      'M29 22Q37 9 51 5Q55.5 5 52.5 9Q42 15 31.5 25Z',          // near wing
     ],
     line: [
-      'M32 12.5L32 2',                                        // proboscis
-      ...pair('M30.5 13L26 7'),                               // antennae
-      'M29.2 36L34.8 36', 'M29 42L35 42', 'M29.3 48L34.7 48', // segments
-      ...pair('M27 27L19 40'),                                // wing veins
-      ...pair('M28.5 21L20 14L14 4', 'M28 25L14 22L4 24', 'M29 28L20 40L10 58'), // long legs
+      'M11 30.5L2 41',                                          // proboscis
+      'M13 22.5Q11 15 6 13', 'M15.5 22Q16 15 13 9.5',           // antennae
+      'M33 21Q41 12.5 50.5 8', 'M41 30L41 33.5', 'M48 31L48 34.5', // wing vein, segments
+      'M24 33.5L18.5 42L11 57', 'M28.5 34.5L29 45L24.5 59', 'M32.5 33L39 42L47 57', // long legs
     ],
-    dot: [circle(30.2, 15.6, 1), circle(33.8, 15.6, 1)],
+    dot: [circle(14.5, 27, 2.6)],                               // compound eye
   },
 
   LADYBUG: {
     body: [
-      'M32 17C44 17 51 26 51 37C51 48 43 56 32 56C21 56 13 48 13 37C13 26 20 17 32 17Z', // shell
-      'M25.5 17.5Q25.5 10 32 10Q38.5 10 38.5 17.5Z',          // head
+      'M32 23C44 23 51 31.5 51 41.5C51 52 42 59.5 32 59.5C22 59.5 13 52 13 41.5C13 31.5 20 23 32 23Z', // shell
+      'M20 27.5Q21 17 32 17Q43 17 44 27.5Q38 24.5 32 24.5Q26 24.5 20 27.5Z', // pronotum
+      'M26.5 17.5Q26.5 10.5 32 10.5Q37.5 10.5 37.5 17.5Z',      // head
     ],
     line: [
-      'M17.5 26Q32 21 46.5 26', 'M32 23.5L32 56',             // pronotum edge, wing seam
-      ...pair('M29 11Q27 6 24 5'),                            // antennae
-      ...pair('M16 30L10 27', 'M14.5 40L8 41', 'M17 49L11 53'), // legs
+      ...pair('M29.5 11.5Q27.5 6 22.5 5'),                      // antennae
+      ...pair('M15.5 32L9.5 28.5', 'M13.5 43L7 44', 'M16.5 53L11 57.5'), // legs
     ],
     dot: [
-      circle(24.5, 32.5, 3), circle(39.5, 32.5, 3),
-      circle(21.5, 42.5, 2.8), circle(42.5, 42.5, 2.8),
-      circle(26.5, 50.5, 2.4), circle(37.5, 50.5, 2.4),
-      circle(29.5, 14.5, 1), circle(34.5, 14.5, 1),
+      // Solid domed shell with the spots and wing seam cut out (one path, evenodd)
+      ['M32 25.5C42.5 25.5 48.5 33 48.5 41.5C48.5 50.5 41 57 32 57C23 57 15.5 50.5 15.5 41.5C15.5 33 21.5 25.5 32 25.5Z',
+        'M31.1 25L32.9 25L32.9 58L31.1 58Z',
+        circle(23.5, 34.5, 3.3), circle(40.5, 34.5, 3.3),
+        circle(20.5, 45, 3), circle(43.5, 45, 3),
+        circle(26.5, 52, 2.6), circle(37.5, 52, 2.6)].join(''),
+      circle(26.5, 21.5, 1.8), circle(37.5, 21.5, 1.8),         // pronotum patches
     ],
   },
 
   PILLBUG: {
-    body: [ellipse(32, 35, 13, 21)],                          // segmented shell
-    line: [
-      'M22.9 20Q32 23 41.1 20', 'M20.3 26Q32 29.5 43.7 26', 'M19.2 32Q32 35.5 44.8 32',
-      'M19.2 38Q32 41.5 44.8 38', 'M20.3 44Q32 47.5 43.7 44', 'M22.9 50Q32 53 41.1 50', // plates
-      ...pair('M28.5 15C25 10 21 8 16 9'),                    // antennae
-      ...pair('M29 55.5L27 59.5'),                            // uropods
-      ...pair('M20.5 24L16 22', 'M19.1 31L14 30', 'M19.1 39L14 40', 'M20.5 46L16 48'), // legs
+    body: [
+      'M32 13C42 13 46 20 46 32C46 46 42 58 32 58C22 58 18 46 18 32C18 20 22 13 32 13Z', // shell
     ],
-    dot: [circle(27.2, 17.5, 1.1), circle(36.8, 17.5, 1.1)],
+    line: [
+      'M21 19Q32 15.5 43 19',                                   // head shield
+      'M19.2 25Q32 21 44.8 25', 'M18.4 31Q32 27 45.6 31', 'M18.4 37Q32 33 45.6 37',
+      'M19.2 43Q32 39 44.8 43', 'M20.6 49Q32 45 43.4 49', 'M23.5 54.5Q32 51 40.5 54.5', // plates
+      ...pair('M27.5 14Q24 8 17.5 7.5'),                        // antennae
+      ...pair('M28.5 57.5L27 61.5'),                            // uropods
+      ...pair('M18.6 28L13.5 26.5', 'M18.2 34L13 34', 'M18.6 40L13.5 41.5', 'M19.6 46L15 49'), // legs
+    ],
+    dot: [],
   },
 
   // ── Not pieces: menu icons drawn to the same recipe so the UI matches the set ──
@@ -194,21 +226,31 @@ export const SPRITES = {
 // ── DOM ───────────────────────────────────────────────────────────────────
 
 /**
- * Inline SVG markup. Colour comes from CSS `color` (see .sprite in styles.css).
- * @param {string} type  PieceType or 'CROWN'
+ * Inline SVG markup. Pieces are painted in their species colour (inline style);
+ * pass a `mono` class — or use a menu icon — to leave the colour to CSS `color`.
+ * @param {string} type  PieceType or a menu icon ('CROWN', 'HOUSE', …)
  * @param {string} [cls] extra class names
  */
 export function spriteSVG(type, cls = '') {
   const sprite = SPRITES[type];
   if (!sprite) return '';
-  const layer = (name, paths) =>
-    paths.length ? `<g class="sp-${name}">${paths.map(d => `<path d="${d}"/>`).join('')}</g>` : '';
-  return `<svg class="sprite${cls ? ` ${cls}` : ''}" viewBox="0 0 ${GRID} ${GRID}" aria-hidden="true" focusable="false">`
-    + layer('body', sprite.body) + layer('line', sprite.line) + layer('dot', sprite.dot)
+  const layer = (name, paths, attrs = '') =>
+    paths.length ? `<g class="sp-${name}"${attrs}>${paths.map(d => `<path d="${d}"/>`).join('')}</g>` : '';
+  const species = /(^|\s)mono(\s|$)/.test(cls) ? null : SPECIES_COLOR[type];
+  return `<svg class="sprite${cls ? ` ${cls}` : ''}" viewBox="0 0 ${GRID} ${GRID}" aria-hidden="true" focusable="false"`
+    + `${species ? ` style="color:${species}"` : ''}>`
+    + layer('body', sprite.body) + layer('line', sprite.line) + layer('dot', sprite.dot, ' fill-rule="evenodd"')
     + '</svg>';
 }
 
 // ── Canvas ────────────────────────────────────────────────────────────────
+
+/** Opaque body fill for a sprite ink: 40% ink over #090916 (matches the CSS colour-mix). */
+export function bodyFill(ink) {
+  const base = [9, 9, 22];
+  const rgb = [1, 3, 5].map((i, n) => Math.round(parseInt(ink.slice(i, i + 2), 16) * 0.4 + base[n] * 0.6));
+  return `rgb(${rgb.join(',')})`;
+}
 
 const _cache = new Map(); // type → { body: Path2D[], line: Path2D, dot: Path2D, outline: Path2D }
 
@@ -228,7 +270,7 @@ function compiled(type) {
 
 /**
  * Draw a sprite centred at (x, y), `size` px square.
- * @param {{ink:string, fill:string, glow?:string}} colors
+ * @param {{ink:string, fill:string, glow?:string}} colors  ink = species colour (SPECIES_COLOR)
  * @returns {boolean} false when Path2D is unavailable (caller should fall back)
  */
 export function drawSprite(ctx, type, x, y, size, { ink, fill, glow }) {
@@ -244,11 +286,12 @@ export function drawSprite(ctx, type, x, y, size, { ink, fill, glow }) {
 
   // Soft neon halo: a wide, faint stroke under everything (cheaper than shadowBlur).
   if (glow) {
-    ctx.globalAlpha = 0.35;
+    const alpha = ctx.globalAlpha; // respect a caller's fade
+    ctx.globalAlpha = alpha * 0.35;
     ctx.strokeStyle = glow;
     ctx.lineWidth   = STROKE * 2.2;
     ctx.stroke(paths.outline);
-    ctx.globalAlpha = 1;
+    ctx.globalAlpha = alpha;
   }
 
   ctx.lineWidth   = STROKE;
@@ -260,7 +303,7 @@ export function drawSprite(ctx, type, x, y, size, { ink, fill, glow }) {
   }
   ctx.stroke(paths.line);
   ctx.fillStyle = ink;
-  ctx.fill(paths.dot);
+  ctx.fill(paths.dot, 'evenodd');
   ctx.restore();
   return true;
 }

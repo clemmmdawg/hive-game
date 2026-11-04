@@ -95,9 +95,15 @@ function occupied(board, q, r) { return board.has(hexKey(q, r)); }
  * A piece moving from (fromQ,fromR) to an adjacent (toQ,toR) travels at the
  * higher of its current level (fromH, measured with the piece still in place)
  * and its landing level (toH + 1). It is blocked only if BOTH common-neighbor
- * stacks reach that level. Ground slides need both gates occupied; a beetle
- * climbing onto a single piece passes over single-height gates and is only
- * blocked by two stacks of height 2.
+ * stacks reach that level. For a ground slide (level 1) that means both gates
+ * occupied; a beetle climbing onto a single piece passes over single-height
+ * gates and is blocked only by two stacks of height 2.
+ *
+ * Additionally, a ground-to-ground slide (moving piece at level 1, target
+ * empty) must keep contact with the hive: at least one common neighbor must
+ * be occupied, otherwise the piece would pivot around nothing. Callers never
+ * count the moving piece as a gate (gates are the two neighbors common to
+ * both hexes, never the origin).
  */
 export function canSlide(board, fromQ, fromR, toQ, toR, fromHOverride) {
   const dq = toQ - fromQ, dr = toR - fromR;
@@ -115,6 +121,9 @@ export function canSlide(board, fromQ, fromR, toQ, toR, fromHOverride) {
   const toH   = heightAt(board, toQ,   toR);
   const need  = Math.max(fromH, toH + 1);
   if (need === 0) return true; // zero-height piece; no gate can block it
+
+  // Ground slide into an empty hex: must stay in contact with the hive
+  if (need <= 1 && h1 === 0 && h2 === 0) return false;
 
   // Blocked only if BOTH gates are at least as tall as the highest endpoint
   return !(h1 >= need && h2 >= need);
@@ -167,6 +176,17 @@ function adjacentToHive(board, q, r, excludeKey = null) {
     if (nk !== excludeKey && board.has(nk)) return true;
   }
   return false;
+}
+
+/**
+ * One ground-level slide step for a piece that has been lifted off `board`
+ * (ant / spider pathfinding). Shared by the move generators and getMovePath so
+ * an animated route always uses exactly the legality rules of move generation.
+ */
+function slideStep(tempBoard, fromQ, fromR, toQ, toR) {
+  if (occupied(tempBoard, toQ, toR)) return false;
+  if (!adjacentToHive(tempBoard, toQ, toR)) return false;
+  return canSlide(tempBoard, fromQ, fromR, toQ, toR, 1); // piece is always height 1
 }
 
 // ── Movement generators ──────────────────────────────────────────────────────
@@ -272,9 +292,7 @@ function antMoves(board, fromKey) {
     for (const n of neighbors(cq, cr)) {
       const nk = hexKey(n.q, n.r);
       if (visited.has(nk)) continue;
-      if (occupied(tempBoard, n.q, n.r)) continue;
-      if (!adjacentToHive(tempBoard, n.q, n.r)) continue;
-      if (!canSlide(tempBoard, cq, cr, n.q, n.r, 1)) continue; // piece is always height 1
+      if (!slideStep(tempBoard, cq, cr, n.q, n.r)) continue;
 
       visited.add(nk);
       reachable.add(nk);
@@ -311,9 +329,7 @@ function spiderMoves(board, fromKey) {
     for (const n of neighbors(cq, cr)) {
       const nk = hexKey(n.q, n.r);
       if (visited.has(nk)) continue;
-      if (occupied(tempBoard, n.q, n.r)) continue;
-      if (!adjacentToHive(tempBoard, n.q, n.r)) continue;
-      if (!canSlide(tempBoard, cq, cr, n.q, n.r, 1)) continue; // piece is always height 1
+      if (!slideStep(tempBoard, cq, cr, n.q, n.r)) continue;
 
       visited.add(nk);
       dfs(n.q, n.r, depth + 1, visited);
@@ -332,34 +348,48 @@ function spiderMoves(board, fromKey) {
  * Steps 1–2: must move to an occupied hex (climbing across the hive).
  * Step 3: must move to an empty hex (landing back at ground level).
  * Cannot land on its own starting hex.
- * No gate/sliding check while on top (it's climbing, not sliding).
+ * Freedom to Move still applies at height: each step is blocked when both
+ * common-neighbor stacks reach the higher of the from/to levels. The ladybug
+ * is lifted off the board while pathfinding, so its level on a hex is
+ * (stack height + 1) and its origin counts as empty.
  */
 function ladybugMoves(board, fromKey) {
+  return [...new Set(ladybugRoutes(board, fromKey).map(route => route[3]))];
+}
+
+/** Every legal ladybug route as [fromKey, step1, step2, landing]. */
+function ladybugRoutes(board, fromKey) {
   const { q, r } = parseKey(fromKey);
-  const results  = new Set();
+  const routes = [];
+  const temp = new Map(board);
+  temp.delete(fromKey);
+  const level = (cq, cr) => heightAt(temp, cq, cr) + 1; // ladybug level while on hex
 
   // Step 1: climb onto any adjacent occupied hex
   for (const n1 of neighbors(q, r)) {
     const n1k = hexKey(n1.q, n1.r);
-    if (!occupied(board, n1.q, n1.r)) continue;
+    if (!occupied(temp, n1.q, n1.r)) continue;
+    if (!canSlide(temp, q, r, n1.q, n1.r, 1)) continue;
 
     // Step 2: move to any occupied hex adjacent to n1 (not back to fromKey)
     for (const n2 of neighbors(n1.q, n1.r)) {
       const n2k = hexKey(n2.q, n2.r);
       if (n2k === fromKey) continue; // can't step back onto starting hex
-      if (!occupied(board, n2.q, n2.r)) continue;
+      if (!occupied(temp, n2.q, n2.r)) continue;
+      if (!canSlide(temp, n1.q, n1.r, n2.q, n2.r, level(n1.q, n1.r))) continue;
 
       // Step 3: land on any empty hex adjacent to n2 (not the starting hex)
       for (const n3 of neighbors(n2.q, n2.r)) {
         const n3k = hexKey(n3.q, n3.r);
         if (n3k === fromKey) continue;
-        if (occupied(board, n3.q, n3.r)) continue;
-        results.add(n3k);
+        if (occupied(temp, n3.q, n3.r)) continue;
+        if (!canSlide(temp, n2.q, n2.r, n3.q, n3.r, level(n2.q, n2.r))) continue;
+        routes.push([fromKey, n1k, n2k, n3k]);
       }
     }
   }
 
-  return [...results];
+  return routes;
 }
 
 /**
@@ -699,6 +729,116 @@ export function getLegalThrows(state) {
   return result;
 }
 
+// ── Move paths (animation routes) ────────────────────────────────────────────
+
+/** Route for a piece behaving as `type` from `fromKey` to `toKey`, or null if that type cannot make the move. */
+function pathForType(board, fromKey, toKey, type) {
+  const { q, r } = parseKey(fromKey);
+  switch (type) {
+    case PieceType.QUEEN:
+    case PieceType.PILLBUG:
+      return queenMoves(board, fromKey).includes(toKey) ? { path: [fromKey, toKey], kind: 'slide' } : null;
+    case PieceType.BEETLE:
+      return beetleMoves(board, fromKey).includes(toKey) ? { path: [fromKey, toKey], kind: 'climb' } : null;
+    case PieceType.GRASSHOPPER: {
+      for (const [dq, dr] of DIRS) {
+        const path = [fromKey];
+        let cq = q + dq, cr = r + dr;
+        while (occupied(board, cq, cr)) { path.push(hexKey(cq, cr)); cq += dq; cr += dr; }
+        if (path.length > 1 && hexKey(cq, cr) === toKey) { path.push(toKey); return { path, kind: 'hop' }; }
+      }
+      return null;
+    }
+    case PieceType.ANT: {
+      const temp = new Map(board);
+      temp.delete(fromKey);
+      const parent = new Map([[fromKey, null]]);
+      const queue = [fromKey];
+      while (queue.length) {
+        const cur = queue.shift();
+        if (cur === toKey) break;
+        const { q: cq, r: cr } = parseKey(cur);
+        for (const n of neighbors(cq, cr)) {
+          const nk = hexKey(n.q, n.r);
+          if (parent.has(nk) || !slideStep(temp, cq, cr, n.q, n.r)) continue;
+          parent.set(nk, cur);
+          queue.push(nk);
+        }
+      }
+      if (!parent.has(toKey) || toKey === fromKey) return null;
+      const path = [];
+      for (let k = toKey; k !== null; k = parent.get(k)) path.unshift(k);
+      return { path, kind: 'slide' };
+    }
+    case PieceType.SPIDER: {
+      const temp = new Map(board);
+      temp.delete(fromKey);
+      const path = [fromKey];
+      const visited = new Set([fromKey]);
+      const dfs = (cq, cr, depth) => {
+        if (depth === 3) return hexKey(cq, cr) === toKey;
+        for (const n of neighbors(cq, cr)) {
+          const nk = hexKey(n.q, n.r);
+          if (visited.has(nk) || !slideStep(temp, cq, cr, n.q, n.r)) continue;
+          visited.add(nk); path.push(nk);
+          if (dfs(n.q, n.r, depth + 1)) return true;
+          visited.delete(nk); path.pop();
+        }
+        return false;
+      };
+      return dfs(q, r, 0) ? { path: [...path], kind: 'slide' } : null;
+    }
+    case PieceType.LADYBUG: {
+      const route = ladybugRoutes(board, fromKey).find(rt => rt[3] === toKey);
+      return route ? { path: route, kind: 'climb' } : null;
+    }
+    case PieceType.MOSQUITO: {
+      const stack = board.get(fromKey);
+      if (stack && stack.length > 1) return pathForType(board, fromKey, toKey, PieceType.BEETLE);
+      let best = null;
+      const seen = new Set();
+      for (const n of neighbors(q, r)) {
+        const ns = board.get(hexKey(n.q, n.r));
+        if (!ns) continue;
+        const t = topOf(ns).type;
+        if (t === PieceType.MOSQUITO || seen.has(t)) continue;
+        seen.add(t);
+        const cand = pathForType(board, fromKey, toKey, t);
+        if (!cand) continue;
+        // Shortest route wins; on a tie a ground step reads better as a slide than a climb.
+        const shorter  = !best || cand.path.length < best.path.length;
+        const smoother = best && cand.path.length === best.path.length && cand.kind === 'slide' && best.kind === 'climb';
+        if (shorter || smoother) best = cand;
+      }
+      return best;
+    }
+    default: return null;
+  }
+}
+
+/**
+ * Route a piece takes for `action`, for animation. Returns
+ * { path: string[], kind: 'slide'|'hop'|'climb'|'throw'|'place' } (path includes
+ * start and end; hops list every jumped hex; throws are [from, pillbugHex, to])
+ * or null when the action is not legal in `state` (and always for PASS).
+ */
+export function getMovePath(state, action) {
+  if (!action) return null;
+  switch (action.type) {
+    case ActionType.PLACE:
+      return getLegalPlacements(state, action.pieceType).includes(action.to)
+        ? { path: [action.to], kind: 'place' } : null;
+    case ActionType.MOVE: {
+      if (!getLegalMoves(state, action.from).includes(action.to)) return null;
+      return pathForType(state.board, action.from, action.to, topOf(state.board.get(action.from)).type);
+    }
+    case ActionType.THROW:
+      return getLegalThrows(state).some(t => t.pillbugHex === action.pillbugHex && t.from === action.from && t.to === action.to)
+        ? { path: [action.from, action.pillbugHex, action.to], kind: 'throw' } : null;
+    default: return null;
+  }
+}
+
 /**
  * Returns a summary of all legal actions for the current player:
  * {
@@ -760,6 +900,37 @@ function queenSurrounded(board, q, r) {
 }
 
 /**
+ * Every queen on `board` with the occupancy of its six sides: `sides` are the
+ * neighbour keys in neighbors() order and `lit[i]` says whether `sides[i]`
+ * counts as occupied. `isOccupied(key)` decides that (default: any piece there;
+ * the board renderer leaves out pieces still in flight). The single source of
+ * neighbour counts for queenPressure and the board's danger pips / HUD meters.
+ * @returns {{key:string, player:1|2, sides:string[], lit:boolean[]}[]}
+ */
+export function queenSides(board, isOccupied = key => board.has(key)) {
+  const out = [];
+  for (const [key, stack] of board) {
+    const queen = stack.find(p => p.type === PieceType.QUEEN);
+    if (!queen) continue;
+    const { q, r } = parseKey(key);
+    const sides = neighbors(q, r).map(n => hexKey(n.q, n.r));
+    out.push({ key, player: queen.player, sides, lit: sides.map(k => !!isOccupied(k)) });
+  }
+  return out;
+}
+
+/**
+ * How hemmed in each queen is: the number of occupied hexes around it (0–6;
+ * six means surrounded), or null while that queen is still in the supply.
+ * @returns {{1: number|null, 2: number|null}}
+ */
+export function queenPressure(state) {
+  const pressure = { 1: null, 2: null };
+  for (const { player, lit } of queenSides(state.board)) pressure[player] = lit.filter(Boolean).length;
+  return pressure;
+}
+
+/**
  * Check the win condition after a move.
  * Returns null (game continues), 1 (P1 wins), 2 (P2 wins), or 'DRAW'.
  */
@@ -808,7 +979,7 @@ export function serializeState(state) {
  * Deserialize a plain object (from JSON) back into a live GameState with Map.
  */
 export function deserializeState(data) {
-  return {
+  return stampPieceIds({
     board:                new Map(data.board),
     supply:               data.supply,
     turn:                 data.turn,
@@ -819,7 +990,54 @@ export function deserializeState(data) {
     pillbugThrewHex:      data.pillbugThrewHex,
     winner:               data.winner,
     settings:             data.settings,
-  };
+  });
+}
+
+// ── Piece identity ───────────────────────────────────────────────────────────
+
+const LETTER = {
+  QUEEN: 'Q', BEETLE: 'B', ANT: 'A', SPIDER: 'S',
+  GRASSHOPPER: 'G', MOSQUITO: 'M', LADYBUG: 'L', PILLBUG: 'P',
+};
+const UNNUMBERED = new Set(['QUEEN', 'MOSQUITO', 'LADYBUG', 'PILLBUG']);
+
+/** Notation id: 'w'/'b' + letter + placement number (Q, M, L, P unnumbered). */
+export function pieceId(player, type, n) {
+  return (player === 1 ? 'w' : 'b') + LETTER[type] + (UNNUMBERED.has(type) ? '' : n);
+}
+
+/**
+ * Give every id-less piece (old saves, hand-built boards) its notation id, deterministically: hexes in
+ * sorted key order, bottom-to-top, numbering continues after ids already present. Returns the same state
+ * object when nothing is missing, otherwise a copy. Called once when a state is loaded, so later
+ * actions (which carry ids) never renumber.
+ */
+export function stampPieceIds(state) {
+  const boardEntries = [...state.board.entries()];
+  if (boardEntries.every(([, stack]) => stack.every(p => p.id))) return state;
+  const used = new Set();
+  for (const [, stack] of boardEntries) for (const p of stack) if (p.id) used.add(p.id);
+  const next = {};
+  const board = new Map();
+  for (const [k, stack] of [...boardEntries].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+    board.set(k, stack.map(p => {
+      if (p.id) return p;
+      const tag = `${p.player}${p.type}`;
+      let n = next[tag] ?? 0, id;
+      do { id = pieceId(p.player, p.type, ++n); } while (!UNNUMBERED.has(p.type) && used.has(id));
+      next[tag] = n; used.add(id);
+      return { ...p, id };
+    }));
+  }
+  // Keep the original hex insertion order.
+  return { ...state, board: new Map(boardEntries.map(([k]) => [k, board.get(k)])) };
+}
+
+/** Pieces of this player/type already on the board (pieces never leave it, buried ones included). */
+function countPlaced(board, player, type) {
+  let n = 0;
+  for (const stack of board.values()) for (const p of stack) if (p.player === player && p.type === type) n++;
+  return n;
 }
 
 // ── State mutation ───────────────────────────────────────────────────────────
@@ -852,7 +1070,8 @@ export function applyAction(state, action) {
     const { q, r } = parseKey(to);
 
     // Add new piece to board
-    board.set(to, [{ player: turn, type: pieceType }]);
+    // `id` is stable identity for notation/replay (see notation.js): player+letter+placement number.
+    board.set(to, [{ player: turn, type: pieceType, id: pieceId(turn, pieceType, countPlaced(board, turn, pieceType) + 1) }]);
     supply[turn][pieceType]--;
 
     if (pieceType === PieceType.QUEEN) queenPlaced[turn] = true;

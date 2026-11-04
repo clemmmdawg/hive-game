@@ -53,3 +53,28 @@ test('disconnect cancels a pending reconnect', async (t) => {
   assert.equal(FakeSocket.instances.length, count + 1, 'only the new connect opened a socket');
   net.disconnect();
 });
+
+test('SEAT_TAKEN (frame or close code 4001) is final: no reconnect', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const disconnects = [];
+  net.on('_disconnected', () => disconnects.push(1));
+  const seen = [];
+  net.on('ERROR', m => seen.push(m.reason));
+
+  net.connect('ws://test');
+  const first = FakeSocket.instances.at(-1);
+  first.emit('message', { data: JSON.stringify({ type: 'ERROR', reason: 'SEAT_TAKEN' }) });
+  first.emit('close', { code: 4001 });
+  const count = FakeSocket.instances.length;
+  t.mock.timers.tick(20_000);
+  assert.deepEqual(seen, ['SEAT_TAKEN']);
+  assert.equal(FakeSocket.instances.length, count, 'no reconnect');
+
+  net.connect('ws://test');
+  FakeSocket.instances.at(-1).emit('close', { code: 4001 }); // close code alone is enough
+  const count2 = FakeSocket.instances.length;
+  t.mock.timers.tick(20_000);
+  assert.equal(FakeSocket.instances.length, count2);
+  net.disconnect();
+  net.off('ERROR');
+});
