@@ -144,6 +144,7 @@ function showPieceTooltip({ type, owner, stack }, x, y, preferAbove = false) {
   $('piece-tooltip-name').innerHTML = `${spriteSVG(type)}<span>${PIECE_NAMES[type] ?? type}</span>`;
   $('piece-tooltip-copy').textContent = PIECE_DESC[type];
   pieceTooltip.classList.toggle('owner-p1', owner === 1);
+  pieceTooltip.classList.toggle('owner-p2', owner === 2);
 
   const list = $('piece-tooltip-stack');
   list.replaceChildren();
@@ -152,7 +153,7 @@ function showPieceTooltip({ type, owner, stack }, x, y, preferAbove = false) {
     for (const piece of [...stack].reverse()) {
       const li = document.createElement('li');
       li.className = `p${piece.player}`;
-      li.innerHTML = `<span class="stack-owner"></span>${spriteSVG(piece.type)}<span></span>`;
+      li.innerHTML = `<span class="stack-chip">${spriteSVG(piece.type)}</span><span></span>`;
       li.lastElementChild.textContent = `P${piece.player} ${PIECE_NAMES[piece.type] ?? piece.type}`;
       list.append(li);
     }

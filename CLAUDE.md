@@ -24,7 +24,8 @@ Run with `npm start` (port 3000), `npm start -- 3001`, or `npm start -- --port 3
 - Amber ring highlights for pillbug-throwable pieces
 - Two-phase throw UI (select piece → select destination)
 - Neon Bestiary SVG insect sprites for every piece (`js/sprites.js`), each in its species colour (`SPECIES_COLOR`), shared by the canvas board and all DOM UI
-- Beetle stack pyramid rendering with sprite badges for buried pieces
+- Board tiles: dark bevelled face, thick glowing player-colour rim (P1 magenta / P2 cyan), species-coloured glyph; tray, reserve and stack inspector use the same player-frame / species-glyph split
+- Beetle stacks drawn as stepped 3D slabs (`stackLayers`) with a `×N` pill and sprite chips for buried pieces
 - Stack inspector: hover (desktop) or tap an opponent stack to list every piece top→bottom
 - Non-blocking turn banner between turns (replaced the full-screen interstitial)
 - Last-move marker (gold corner ticks on the destination, dashed outline on the source)
@@ -102,7 +103,7 @@ A third canvas `#confetti-layer` is `display:none` except during the win animati
 Axial coordinates `(q, r)`. Flat-top hexagons. Hex keys are `"q,r"` strings used as Map keys throughout. The direction array in `game.js` is ordered clockwise from East — **do not reorder**, the gate check math depends on index arithmetic `(di+1)%6` and `(di+5)%6`.
 
 ### Board state
-`board` in GameState is `Map<string, Array<{player:1|2, type:PieceType}>>`. Each array is a stack — index 0 is bottom, last index is top. The beetle stacks. The renderer draws all layers as a pyramid (bottom=full size, top=65% scaled) with badge emoji for buried pieces.
+`board` in GameState is `Map<string, Array<{player:1|2, type:PieceType}>>`. Each array is a stack — index 0 is bottom, last index is top. The beetle stacks. The renderer draws every layer as a stepped slab (each rises and shrinks a little, deeper ones shaded) via `stackLayers`, plus a `×N` pill and owner-rimmed sprite chips for buried pieces.
 
 ### Interaction phases
 `uiState.phase` is one of:
@@ -201,6 +202,9 @@ board.ensureHiveVisible();// recenter only if a piece drifted off-screen
 board.zoomBy(ratio);      // keyboard / button zoom around the playable center
 board.markArrival(key);   // pop-in animation for a piece that just arrived
 board.draw(t);            // call every RAF frame with DOMHighResTimeStamp
+
+// Pure helper (exported): stack geometry, bottom first. Top layer scale ≥ 0.8, shade 0.
+stackLayers(height, size) → [{ dx, dy, scale, shade }]
 
 // Written by app.js each frame/action:
 board.pieces        // Map<hexKey, Array<{player, type, emoji, image?}>> — full stacks (emoji is the no-Path2D fallback)

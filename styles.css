@@ -222,8 +222,8 @@ kbd {
 
 #menu-shell {
   width: min(100%, 680px);
-  min-height: 100%;
-  margin: auto;
+  flex-shrink: 0; /* grow past the viewport and scroll instead of overflowing upward */
+  margin: auto;   /* centres vertically when there is room, pins to the top when not */
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1037,6 +1037,8 @@ kbd {
   letter-spacing: 1px;
 }
 #piece-tooltip.owner-p1 #piece-tooltip-name { color: var(--p1); }
+#piece-tooltip.owner-p1 { border-color: var(--p1-mid); box-shadow: 0 12px 34px rgba(0,0,0,.42), 0 0 18px var(--p1-dim); }
+#piece-tooltip.owner-p2 { border-color: var(--p2-mid); box-shadow: 0 12px 34px rgba(0,0,0,.42), 0 0 18px var(--p2-dim); }
 #piece-tooltip-name .sprite { width: 22px; height: 22px; flex: 0 0 auto; }
 #piece-tooltip-copy {
   color: rgba(255,255,255,.74);
@@ -1068,15 +1070,20 @@ kbd {
   letter-spacing: .8px;
   color: rgba(255,255,255,.8);
 }
-#piece-tooltip-stack .sprite { width: 20px; height: 20px; flex: 0 0 auto; }
-#piece-tooltip-stack .stack-owner {
-  width: 8px;
-  height: 8px;
-  border-radius: 2px;
+/* Each stack entry: species glyph in a mini tile framed in the owner's colour. */
+#piece-tooltip-stack .stack-chip {
+  width: 26px;
+  height: 26px;
   flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border: 2px solid currentColor;
+  border-radius: 7px;
+  background: radial-gradient(circle at 50% 30%, #141428, #07070f);
 }
-#piece-tooltip-stack .p1 .stack-owner { background: var(--p1); box-shadow: 0 0 6px var(--p1); }
-#piece-tooltip-stack .p2 .stack-owner { background: var(--p2); box-shadow: 0 0 6px var(--p2); }
+#piece-tooltip-stack .p1 .stack-chip { color: var(--p1); box-shadow: 0 0 6px var(--p1-mid); }
+#piece-tooltip-stack .p2 .stack-chip { color: var(--p2); box-shadow: 0 0 6px var(--p2-mid); }
+#piece-tooltip-stack .sprite { width: 20px; height: 20px; }
 
 /* ── Board hint, recenter, toast ─────────────────────────── */
 #board-hint {
@@ -1222,9 +1229,20 @@ kbd {
 #reserve-label.p1 { color: color-mix(in srgb, var(--p1) 75%, transparent); }
 #reserve-label.p2 { color: color-mix(in srgb, var(--p2) 75%, transparent); }
 #reserve-pieces { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
-.reserve-item { display: inline-flex; align-items: center; gap: 1px; font-size: 6px; color: rgba(255,255,255,.55); }
+.reserve-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  padding: 1px 4px 1px 2px;
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 6px;
+  font-size: 6px;
+  color: rgba(255,255,255,.55);
+}
+#reserve-pieces.p1 .reserve-item { border-color: var(--p1-mid); }
+#reserve-pieces.p2 .reserve-item { border-color: var(--p2-mid); }
 .reserve-item .sprite { width: 17px; height: 17px; filter: none !important; }
-.reserve-item.empty { opacity: .3; }
+.reserve-item.empty { opacity: .3; border-color: rgba(255,255,255,.08) !important; }
 
 #tray-pieces {
   display: flex;
@@ -1261,12 +1279,14 @@ kbd {
 .piece-slot:focus-visible { outline: none; }
 .piece-slot:focus-visible .piece-hex { outline: 2px solid #fff; outline-offset: 2px; }
 
-/* Flat-top hex shape via clip-path; ::before draws the neon rim */
+/* Tray tile, matching the board: ::before is the thick rim in the owner's colour,
+   ::after the dark bevelled face. Both are hex-clipped so .piece-hex itself can
+   carry an unclipped drop-shadow glow. */
 .piece-hex {
+  --rim: var(--p1);
   position: relative;
   width: 100%;
   aspect-ratio: 58 / 50;
-  clip-path: polygon(25% 0%, 75% 0%, 100% 50%, 75% 100%, 25% 100%, 0% 50%);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1274,13 +1294,32 @@ kbd {
   transition: background .2s, filter .2s;
 }
 
+.piece-hex::before,
+.piece-hex::after {
+  content: '';
+  position: absolute;
+  clip-path: polygon(25% 0%, 75% 0%, 100% 50%, 75% 100%, 25% 100%, 0% 50%);
+}
+.piece-hex::before {
+  inset: 0;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--rim) 70%, #fff), var(--rim) 30%, color-mix(in srgb, var(--rim) 60%, #000));
+}
+.piece-hex::after {
+  inset: 3px 3.5px;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.10), transparent 22%),
+    radial-gradient(circle at 50% 30%, #141428, #07070f 75%);
+}
+.p2-piece .piece-hex { --rim: var(--p2); }
+
 .piece-art,
 .piece-hex .sprite {
   position: absolute;
+  z-index: 1;
   inset: 50% auto auto 50%;
   transform: translate(-50%, -50%);
 }
-.piece-hex .sprite { width: 96%; height: 96%; }
+.piece-hex .sprite { width: 80%; height: 80%; }
 .piece-art {
   width: 82%;
   height: 82%;
@@ -1294,23 +1333,20 @@ kbd {
 .piece-art.loaded + .sprite { display: none; }
 .piece-slot.selected .sprite { filter: drop-shadow(0 0 2px #fff) drop-shadow(0 0 5px currentColor); }
 
-/* Player-colored hex backgrounds */
-.p1-piece .piece-hex  { background: linear-gradient(160deg, var(--p1-mid), var(--p1-dim) 70%); }
-.p2-piece .piece-hex  { background: linear-gradient(160deg, var(--p2-mid), var(--p2-dim) 70%); }
-
-/* Selected state */
-.p1-piece.selected .piece-hex {
-  background: var(--p1-mid);
-  filter: drop-shadow(0 0 8px var(--p1)) drop-shadow(0 0 16px rgba(255,45,120,.5));
+/* Rim glow in the owner's colour; brighter and white-hot when selected */
+.piece-hex { filter: drop-shadow(0 0 4px color-mix(in srgb, var(--rim) 55%, transparent)); }
+.piece-slot.selected .piece-hex {
+  filter: drop-shadow(0 0 3px #fff) drop-shadow(0 0 10px var(--rim)) drop-shadow(0 0 18px color-mix(in srgb, var(--rim) 50%, transparent));
 }
-.p2-piece.selected .piece-hex {
-  background: var(--p2-mid);
-  filter: drop-shadow(0 0 8px var(--p2)) drop-shadow(0 0 16px rgba(0,245,255,.5));
+.piece-slot.selected .piece-hex::after {
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.16), transparent 30%),
+    radial-gradient(circle at 50% 30%, color-mix(in srgb, var(--rim) 22%, #141428), #07070f 80%);
 }
 
 /* Queen is forced this turn */
 .piece-slot.must .piece-hex {
-  background: rgba(255,215,0,.3);
+  --rim: var(--gold);
   animation: mustPulse 1.2s ease-in-out infinite;
 }
 
@@ -1464,6 +1500,16 @@ input:focus-visible {
   .room-code { font-size: 24px; letter-spacing: 8px; }
   #menu-subtitle { letter-spacing: 2px; }
   .settings-row.stacked .toggle-label { font-size: 8px; letter-spacing: 0; }
+}
+
+/* Laptop-height screens: tighten the brand block so the whole menu fits without scrolling. */
+@media (max-height: 860px) and (min-height: 681px) {
+  #menu-shell { gap: 14px; }
+  #menu-logo { width: 60px; height: 36px; margin-bottom: 8px; }
+  .menu-eyebrow { margin-bottom: 8px; }
+  .title-letter { font-size: clamp(42px, 9vh, 72px); }
+  #menu-subtitle { margin-top: 10px; }
+  #menu-card { gap: 12px; padding-top: 18px; padding-bottom: 18px; }
 }
 
 @media (max-height: 680px) {

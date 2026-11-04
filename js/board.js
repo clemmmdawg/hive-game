@@ -2,7 +2,7 @@
 // Depends on: hex.js (must load first)
 
 import { hexToPixel, pixelToHex, hexNeighbors, hexKey, parseKey } from './hex.js';
-import { drawSprite } from './sprites.js';
+import { drawSprite, bodyFill, SPECIES_COLOR } from './sprites.js';
 
 const BG         = '#05050f';
 const P1         = '#ff2d78';
@@ -17,11 +17,34 @@ const FIT_PAD    = 16;   // px of breathing room around the hive when fitting
 const CAMERA_MS  = 380;
 const ARRIVAL_MS = 320;
 
-const SPRITE_SCALE = 1.5; // sprite art fills ~78% of its box; this sizes it to the hex
-const SPRITE_COLORS = {
-  1: { ink: '#ffd3e4', fill: '#2b0c1e', glow: P1 },
-  2: { ink: '#d2fdff', fill: '#06262c', glow: P2 },
+// ── Tile look ──
+const RIM       = 0.09;  // rim width as a fraction of the tile radius
+const LIP       = 0.10;  // how far the tile's side (thickness) shows below its face
+const GLYPH_BOX = 1.34;  // sprite box per tile radius (the art fills ~78% of its box)
+const FACE_HI   = '#141428';
+const FACE_LO   = '#07070f';
+const TILE = {
+  1: { rim: P1, rimHi: 'rgba(255,214,230,.75)', lip: '#3b0a20', lipEdge: 'rgba(255,45,120,.45)' },
+  2: { rim: P2, rimHi: 'rgba(214,253,255,.75)', lip: '#043239', lipEdge: 'rgba(0,245,255,.40)' },
 };
+
+/**
+ * Layout of a stack's tiles, bottom first, for a tile of radius `size`. Each
+ * layer up rises and shrinks a step; deeper layers are shaded darker. The rise
+ * and shrink are spread so even a 7-high stack stays within its cell.
+ * @returns {{dx:number, dy:number, scale:number, shade:number}[]}
+ */
+export function stackLayers(height, size) {
+  const steps = Math.max(1, height - 1);
+  const rise   = Math.min(0.13, 0.3 / steps);
+  const shrink = Math.min(0.035, 0.18 / steps);
+  return Array.from({ length: height }, (_, i) => ({
+    dx:    0,
+    dy:    i === 0 ? 0 : -(size * rise * i),
+    scale: 1 - shrink * i,
+    shade: 1 - Math.pow(0.6, height - 1 - i),
+  }));
+}
 
 const easeOutCubic = p => 1 - Math.pow(1 - p, 3);
 const easeOutBack  = p => 1 + 2.2 * Math.pow(p - 1, 3) + 1.2 * Math.pow(p - 1, 2);
@@ -237,14 +260,15 @@ export class Board {
 
     this._drawGridHints(ctx);
     this._drawLastMoveSource(ctx);
-    const pops = this._drawPieces(ctx, t);
+    const faces = this._drawPieces(ctx, t);
+    this._drawSelectionRing(ctx, t);
     this._drawLastMoveRing(ctx);
-    this._drawGhosts(ctx, t); // drawn after pieces so ghost rings overlay beetle targets
+    this._drawGhosts(ctx, t, faces); // drawn after pieces so ghost rings overlay beetle targets
 
     ctx.restore();
 
     // Emoji rendered on a completely separate canvas — zero shared state
-    this._drawEmojis(pops);
+    this._drawEmojis(faces);
   }
 
   // ── Private render helpers ─────────────────────────────
@@ -330,7 +354,7 @@ export class Board {
     ctx.restore();
   }
 
-  _drawGhosts(ctx, t) {
+  _drawGhosts(ctx, t, faces = new Map()) {
     const pulse = 0.38 + 0.30 * Math.sin(t / 360);
 
     for (const key of this.ghosts) {
@@ -353,6 +377,9 @@ export class Board {
         ctx.fill();
       }
 
+      // Occupied target (beetle climb): tint the tile face so it reads through the rim.
+      if (isOccupied) this._tintFace(ctx, faces.get(key), '57,255,20', pulse);
+
       // For occupied targets, draw a slightly larger ring so it sits outside the piece hex
       const ringSize = isOccupied ? this.SIZE + 3 : this.SIZE - 2;
       ctx.strokeStyle = GHOST;
@@ -372,10 +399,12 @@ export class Board {
       const p = hexToPixel(q, r, this.SIZE);
 
       ctx.save();
+      this._tintFace(ctx, faces.get(key), '255,179,0', amberPulse);
       ctx.shadowBlur  = 20;
       ctx.shadowColor = AMBER;
       ctx.strokeStyle = AMBER;
-      ctx.lineWidth   = 2.5;
+      ctx.lineWidth   = 3.5;
+      ctx.lineJoin    = 'round';
       ctx.globalAlpha = amberPulse;
       this._hexPath(ctx, p.x, p.y, this.SIZE + 3);
       ctx.stroke();
@@ -383,92 +412,159 @@ export class Board {
     }
   }
 
-  /** Returns a Map of hex key → arrival scale so glyphs pop in sync. */
+  /**
+   * Draw every stack as stepped 3D tiles. Stacks are painted back-to-front
+   * (top row first) so a tile's lip and a raised stack overlap the row behind.
+   * @returns {Map<string, {x:number, y:number, r:number}>} top-face geometry in
+   *          board space, so the glyph layer lines up with lifts and pops.
+   */
   _drawPieces(ctx, t) {
-    const pops = new Map();
-    for (const [key, stack] of this.pieces) {
+    const faces = new Map();
+    const order = [...this.pieces.keys()].map(key => {
       const { q, r } = parseKey(key);
-      const p        = hexToPixel(q, r, this.SIZE);
+      return { key, p: hexToPixel(q, r, this.SIZE) };
+    }).sort((a, b) => a.p.y - b.p.y || a.p.x - b.p.x);
+
+    const tileR    = this.SIZE - 2;
+    const selPulse = 0.5 + 0.5 * Math.sin(t / 240);
+
+    for (const { key, p } of order) {
+      const stack    = this.pieces.get(key);
       const selected = key === this.selectedHex;
+      const layers   = stackLayers(stack.length, tileR);
       const topIdx   = stack.length - 1;
       const pop      = this._arrivalScale(key, t);
-      if (pop !== 1) pops.set(key, pop);
 
-      // Pyramid: draw bottom-to-top, each piece centered at the same (p.x, p.y).
-      // Lower pieces use full SIZE; upper pieces shrink so lower ones form a visible frame.
       for (let i = 0; i <= topIdx; i++) {
-        const piece   = stack[i];
-        const isTop   = i === topIdx;
-        const isP1    = piece.player === 1;
-        const color   = isP1 ? P1 : P2;
-        const fillRgb = isP1 ? '255,45,120' : '0,245,255';
-
-        // Bottom piece: full size. Each layer above it shrinks by 35%.
-        const hexR = (this.SIZE - 2) * Math.pow(0.65, topIdx - i) * (isTop ? pop : 1);
-
-        const idlePulse = 0.28 + 0.06 * Math.sin(t / 900 + (isP1 ? 0 : Math.PI));
-        const selPulse  = 0.50 + 0.50 * Math.sin(t / 240);
-        const fillAlpha = (selected && isTop) ? (0.30 + 0.18 * selPulse)
-                        : isTop               ? idlePulse
-                        :                       0.50;
-        const glowBlur  = (selected && isTop) ? (28 + 18 * selPulse)
-                        : isTop               ? (10 + 6 * idlePulse)
-                        :                       8;
-        const strokeW   = (selected && isTop) ? (2.2 + 1.2 * selPulse)
-                        : isTop               ? 1.8
-                        :                       2.0; // bottom piece border slightly thicker
-
-        ctx.save();
-
-        // Dark base fill first (blocks starfield bleedthrough)
-        ctx.shadowBlur = 0;
-        this._hexPath(ctx, p.x, p.y, hexR);
-        ctx.fillStyle  = '#09091a';
-        ctx.fill();
-
-        // Colored neon fill + glow
-        ctx.shadowBlur  = glowBlur;
-        ctx.shadowColor = (selected && isTop) ? '#ffffff' : color;
-        this._hexPath(ctx, p.x, p.y, hexR);
-        ctx.fillStyle   = `rgba(${fillRgb},${fillAlpha})`;
-        ctx.fill();
-        ctx.strokeStyle = (selected && isTop) ? '#ffffff' : color;
-        ctx.lineWidth   = strokeW;
-        ctx.stroke();
-
-        // Inner bevel line for a little depth
-        if (isTop) {
-          ctx.shadowBlur  = 0;
-          ctx.globalAlpha = 0.22;
-          ctx.lineWidth   = 1;
-          this._hexPath(ctx, p.x, p.y, hexR * 0.8);
-          ctx.stroke();
-          ctx.globalAlpha = 1;
-        }
-
-        // Selection ring (top piece only)
-        if (selected && isTop) {
-          ctx.globalAlpha = 0.35 + 0.65 * selPulse;
-          ctx.shadowBlur  = 24 * selPulse;
-          ctx.shadowColor = '#ffffff';
-          this._hexPath(ctx, p.x, p.y, this.SIZE + 5 + 3 * selPulse);
-          ctx.strokeStyle = '#ffffff';
-          ctx.lineWidth   = 1.2;
-          ctx.stroke();
-        }
-
-        ctx.restore();
+        const L     = layers[i];
+        const isTop = i === topIdx;
+        const lift  = isTop && selected ? tileR * 0.06 : 0;
+        const x = p.x + L.dx, y = p.y + L.dy - lift;
+        const r = tileR * L.scale * (isTop ? pop : 1);
+        this._drawTile(ctx, x, y, r, stack[i].player, {
+          shade: L.shade, selected: isTop && selected, selPulse, lift, t,
+        });
+        if (isTop) faces.set(key, { x, y, r });
       }
     }
-    return pops;
+    return faces;
+  }
+
+  /** Pulsing colour wash + inner ring on a tile's face (glyph stays on top). */
+  _tintFace(ctx, face, rgb, pulse) {
+    if (!face) return;
+    const inner = face.r * (1 - RIM * 1.6);
+    ctx.save();
+    ctx.shadowBlur = 0;
+    this._hexPath(ctx, face.x, face.y, inner);
+    ctx.fillStyle = `rgba(${rgb},${(0.10 + 0.14 * pulse).toFixed(3)})`;
+    ctx.fill();
+    ctx.strokeStyle = `rgba(${rgb},${(0.45 + 0.4 * pulse).toFixed(3)})`;
+    ctx.lineWidth   = Math.max(1.5, face.r * 0.05);
+    ctx.lineJoin    = 'round';
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /** White pulsing ring outside the selected cell, drawn over every tile. */
+  _drawSelectionRing(ctx, t) {
+    if (!this.selectedHex || !this.pieces.has(this.selectedHex)) return;
+    const { q, r } = parseKey(this.selectedHex);
+    const p = hexToPixel(q, r, this.SIZE);
+    const selPulse = 0.5 + 0.5 * Math.sin(t / 240);
+    ctx.save();
+    ctx.globalAlpha = 0.6 + 0.4 * selPulse;
+    ctx.shadowBlur  = 10 + 16 * selPulse;
+    ctx.shadowColor = '#ffffff';
+    this._hexPath(ctx, p.x, p.y, this.SIZE + 5 + 3 * selPulse);
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth   = 2.5;
+    ctx.lineJoin    = 'round';
+    ctx.stroke();
+    ctx.restore();
   }
 
   /**
-   * Draw all piece glyphs (sprites, or PNG/emoji fallbacks) on the dedicated
-   * emojiCanvas — completely isolated from the board canvas state. No shadows,
-   * no animated fillStyle, no globalAlpha bleed.
+   * One tile: soft drop shadow, a player-tinted lip for thickness, a dark
+   * bevelled face, a thick glowing rim in the owner's colour and a top-edge
+   * highlight. `shade` (0..1) darkens buried slabs.
    */
-  _drawEmojis(pops) {
+  _drawTile(ctx, x, y, r, player, { shade = 0, selected = false, selPulse = 0, lift = 0, t = 0 }) {
+    const pal   = TILE[player] ?? TILE[1];
+    const rimW  = r * RIM;
+    const lipDy = r * LIP;
+
+    ctx.save();
+
+    // Contact shadow: grounds the tile; grows when the tile is lifted.
+    ctx.shadowColor   = 'rgba(0,0,0,.75)';
+    ctx.shadowBlur    = r * 0.22 + lift * 2;
+    ctx.shadowOffsetY = r * 0.06 + lift;
+    this._hexPath(ctx, x, y + lipDy, r);
+    ctx.fillStyle = pal.lip;
+    ctx.fill();
+    ctx.shadowColor = 'transparent';
+    ctx.shadowBlur = 0;
+    ctx.shadowOffsetY = 0;
+
+    // Lip edge: a faint player-colour line so the slab reads as solid.
+    ctx.strokeStyle = pal.lipEdge;
+    ctx.lineWidth   = Math.max(1, r * 0.03);
+    ctx.stroke();
+
+    // Rim with neon glow (the glow is what makes ownership readable at a glance).
+    const idle = 0.5 + 0.5 * Math.sin(t / 900 + (player === 1 ? 0 : Math.PI));
+    this._hexPath(ctx, x, y, r - rimW / 2);
+    ctx.shadowColor = selected ? '#ffffff' : pal.rim;
+    ctx.shadowBlur  = shade ? r * 0.12 : selected ? r * (0.45 + 0.25 * selPulse) : r * (0.26 + 0.06 * idle);
+    ctx.strokeStyle = pal.rim;
+    ctx.lineWidth   = rimW;
+    ctx.lineJoin    = 'round';
+    ctx.stroke();
+    ctx.shadowColor = 'transparent';
+    ctx.shadowBlur  = 0;
+
+    // Face: dark radial gradient, lit from above.
+    const face = ctx.createRadialGradient(x, y - r * 0.35, r * 0.05, x, y, r);
+    face.addColorStop(0, FACE_HI);
+    face.addColorStop(1, FACE_LO);
+    this._hexPath(ctx, x, y, r - rimW);
+    ctx.fillStyle = face;
+    ctx.fill();
+
+    // Inner bevel: light catches the upper inside edges, shadow on the lower ones.
+    const inner = r - rimW - Math.max(0.75, r * 0.02);
+    ctx.lineWidth = Math.max(1, r * 0.035);
+    ctx.strokeStyle = 'rgba(255,255,255,.20)';
+    this._hexEdges(ctx, x, y, inner, [3, 4, 5]);   // upper-left, top, upper-right
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(0,0,0,.45)';
+    this._hexEdges(ctx, x, y, inner, [0, 1, 2]);   // lower edges
+    ctx.stroke();
+
+    // Specular line along the top of the rim.
+    ctx.strokeStyle = selected ? `rgba(255,255,255,${0.75 + 0.25 * selPulse})` : pal.rimHi;
+    ctx.lineWidth   = Math.max(0.75, rimW * 0.28);
+    this._hexEdges(ctx, x, y, r - rimW * 0.62, [3, 4, 5]);
+    ctx.stroke();
+
+    // Buried slabs: darken everything drawn above.
+    if (shade > 0) {
+      this._hexPath(ctx, x, y + lipDy * 0.5, r + 1);
+      ctx.fillStyle = `rgba(4,4,12,${(shade * 0.7).toFixed(3)})`;
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+
+  /**
+   * Draw piece glyphs (sprites, or PNG/emoji fallbacks) plus stack badges on
+   * the dedicated emojiCanvas — completely isolated from the board canvas
+   * state. No animated fillStyle or globalAlpha bleed.
+   * @param {Map<string, {x:number, y:number, r:number}>} faces from _drawPieces
+   */
+  _drawEmojis(faces) {
     const ec = this.emojiCtx;
 
     ec.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
@@ -482,53 +578,77 @@ export class Board {
     ec.textAlign                = 'center';
     ec.textBaseline             = 'middle';
 
-    for (const [key, stack] of this.pieces) {
-      const { x: sx, y: sy } = this.hexToScreen(key);
+    const s = this.scale;
+    for (const [key, face] of faces) {
+      const stack = this.pieces.get(key);
+      const sx = this.tx + face.x * s;
+      const sy = this.ty + face.y * s;
+      const r  = face.r * s;
       const topIdx = stack.length - 1;
-      const pop    = pops.get(key) ?? 1;
 
-      // Top piece: always full-size, centered
-      const visualSize = Math.round(this.SIZE * this.scale * 0.92 * pop);
-      this._drawPieceVisual(ec, stack[topIdx], sx, sy, visualSize);
-
-      // Buried pieces: badges fanned toward the lower-right, deeper = further out.
-      if (topIdx > 0) {
-        const badgeSize = Math.round(this.SIZE * this.scale * 0.34);
-
-        for (let i = 0; i < topIdx; i++) {
-          const depth   = topIdx - i; // 1 for just-below-top, higher for deeper
-          const dist    = this.SIZE * this.scale * (0.44 + (depth - 1) * 0.20);
-          const badgeSx = sx + dist * 0.60;
-          const badgeSy = sy + dist * 0.58 + 1;
-
-          // Dark disc in the owner's color keeps the badge legible over the glow
-          ec.beginPath();
-          ec.arc(badgeSx, badgeSy, badgeSize * 0.62, 0, Math.PI * 2);
-          ec.fillStyle   = 'rgba(9,9,26,.92)';
-          ec.fill();
-          ec.lineWidth   = Math.max(1, badgeSize * 0.07);
-          ec.strokeStyle = stack[i].player === 1 ? P1 : P2;
-          ec.stroke();
-
-          this._drawPieceVisual(ec, stack[i], badgeSx, badgeSy, badgeSize);
-        }
-      }
+      this._drawPieceVisual(ec, stack[topIdx], sx, sy, r * GLYPH_BOX);
+      if (topIdx > 0) this._drawStackBadge(ec, stack, sx, sy, r);
     }
+  }
+
+  /**
+   * Stack badge: a "×N" pill on the top tile's upper-right corner, and a chip
+   * per buried piece (owner rim, species glyph) along the lower-right.
+   */
+  _drawStackBadge(ec, stack, sx, sy, r) {
+    const topIdx = stack.length - 1;
+
+    // Buried-piece chips, nearest-to-top first.
+    const chipR = Math.max(5, r * 0.2);
+    for (let i = topIdx - 1, n = 0; i >= 0; i--, n++) {
+      const a  = Math.PI * (0.16 + n * 0.17); // fan clockwise from just below east
+      const cx = sx + r * 0.96 * Math.cos(a);
+      const cy = sy + r * 0.96 * Math.sin(a);
+      const pal = TILE[stack[i].player] ?? TILE[1];
+      ec.beginPath();
+      ec.arc(cx, cy, chipR, 0, Math.PI * 2);
+      ec.fillStyle = FACE_LO;
+      ec.fill();
+      ec.lineWidth = Math.max(1.2, chipR * 0.2);
+      ec.strokeStyle = pal.rim;
+      ec.stroke();
+      this._drawPieceVisual(ec, stack[i], cx, cy, chipR * 2.1);
+    }
+
+    // ×N pill.
+    const font = Math.max(7, Math.round(r * 0.2));
+    const label = `\u00d7${stack.length}`;
+    ec.font = `${font}px 'Press Start 2P', monospace`;
+    const w  = ec.measureText(label).width + font * 0.9;
+    const h  = font * 1.7;
+    const px = sx + r * 0.5, py = sy - r * 0.8;
+    ec.beginPath();
+    if (ec.roundRect) ec.roundRect(px - w / 2, py - h / 2, w, h, h / 2);
+    else ec.rect(px - w / 2, py - h / 2, w, h);
+    ec.fillStyle = 'rgba(7,7,15,.94)';
+    ec.fill();
+    ec.lineWidth = Math.max(1, font * 0.16);
+    ec.strokeStyle = (TILE[stack[topIdx].player] ?? TILE[1]).rim;
+    ec.stroke();
+    ec.fillStyle = '#ffffff';
+    ec.fillText(label, px + font * 0.06, py + font * 0.08);
   }
 
   _drawPieceVisual(ctx, piece, x, y, size) {
     if (piece.image?.complete && piece.image.naturalWidth) {
-      const ratio = Math.min(size / piece.image.naturalWidth, size / piece.image.naturalHeight);
+      const box   = size * 0.7; // PNG art fills its whole box; sprites only ~78% of theirs
+      const ratio = Math.min(box / piece.image.naturalWidth, box / piece.image.naturalHeight);
       const width = piece.image.naturalWidth * ratio;
       const height = piece.image.naturalHeight * ratio;
       ctx.drawImage(piece.image, x - width / 2, y - height / 2, width, height);
       return;
     }
 
-    if (drawSprite(ctx, piece.type, x, y, size * SPRITE_SCALE, SPRITE_COLORS[piece.player] ?? SPRITE_COLORS[1])) return;
+    const ink = SPECIES_COLOR[piece.type] ?? '#ffffff';
+    if (drawSprite(ctx, piece.type, x, y, size, { ink, fill: bodyFill(ink), glow: ink })) return;
 
     // Last resort (no Path2D): the piece's emoji.
-    ctx.font = `${Math.round(size * 0.64)}px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", serif`;
+    ctx.font = `${Math.round(size * 0.45)}px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", serif`;
     ctx.fillStyle = '#ffffff';
     ctx.fillText(piece.emoji ?? '?', x, y);
   }
@@ -546,6 +666,20 @@ export class Board {
       i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
     }
     ctx.closePath();
+  }
+
+  /**
+   * Path of selected edges of a flat-top hexagon. Edge i runs from vertex i to
+   * vertex i+1 (vertex 0 at east, clockwise in screen space): 0 lower-right,
+   * 1 bottom, 2 lower-left, 3 upper-left, 4 top, 5 upper-right.
+   */
+  _hexEdges(ctx, cx, cy, size, edges) {
+    ctx.beginPath();
+    for (const e of edges) {
+      const a0 = (Math.PI / 3) * e, a1 = (Math.PI / 3) * (e + 1);
+      ctx.moveTo(cx + size * Math.cos(a0), cy + size * Math.sin(a0));
+      ctx.lineTo(cx + size * Math.cos(a1), cy + size * Math.sin(a1));
+    }
   }
 
   // ── Coordinate conversion ──────────────────────────────

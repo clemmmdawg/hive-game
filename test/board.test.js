@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { Board } from '../js/board.js';
+import { Board, stackLayers } from '../js/board.js';
 import { hexToPixel } from '../js/hex.js';
 
 // Just enough of a <canvas> for Board's constructor and input wiring.
@@ -70,4 +70,38 @@ test('recenter on an empty board centers the origin in the playable area', () =>
   assert.equal(board.scale, 1);
   assert.equal(board.tx, 200);
   assert.equal(board.ty, 52 + (800 - 52 - 112) / 2);
+});
+
+test('stackLayers: a lone tile sits flat at full size', () => {
+  const layers = stackLayers(1, 40);
+  assert.equal(layers.length, 1);
+  assert.equal(layers[0].dx, 0);
+  assert.equal(layers[0].dy, 0);
+  assert.equal(layers[0].scale, 1);
+  assert.equal(layers[0].shade, 0);
+});
+
+test('stackLayers: a stack rises in steps, top tile stays large and unshaded', () => {
+  for (const height of [2, 3, 5, 7]) {
+    const layers = stackLayers(height, 40);
+    assert.equal(layers.length, height);
+    for (let i = 1; i < height; i++) {
+      assert.ok(layers[i].dy < layers[i - 1].dy, `layer ${i} of ${height} rises`);
+      assert.ok(layers[i].scale <= layers[i - 1].scale, `layer ${i} of ${height} is not larger than the one below`);
+      assert.ok(layers[i].shade < layers[i - 1].shade, `layer ${i} of ${height} is lighter than the one below`);
+    }
+    const top = layers[height - 1];
+    assert.ok(top.scale >= 0.8, `top scale ${top.scale} of ${height}`);
+    assert.equal(top.shade, 0);
+    // The whole stack stays within ~a third of a hex of its cell, whatever its height.
+    assert.ok(layers[0].dy - top.dy <= 40 * 0.32, `rise of ${height}-stack`);
+  }
+});
+
+test('stackLayers scales with the tile size', () => {
+  const small = stackLayers(3, 20), big = stackLayers(3, 40);
+  for (let i = 0; i < 3; i++) {
+    assert.equal(big[i].dy, small[i].dy * 2);
+    assert.equal(big[i].scale, small[i].scale);
+  }
 });
