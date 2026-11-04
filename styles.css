@@ -992,6 +992,8 @@ kbd {
    pieces to pick, and both reserves instead of the tray. */
 #turn-chip.watching #chip-label { color: var(--gold); text-shadow: 0 0 6px rgba(255,215,0,.45); }
 #turn-chip.watching #chip-sub { display: block; }
+@media (max-width: 360px) { #turn-chip.watching #chip-sub { display: none; } .spectator-count { padding: 0 6px 0 4px; } }
+@media (max-width: 430px) { #turn-chip.watching #chip-label { font-size: 7px; letter-spacing: .5px; } }
 body.spectating #tray-pieces { display: none; }
 body.spectating #tray { min-height: 0; gap: 4px; padding-top: 8px; }
 body.spectating #reserve-row-b { display: flex; }
@@ -1516,6 +1518,9 @@ body:has(#menu-screen.active):not(:has(#rules-overlay.active)) #toast.has-action
   align-items: center;
   gap: 12px;
   padding: 10px 20px 10px 12px;
+  width: max-content;
+  max-width: calc(100vw - 32px); /* never wider than the screen minus a 16px gutter: long copy wraps */
+  box-sizing: border-box;
   border: 1.5px solid var(--banner-color, var(--p1));
   border-radius: 999px;
   background: rgba(5,5,15,.92);
@@ -1553,8 +1558,12 @@ body:has(#menu-screen.active):not(:has(#rules-overlay.active)) #toast.has-action
   letter-spacing: 2px;
   color: var(--banner-color, var(--p1));
   text-shadow: 0 0 14px var(--banner-color, var(--p1));
-  white-space: nowrap;
+  min-width: 0;
+  text-align: center;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
+@media (max-width: 430px) { #turn-banner { padding: 8px 16px 8px 10px; gap: 9px; border-radius: 26px; } }
 
 /* ── Tray ────────────────────────────────────────────────── */
 #tray {

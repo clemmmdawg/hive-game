@@ -199,7 +199,7 @@ test('spectators do not refresh the idle timer and are told ROOM_CLOSED on clean
     assert.ok(getRoom(code));
     mock.timers.tick(2000);
     assert.equal(getRoom(code), undefined, 'idle cleanup is not delayed by a spectator');
-    assert.ok(last(w, 'ROOM_CLOSED'));
+    assert.equal(last(w, 'ROOM_CLOSED').reason, 'IDLE');
     assert.equal(w.closed, true);
   } finally { mock.timers.reset(); }
 });
@@ -213,7 +213,7 @@ test('both players gone: the room still cleans up although a spectator remains, 
     handleClose(a); handleClose(b);
     mock.timers.tick(31_000);
     assert.equal(getRoom(code), undefined);
-    assert.ok(last(w, 'ROOM_CLOSED'));
+    assert.equal(last(w, 'ROOM_CLOSED').reason, 'PLAYERS_LEFT');
   } finally { mock.timers.reset(); }
 });
 

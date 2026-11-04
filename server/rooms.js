@@ -187,7 +187,7 @@ export function removeSocket(socket) {
     const cleanupTimer = setTimeout(() => {
       // Only delete if still vacant
       const r = rooms.get(code);
-      if (r && !r.sockets[0] && !r.sockets[1]) cleanupRoom(code);
+      if (r && !r.sockets[0] && !r.sockets[1]) cleanupRoom(code, 'PLAYERS_LEFT');
     }, 30_000);
     cleanupTimer.unref?.();
   }
@@ -247,7 +247,8 @@ export { touchActivity };
 
 // ── Cleanup ──────────────────────────────────────────────────────────────────
 
-function cleanupRoom(code) {
+/** `reason` rides on ROOM_CLOSED: 'IDLE' (inactivity / nobody joined) or 'PLAYERS_LEFT' (both players gone). */
+function cleanupRoom(code, reason = 'IDLE') {
   const room = rooms.get(code);
   if (!room) return;
 
@@ -257,7 +258,7 @@ function cleanupRoom(code) {
 
   for (const sock of [...room.sockets, ...room.spectators]) {
     if (sock && sock.readyState === WS_OPEN) {
-      try { sock.send(JSON.stringify({ type: 'ROOM_CLOSED' })); } catch {}
+      try { sock.send(JSON.stringify({ type: 'ROOM_CLOSED', reason })); } catch {}
       try { sock.close(); } catch {}
     }
   }

@@ -445,7 +445,7 @@ export function startOnlineGame(settings, playerNum, serializedState, endReason 
     // Reloaded into a finished game: the result, without replaying the fanfare.
     winFx.scheduleCard(300, { calm: true });
   } else if (watching()) {
-    showBanner(`WATCHING · PLAYER ${gameState.turn} TO MOVE`, `p${gameState.turn}`, PieceType.QUEEN, 1800);
+    showBanner(`WATCHING · P${gameState.turn} TO MOVE`, `p${gameState.turn}`, PieceType.QUEEN, 1800);
     for (const p of clockInfo.away ?? []) awayPlayers.add(p); // a player already disconnected when we joined
     const [gone] = awayPlayers;
     if (gone) toast(`PLAYER ${gone} DISCONNECTED`, 'warn', 0);
@@ -1742,7 +1742,9 @@ export function initNetHandlers() {
   });
 
   // Server closed the room (timeout, etc.)
-  net.on('ROOM_CLOSED', () => exitToMenu({ notice: 'The room was closed after a period of inactivity.' }));
+  net.on('ROOM_CLOSED', ({ reason } = {}) => exitToMenu({
+    notice: reason === 'PLAYERS_LEFT' ? 'THE PLAYERS LEFT — ROOM CLOSED' : 'The room was closed after a period of inactivity.',
+  }));
 
   net.on('ERROR', ({ reason }) => {
     if (FATAL_ERRORS[reason]) exitToMenu({ notice: FATAL_ERRORS[reason], keepSaved: reason === 'SEAT_TAKEN' });
