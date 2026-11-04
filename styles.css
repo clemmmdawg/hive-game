@@ -303,6 +303,26 @@ kbd {
   margin-top: 14px;
 }
 
+/* Update offer on the main menu: in the layout flow between the tagline and the setup card. */
+#menu-update {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  max-width: 100%;
+  padding: 8px 8px 8px 16px;
+  border: 1px solid rgba(57,255,20,.45);
+  border-radius: 999px;
+  background: rgba(10,11,27,.96);
+  box-shadow: 0 0 18px rgba(57,255,20,.12);
+  color: var(--ghost);
+  font-size: 7px;
+  letter-spacing: 1px;
+  line-height: 1.6;
+}
+#menu-update[hidden] { display: none; }
+#menu-update .toast-action { pointer-events: auto; }
+
 #menu-card {
   width: min(100%, 520px);
   display: flex;
@@ -1242,8 +1262,7 @@ kbd {
   border: 0;
   background: none;
   color: var(--c);
-  pointer-events: auto;
-  cursor: pointer;
+  pointer-events: none; /* taps reach the board (onTap hit-tests the chevrons), so a drag from one still pans */
   animation: edge-hint-in .22s var(--ease-out) both;
   -webkit-tap-highlight-color: transparent;
 }
@@ -1257,15 +1276,15 @@ kbd {
   border: 1.5px solid var(--c);
   box-shadow: 0 0 6px var(--c-glow), inset 0 0 5px var(--c-glow);
 }
-.edge-hint::after {                   /* breathing halo: opacity only, so it stays on the compositor */
+.edge-hint::after {                   /* halo: breathes three times when a chevron appears, then rests */
   content: '';
   position: absolute;
   inset: 8px;
   border-radius: 50%;
   box-shadow: 0 0 14px 2px var(--c-glow);
   opacity: 0;
-  animation: edge-hint-pulse 1.6s ease-in-out infinite;
-  pointer-events: none;
+  animation: edge-hint-pulse 1.6s ease-in-out 3;
+  will-change: opacity;
 }
 .edge-hint .eh-chevron {
   position: absolute;
@@ -1292,9 +1311,6 @@ kbd {
   text-align: center;
   box-shadow: 0 0 6px var(--c-glow);
 }
-.edge-hint:hover::before { background: rgba(20, 40, 20, .9); }
-.edge-hint.throw:hover::before { background: rgba(40, 30, 5, .9); }
-.edge-hint:active::before { transform: scale(.92); }
 .edge-hint:focus-visible { outline: none; }
 .edge-hint:focus-visible::before { outline: 2px solid #fff; outline-offset: 3px; }
 @keyframes edge-hint-in { from { opacity: 0; scale: .6; } to { opacity: 1; scale: 1; } }
@@ -1349,8 +1365,9 @@ kbd {
 /* Over the main menu: dock at the very bottom, under START and clear of the HIVE logo; while it shows,
    the menu gains room below so START (and HOW TO PLAY) can always scroll out from under it. */
 body:has(#menu-screen.active) #toast { bottom: calc(var(--safe-bottom) + 12px); }
-body:has(#menu-screen.active):has(#toast.visible) #menu-screen { padding-bottom: calc(max(28px, var(--safe-bottom)) + 76px); }
-#menu-screen { transition: opacity .35s ease, padding-bottom .25s var(--ease-out); }
+/* The update offer itself is shown in the menu's own flow (#menu-update), never over the logo or START;
+   the floating copy only stays while How to Play covers the menu (everything else is inert then). */
+body:has(#menu-screen.active):not(:has(#rules-overlay.active)) #toast.has-action { display: none; }
 .toast-action {
   min-height: 32px;
   padding: 0 12px;

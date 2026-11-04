@@ -239,7 +239,18 @@ function toast(text, kind = '', ms = 2200) {
   toastTimer = ms ? setTimeout(clearToast, ms) : null;
 }
 
-/** Offer a freshly installed service worker: a persistent toast with RELOAD (re-shown after other toasts). */
+/** RELOAD (toast or menu banner): activate the waiting worker; controllerchange then reloads. */
+function requestReload(worker) {
+  reloadRequested = true;
+  for (const b of document.querySelectorAll('#toast .toast-action, #btn-menu-reload')) b.disabled = true;
+  worker.postMessage('SKIP_WAITING');
+}
+
+/**
+ * Offer a freshly installed service worker: a persistent toast with RELOAD (re-shown after other
+ * toasts) in game, and the same offer in the main menu's own layout (#menu-update; the floating
+ * toast is hidden there so it never covers the logo or START).
+ */
 function showUpdateToast(worker) {
   pendingUpdate = worker;
   toast('NEW VERSION READY', 'good', 0);
@@ -249,13 +260,14 @@ function showUpdateToast(worker) {
   btn.className = 'toast-action';
   btn.textContent = 'RELOAD';
   btn.disabled = reloadRequested;
-  btn.addEventListener('click', () => {
-    reloadRequested = btn.disabled = true;
-    worker.postMessage('SKIP_WAITING');
-  });
+  btn.addEventListener('click', () => requestReload(worker));
   el.append(btn);
   el.classList.add('has-action');
+  $('menu-update').hidden = false;
+  $('btn-menu-reload').disabled = reloadRequested;
 }
+
+$('btn-menu-reload').addEventListener('click', () => { if (pendingUpdate) requestReload(pendingUpdate); });
 
 /** Register the offline worker; a waiting update is offered, never forced (a game may be in progress). */
 function initServiceWorker() {
@@ -797,6 +809,7 @@ $('btn-view-board').addEventListener('click', () => {
 
 board.onTap = (q, r, clientX, clientY) => {
   if (!gameState) return;
+  if (tapEdgeHint(clientX, clientY)) return; // the chevrons let pointers through so a drag still pans
   if (reviewer.active) { closeGameMenu(); hidePieceTooltip(); return; } // read-only: the board only pans and zooms
   closeGameMenu();
   const key      = hexKey(q, r);
@@ -880,14 +893,34 @@ board.onIndicators = list => {
   for (const extra of buttons.slice(list.length)) extra.remove();
 };
 
-edgeHints.addEventListener('click', event => {
-  const btn = event.target.closest('.edge-hint');
-  const cluster = btn && board.indicators[Number(btn.dataset.index)];
-  if (!cluster) return;
+const EDGE_HINT_HIT = 24; // px: the 44 px button, plus a little
+
+function showEdgeCluster(cluster) {
   hidePieceTooltip();
   hideBoardHint();
   // Keep the selected piece (and every other target) in frame too when it all fits.
   board.showTargets(cluster.keys, [board.selectedHex, ...board.ghosts, ...board.throwTargets].filter(Boolean));
+}
+
+/**
+ * The chevron buttons are pointer-events: none, so touches and drags land on the board (a drag that
+ * starts on one pans as usual); a clean tap on one is caught here, before the board handles it.
+ */
+function tapEdgeHint(x, y) {
+  let best = null, bestD = EDGE_HINT_HIT;
+  for (const c of board.indicators) {
+    const d = Math.hypot(c.x - x, c.y - y);
+    if (d <= bestD) { best = c; bestD = d; }
+  }
+  if (best) showEdgeCluster(best);
+  return !!best;
+}
+
+// Keyboard (Enter / Space on a focused chevron).
+edgeHints.addEventListener('click', event => {
+  const btn = event.target.closest('.edge-hint');
+  const cluster = btn && board.indicators[Number(btn.dataset.index)];
+  if (cluster) showEdgeCluster(cluster);
 });
 
 // ── Tray rendering ─────────────────────────────────────
