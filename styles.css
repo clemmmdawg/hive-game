@@ -11,7 +11,16 @@
   --ghost:     #39ff14;
   --p1-ink:    #ffd3e4;   /* sprite line colour on P1 pieces */
   --p2-ink:    #d2fdff;   /* sprite line colour on P2 pieces */
-  --ink:       #eef0ff;   /* sprite line colour where no owner applies */
+  --ink:       #eef0ff;   /* mono sprite colour (menu icons) */
+  /* Species glyph colours — mirror SPECIES_COLOR in js/sprites.js */
+  --sp-queen:       #ffd23f;
+  --sp-beetle:      #b07cff;
+  --sp-grasshopper: #a6ff3d;
+  --sp-ant:         #4d8dff;
+  --sp-spider:      #ff7a3d;
+  --sp-mosquito:    #d8dcef;
+  --sp-ladybug:     #ff4040;
+  --sp-pillbug:     #2fe0a8;
   --gold:      #ffd700;
   --amber:     #ffb300;
   --danger:    #ff4d5e;
@@ -64,17 +73,19 @@ button { font-family: var(--font); color: inherit; }
 }
 
 /* ── Insect sprites (js/sprites.js) ─────────────────────────
-   One recipe for every sprite: dark tinted body, ink outline, ink dots.
-   Set `color` to recolour; owner classes .p1/.p2 add the neon halo. */
+   One recipe for every sprite: species-tinted body, ink outline, ink dots.
+   spriteSVG() paints pieces in their species colour inline; `.mono` sprites and
+   menu icons take `color` from CSS. Owner classes .p1/.p2 only add the player halo. */
 .sprite {
   display: block;
   width: 100%;
   height: 100%;
   overflow: visible;
   color: var(--ink);
+  filter: drop-shadow(0 0 1.5px color-mix(in srgb, currentColor 55%, transparent));
 }
 .sprite .sp-body path {
-  fill: color-mix(in srgb, currentColor 14%, #090916);
+  fill: color-mix(in srgb, currentColor 40%, #090916);
   stroke: currentColor;
   stroke-width: 2.6;
   stroke-linejoin: round;
@@ -88,11 +99,9 @@ button { font-family: var(--font); color: inherit; }
 }
 .sprite .sp-dot path { fill: currentColor; }
 .p1 .sprite, .p1-piece .sprite, .owner-p1 #piece-tooltip-name .sprite {
-  color: var(--p1-ink);
   filter: drop-shadow(0 0 2px var(--p1));
 }
 .p2 .sprite, .p2-piece .sprite, .owner-p2 #piece-tooltip-name .sprite {
-  color: var(--p2-ink);
   filter: drop-shadow(0 0 2px var(--p2));
 }
 
@@ -464,6 +473,7 @@ kbd {
   flex: 0 0 auto;
 }
 .setting-toggle.on .sprite { color: var(--p1-ink); filter: drop-shadow(0 0 2px var(--p1)); }
+.setting-toggle:not(.on) .sprite { opacity: .55; }
 .toggle-label {
   font-size: 8px;
   letter-spacing: 1px;
@@ -1282,7 +1292,7 @@ kbd {
 .piece-art.loaded { opacity: 1; }
 .piece-art.failed { display: none; }
 .piece-art.loaded + .sprite { display: none; }
-.piece-slot.selected .sprite { color: #fff; }
+.piece-slot.selected .sprite { filter: drop-shadow(0 0 2px #fff) drop-shadow(0 0 5px currentColor); }
 
 /* Player-colored hex backgrounds */
 .p1-piece .piece-hex  { background: linear-gradient(160deg, var(--p1-mid), var(--p1-dim) 70%); }

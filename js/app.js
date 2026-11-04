@@ -10,7 +10,7 @@ import {
 import { initMenu, showMenu, showConfirm, showRules, leaveOnlineSession, isOverlayOpen } from './menu.js';
 import { statusText, describeLastMove, winReasonFromServer, resumedWinReason, turnChipText } from './hints.js';
 import { encodeLocalSave, decodeLocalSave, MAX_UNDO } from './local-save.js';
-import { spriteSVG, drawSprite } from './sprites.js';
+import { spriteSVG, drawSprite, SPECIES_COLOR, bodyFill } from './sprites.js';
 import * as net from './net.js';
 
 // ── Piece display definitions ──────────────────────────
@@ -555,14 +555,12 @@ function undo() {
 
 // ── Confetti ───────────────────────────────────────────
 
-// Pre-render each bug sprite once (in both player colours) to a small offscreen
-// canvas. drawImage() is a fast GPU blit; re-drawing paths every frame is not.
+// Pre-render each bug sprite once (species colour, with each player's glow) to a small
+// offscreen canvas. drawImage() is a fast GPU blit; re-drawing paths every frame is not.
 const SPRITE_SIZE  = 36;
-const CONFETTI_INK = [
-  { ink: '#ffd3e4', fill: '#2b0c1e', glow: '#ff2d78' },
-  { ink: '#d2fdff', fill: '#06262c', glow: '#00f5ff' },
-];
-const bugSprites   = TRAY_ORDER.flatMap(type => CONFETTI_INK.map(colors => {
+const CONFETTI_GLOW = ['#ff2d78', '#00f5ff'];
+const bugSprites   = TRAY_ORDER.flatMap(type => CONFETTI_GLOW.map(glow => {
+  const colors = { ink: SPECIES_COLOR[type], fill: bodyFill(SPECIES_COLOR[type]), glow };
   const oc  = document.createElement('canvas');
   oc.width  = SPRITE_SIZE * 2;
   oc.height = SPRITE_SIZE * 2;

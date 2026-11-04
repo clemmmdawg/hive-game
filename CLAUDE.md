@@ -23,7 +23,7 @@ Run with `npm start` (port 3000), `npm start -- 3001`, or `npm start -- --port 3
 - Green ghost hexes for legal placements/moves
 - Amber ring highlights for pillbug-throwable pieces
 - Two-phase throw UI (select piece → select destination)
-- Neon line-art SVG insect sprites for every piece (`js/sprites.js`), shared by the canvas board and all DOM UI
+- Neon Bestiary SVG insect sprites for every piece (`js/sprites.js`), each in its species colour (`SPECIES_COLOR`), shared by the canvas board and all DOM UI
 - Beetle stack pyramid rendering with sprite badges for buried pieces
 - Stack inspector: hover (desktop) or tap an opponent stack to list every piece top→bottom
 - Non-blocking turn banner between turns (replaced the full-screen interstitial)
@@ -174,14 +174,19 @@ neighbors(q, r) → { q, r }[]
 
 ## Sprites (sprites.js)
 
-All eight insects (plus menu icons `HOUSE`, `SIGNAL`, `GAMEPAD` for the mode buttons and `CROWN` for the tournament toggle) are SVG path data on a 64×64 grid, top-down, head up. Each has three layers drawn in order — `body` (dark tinted fill + ink outline), `line` (open strokes), `dot` (ink fills) — at one stroke width (`STROKE = 2.6`). Keep new art to that recipe so the set stays consistent; `pair()` mirrors left/right limbs across x = 32.
+All eight insects (plus menu icons `HOUSE`, `SIGNAL`, `GAMEPAD` for the mode buttons and `CROWN` for the tournament toggle) are SVG path data on a 64×64 grid. Pieces are top-down with the head up, except the grasshopper, ant and mosquito, which are side-on with the head left. Each has three layers drawn in order — `body` (fill = 40% ink over the dark page + ink outline), `line` (open strokes), `dot` (ink fills, `evenodd`, so a shape inside another in the same path is a hole — the ladybug's spots) — at one stroke width (`STROKE = 2.6`). Keep new art to that recipe so the set stays consistent; `pair()` mirrors left/right limbs across x = 32.
+
+Every species has a glyph colour, `SPECIES_COLOR[type]` (mirrored as `--sp-queen` … `--sp-pillbug` in CSS): Queen `#ffd23f`, Beetle `#b07cff`, Grasshopper `#a6ff3d`, Ant `#4d8dff`, Spider `#ff7a3d`, Mosquito `#d8dcef`, Ladybug `#ff4040`, Pillbug `#2fe0a8`. Player ownership is shown by rims/frames/glow, never by recolouring the glyph.
 
 ```js
-spriteSVG(type, cls?)                         → '<svg class="sprite …">…</svg>'  // colour via CSS `color`
-drawSprite(ctx, type, x, y, size, {ink, fill, glow}) → bool                       // false without Path2D
+SPECIES_COLOR[type]                           → '#rrggbb'
+spriteSVG(type, cls?)                         → '<svg class="sprite …" style="color:<species>">…</svg>'
+                                                 // no inline colour when cls includes `mono` or type is a menu icon
+drawSprite(ctx, type, x, y, size, {ink, fill, glow}) → bool  // ink = species colour; false without Path2D
+bodyFill(ink)                                 → 'rgb(…)'     // opaque body fill matching the CSS (40% ink)
 ```
 
-In CSS, `.p1`/`.p2`/`.p1-piece`/`.p2-piece` ancestors tint sprites with `--p1-ink`/`--p2-ink` plus a neon drop-shadow; `--ink` is the neutral colour. Static markup can use `<span data-sprite="TYPE">` — app.js fills these at boot.
+In CSS, `.p1`/`.p2`/`.p1-piece`/`.p2-piece` ancestors only add a player-colour drop-shadow to sprites; `--ink` is the colour of `mono` sprites and menu icons. Static markup can use `<span data-sprite="TYPE">` — app.js fills these at boot.
 
 ---
 
@@ -227,6 +232,7 @@ board.onViewChange = () => {}                  // user panned or zoomed
 --ui-border: rgba(255,255,255,.10)
 --ui-text:   rgba(255,255,255,.55)
 --amber:     #ffb300   /* pillbug throw targets, warnings */
+--sp-queen … --sp-pillbug  /* species glyph colours = SPECIES_COLOR */
 --danger:    #ff4d5e
 --hud-h:     52px      /* plus safe-area inset */
 --tray-h:    108px     /* reserve strip + piece row; plus safe-area inset */
