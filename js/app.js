@@ -466,7 +466,7 @@ function selectBoardPiece(key) {
   updateGhosts();
   // A piece that cannot go anywhere gets a soft "no"; the status line says why.
   sfx.play(board.ghosts.size || board.throwTargets.size ? 'select' : 'invalid');
-  board.reveal([key, ...board.ghosts], board.pieces.keys());
+  board.reveal([key, ...board.ghosts], board.pieces.keys(), { anchor: key });
   syncUI();
 }
 
@@ -479,7 +479,7 @@ function selectThrowPiece(fromKey, pillbugKey) {
   board.selectedHex       = pillbugKey;   // keep the thrower highlighted
   updateGhosts();
   sfx.play('select');
-  board.reveal([fromKey, ...board.ghosts], board.pieces.keys());
+  board.reveal([fromKey, ...board.ghosts], board.pieces.keys(), { anchor: fromKey });
   syncUI();
 }
 
@@ -541,7 +541,7 @@ function onStateChanged(prev, { animate = true, move = null } = {}) {
   const landed = flying ? board.animateMove({ ...move, toKey: lastMove.to, player: lastMove.player, speed: won ? 0.4 : 1 }) : null;
   if (!flying && lastMove && animate) board.markArrival(lastMove.to);
   if (lastMove && animate) playMoveSound(move?.kind, board.hiddenTop.has(lastMove.to), { alarm: dangers.length > 0 });
-  board.reveal(board.pieces.keys());
+  board.reveal(board.pieces.keys(), [], { anchor: lastMove?.to });
   holdResult = won && flying;
   syncUI();
   saveLocal();

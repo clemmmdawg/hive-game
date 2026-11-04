@@ -160,7 +160,10 @@
       <span class="qm p1" id="qm-1" role="img" aria-label="Player 1 queen not placed"></span>
       <span class="qm p2" id="qm-2" role="img" aria-label="Player 2 queen not placed"></span>
     </div>
-    <div id="status-text" aria-live="polite">SELECT A PIECE</div>
+    <div id="hud-center">
+      <div id="status-text" aria-live="polite">SELECT A PIECE</div>
+      <div id="piece-desc" aria-live="polite"></div>
+    </div>
     <div id="hud-actions">
       <button class="hud-btn hud-action hidden" id="btn-pass" type="button">PASS</button>
       <button class="hud-btn hidden" id="btn-undo" type="button" aria-label="Undo last move" title="Undo (Z)"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 7H4V2"/><path d="M4.5 7A8 8 0 1 1 5 16"/></svg></button>
@@ -178,7 +181,6 @@
     <button role="menuitem" type="button" data-action="quit" class="danger"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3v8"/><path d="M6.4 6.6a8 8 0 1 0 11.2 0"/></svg> <span id="menu-quit-label">QUIT TO MENU</span></button>
   </nav>
 
-  <div id="piece-desc" aria-live="polite"></div>
   <div id="piece-tooltip" role="tooltip" aria-hidden="true">
     <strong id="piece-tooltip-name"></strong>
     <span id="piece-tooltip-copy"></span>

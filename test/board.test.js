@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { Board, stackLayers, hiveLayerKey, hiveBounds, layerCovers, badgeLayout, tweenPoint, moveDuration, LAND_MS, queenPips, winTiming, WIN_REVEAL_MAX_MS } from '../js/board.js';
+import { Board, REVEAL_MIN_TILE_PX, stackLayers, hiveLayerKey, hiveBounds, layerCovers, badgeLayout, tweenPoint, moveDuration, LAND_MS, queenPips, winTiming, WIN_REVEAL_MAX_MS } from '../js/board.js';
 import { hexToPixel } from '../js/hex.js';
 
 // Just enough of a <canvas> for Board's constructor and input wiring.
@@ -543,4 +543,78 @@ test('queen pips and selection rings are painted under a floating piece, not ove
   }
   board.finishAnimations();
   await p;
+});
+
+// ── Reveal: zoom-out floor and the user's own zoom ───────────────────────────
+
+/** Landscape phone: 844×390 with slim chrome; a hive far too tall to show whole at a readable size. */
+function landscapeBoard() {
+  const { board } = makeBoard();
+  board.resize(844, 390);
+  board.insets = { top: 46, bottom: 64 };
+  return board;
+}
+const onScreen = (board, k) => {
+  const { x, y } = board.hexToScreen(k);
+  const r = board.SIZE * board.scale * 0.5;
+  return x - r >= 0 && x + r <= board.W && y - r >= board.insets.top && y + r <= board.H - board.insets.bottom;
+};
+const settle = board => { board.draw(0); board.draw(5000); };
+
+test('REVEAL_MIN_TILE_PX is a readable tile radius (16-18 px)', () => {
+  assert.ok(REVEAL_MIN_TILE_PX >= 16 && REVEAL_MIN_TILE_PX <= 18);
+});
+
+test('reveal never zooms tiles below the floor; it frames the piece and its nearest targets instead', () => {
+  const board = landscapeBoard();
+  const column = Array.from({ length: 15 }, (_, i) => `0,${i - 7}`);
+  for (const k of column) board.pieces.set(k, [{ player: 1, type: 'ANT' }]);
+  board.scale = 0.5; board.tx = 422; board.ty = 214;
+  const ant = '0,5';
+  const targets = ['1,4', '-1,6', '1,-7', '-1,-6', '0,-8'];
+  assert.equal(board.reveal([ant, ...targets], column, { anchor: ant }), true);
+  settle(board);
+  assert.ok(board.scale * board.SIZE >= REVEAL_MIN_TILE_PX - 1e-9, `tile radius ${board.scale * board.SIZE}`);
+  assert.ok(onScreen(board, ant), 'the selected piece stays in view');
+  assert.ok(onScreen(board, '1,4') && onScreen(board, '-1,6'), 'its nearest targets are framed');
+});
+
+test('reveal still zooms out as far as needed when that stays above the floor', () => {
+  const board = landscapeBoard();
+  board.scale = 1;
+  const keys = ['-4,0', '4,0'];
+  assert.equal(board.reveal(keys), true);
+  settle(board);
+  assert.ok(board.scale < 1 && board.scale * board.SIZE >= REVEAL_MIN_TILE_PX);
+  for (const k of keys) assert.ok(onScreen(board, k), `${k} visible`);
+});
+
+test('an already zoomed-out camera is never zoomed out further by a reveal', () => {
+  const board = landscapeBoard();
+  board.scale = 0.26; board.tx = 422; board.ty = 214;
+  const keys = ['0,-14', '0,14'];
+  board.reveal(keys);
+  settle(board);
+  assert.equal(board.scale, 0.26);
+});
+
+test('after a manual zoom, reveals pan but keep the chosen zoom until recenter', () => {
+  const { board } = makeBoard();
+  board.insets = { top: 52, bottom: 112 };
+  board.pieces.set('0,0', [{ player: 1, type: 'ANT' }]);
+  board.recenter(false);
+  board.zoomBy(0.9);
+  board._userCameraAt = -Infinity; // long after the zoom: the grace period is over
+  const chosen = board.scale;
+  const keys = ['0,0', '-7,0', '7,0'];
+  assert.equal(board.reveal(keys, [], { anchor: '0,0' }), true);
+  settle(board);
+  assert.equal(board.scale, chosen, 'the user\'s zoom is kept');
+  assert.ok(onScreen(board, '0,0'));
+
+  board.recenter(false);
+  board.scale = 1;
+  board.reveal(keys);
+  settle(board);
+  assert.ok(board.scale < 1, 'after recenter, reveals may zoom out again');
 });

@@ -156,6 +156,8 @@ const RIPPLE_MS   = 480;
 const FLASH_MS    = 170;
 const MAX_PARTICLES = 96;
 const USER_CAMERA_GRACE_MS = 1200;                 // reveal() leaves the camera alone this long after a user pan/zoom
+/** reveal() never zooms out so far that a tile's radius drops below this (screen px). */
+export const REVEAL_MIN_TILE_PX = 17;
 
 /** Tween duration (ms, without the LAND_MS settle) for a move of `steps` hexes. */
 export function moveDuration(kind, steps) {
@@ -331,6 +333,7 @@ export class Board {
     this._camera  = null; // { from, to, start } while animating a recenter
     this._arrival = null; // { key, start } while a newly arrived piece pops in
     this._userCameraAt = -Infinity; // last user pan / pinch / wheel / zoom key (performance.now())
+    this._userZoomed   = false;     // the user picked a zoom (pinch / wheel / keys) since the last recenter
 
     // ── Move animation + impact FX ──
     this._flights  = [];   // pieces in flight (see animateMove)
@@ -418,6 +421,7 @@ export class Board {
 
   /** Fit the whole hive into the area between the HUD and tray. */
   recenter(animate = true) {
+    this._userZoomed = false;
     const target = this._fitTarget();
     if (!animate || this.reducedMotion) {
       this._camera = null;
@@ -432,54 +436,109 @@ export class Board {
    * the playable area between the insets: the smallest pan that shows them, or —
    * only if they cannot fit at this zoom — a zoom-out to fit. Never zooms in, and
    * leaves the camera alone while the user is panning or just did.
-   * `context` (e.g. the hive) is kept in view too when it moves anyway, so a
-   * reveal does not push the rest of the hive out only to bring it back later.
+   *
+   * The zoom-out has a floor: tiles never shrink below REVEAL_MIN_TILE_PX, and a
+   * zoom the user picked (pinch, wheel, keys) is kept until the next recenter().
+   * When the keys cannot all fit above the floor, the camera frames `anchor`
+   * (the selected or moved piece; default: the key nearest the view centre) and
+   * as many of its nearest keys as fit.
+   * `context` (e.g. the hive) is kept in view too when it moves anyway and it all
+   * fits, so a reveal does not push the rest of the hive out only to bring it back.
    * @returns {boolean} true when the camera starts moving
    */
-  reveal(keys, context = []) {
+  reveal(keys, context = [], { anchor = null } = {}) {
     const list = [...keys];
     if (!list.length || this._pts.size || now() - this._userCameraAt < USER_CAMERA_GRACE_MS) return false;
-    const base   = this._camera?.to ?? { tx: this.tx, ty: this.ty, scale: this.scale };
-    if (!this._revealTarget(list, base)) return false;
-    const target = this._revealTarget([...list, ...context], base);
-    if (!target) return false;
+    const base  = this._camera?.to ?? { tx: this.tx, ty: this.ty, scale: this.scale };
+    const floor = this._userZoomed ? base.scale : Math.min(base.scale, REVEAL_MIN_TILE_PX / this.SIZE);
+    anchor ??= this._nearestToView(list, base);
+    const own = this._revealTarget(list, base, floor, anchor);
+    if (!own) return false;
+    const ctx = [...context];
+    const all = ctx.length ? this._revealTarget([...list, ...ctx], base, floor, anchor) : null;
+    const target = all?.complete ? all : own;
     if (this.reducedMotion) {
       this._camera = null;
-      Object.assign(this, target);
+      Object.assign(this, { tx: target.tx, ty: target.ty, scale: target.scale });
     } else {
-      this._camera = { from: { tx: this.tx, ty: this.ty, scale: this.scale }, to: target, start: null };
+      this._camera = { from: { tx: this.tx, ty: this.ty, scale: this.scale }, to: { tx: target.tx, ty: target.ty, scale: target.scale }, start: null };
     }
     return true;
   }
 
-  /** Camera that shows `keys`, starting from camera `base`; null if they are already in view. */
-  _revealTarget(keys, { tx, ty, scale }) {
+  /** The key in `keys` whose centre is nearest the middle of the playable area under camera `cam`. */
+  _nearestToView(keys, { tx, ty, scale }) {
+    const { top, bottom } = this.insets;
+    const cx = this.W / 2, cy = top + (this.H - top - bottom) / 2;
+    let best = keys[0], bestD = Infinity;
+    for (const key of keys) {
+      const { q, r } = parseKey(key);
+      const p = hexToPixel(q, r, this.SIZE);
+      const d = Math.hypot(tx + p.x * scale - cx, ty + p.y * scale - cy);
+      if (d < bestD) { best = key; bestD = d; }
+    }
+    return best;
+  }
+
+  /**
+   * Camera that shows `keys`, starting from camera `base` and never zooming below
+   * `floor`; null if they are already in view. `complete` is false when only
+   * `anchor` and its nearest keys could be framed.
+   * @returns {{tx:number, ty:number, scale:number, complete:boolean}|null}
+   */
+  _revealTarget(keys, { tx, ty, scale }, floor = MIN_SCALE, anchor = keys[0]) {
     const box = hiveBounds(keys, this.SIZE, this.SIZE);
     const { top, bottom } = this.insets;
     const vx0 = FIT_PAD, vx1 = this.W - FIT_PAD;
     const vy0 = top + FIT_PAD, vy1 = this.H - bottom - FIT_PAD;
+    const viewW = Math.max(1, vx1 - vx0), viewH = Math.max(1, vy1 - vy0);
+    /** Smallest pan from (x, y) at scale s that brings board box b into view. */
+    const pan = (b, x, y, s) => {
+      const sx0 = x + b.x0 * s, sx1 = x + b.x1 * s, sy0 = y + b.y0 * s, sy1 = y + b.y1 * s;
+      const dx = sx1 - sx0 > viewW ? (vx0 + vx1) / 2 - (sx0 + sx1) / 2 : sx0 < vx0 ? vx0 - sx0 : sx1 > vx1 ? vx1 - sx1 : 0;
+      const dy = sy1 - sy0 > viewH ? (vy0 + vy1) / 2 - (sy0 + sy1) / 2 : sy0 < vy0 ? vy0 - sy0 : sy1 > vy1 ? vy1 - sy1 : 0;
+      return { tx: x + dx, ty: y + dy };
+    };
+    const fits = (b, s) => (b.x1 - b.x0) * s <= viewW && (b.y1 - b.y0) * s <= viewH;
+
     const sx0 = tx + box.x0 * scale, sx1 = tx + box.x1 * scale;
     const sy0 = ty + box.y0 * scale, sy1 = ty + box.y1 * scale;
     if (sx0 >= vx0 && sx1 <= vx1 && sy0 >= vy0 && sy1 <= vy1) return null;
+    if (fits(box, scale)) return { ...pan(box, tx, ty, scale), scale, complete: true };
 
-    const viewW = Math.max(1, vx1 - vx0), viewH = Math.max(1, vy1 - vy0);
-    if (sx1 - sx0 <= viewW && sy1 - sy0 <= viewH) {
-      const dx = sx0 < vx0 ? vx0 - sx0 : sx1 > vx1 ? vx1 - sx1 : 0;
-      const dy = sy0 < vy0 ? vy0 - sy0 : sy1 > vy1 ? vy1 - sy1 : 0;
-      return { tx: tx + dx, ty: ty + dy, scale };
-    }
     const fit = Math.max(MIN_SCALE, Math.min(scale, viewW / (box.x1 - box.x0), viewH / (box.y1 - box.y0)));
-    return {
-      tx: (vx0 + vx1) / 2 - ((box.x0 + box.x1) / 2) * fit,
-      ty: (vy0 + vy1) / 2 - ((box.y0 + box.y1) / 2) * fit,
-      scale: fit,
-    };
+    if (fit >= floor) {
+      return {
+        tx: (vx0 + vx1) / 2 - ((box.x0 + box.x1) / 2) * fit,
+        ty: (vy0 + vy1) / 2 - ((box.y0 + box.y1) / 2) * fit,
+        scale: fit, complete: true,
+      };
+    }
+
+    // Too spread out to show at a readable size: zoom to the floor about the
+    // anchor, then frame it with as many of its nearest keys as fit.
+    const s = floor;
+    const a = parseKey(anchor);
+    const ap = hexToPixel(a.q, a.r, this.SIZE);
+    const x = tx + ap.x * (scale - s), y = ty + ap.y * (scale - s);
+    const near = keys.map(key => {
+      const { q, r } = parseKey(key);
+      const p = hexToPixel(q, r, this.SIZE);
+      return { key, d: Math.hypot(p.x - ap.x, p.y - ap.y) };
+    }).sort((m, n) => m.d - n.d);
+    let frame = [anchor];
+    for (const { key } of near) {
+      const next = [...frame, key];
+      if (fits(hiveBounds(next, this.SIZE, this.SIZE), s)) frame = next;
+    }
+    return { ...pan(hiveBounds(frame, this.SIZE, this.SIZE), x, y, s), scale: s, complete: false };
   }
 
   /** Zoom around the center of the playable area (keyboard / buttons). */
   zoomBy(ratio) {
     this._camera = null;
     this._userCameraAt = now();
+    this._userZoomed = true;
     const cy = this.insets.top + (this.H - this.insets.top - this.insets.bottom) / 2;
     this._applyZoom(ratio, this.W / 2, cy);
   }
@@ -1738,6 +1797,7 @@ export class Board {
           const mid = this._pinchMid();
           this._applyZoom(d / this._pinchLast, mid.x, mid.y);
           this._userCameraAt = now();
+          this._userZoomed = true;
         }
         this._pinchLast = d;
         return;
@@ -1795,6 +1855,7 @@ export class Board {
       this.onHover?.(null);
       this._camera = null;
       this._userCameraAt = now();
+      this._userZoomed = true;
       this.onViewChange?.();
       const delta = Math.max(-120, Math.min(120, e.deltaY));
       this._applyZoom(Math.exp(-delta * 0.0015), e.clientX, e.clientY);

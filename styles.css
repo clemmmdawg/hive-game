@@ -881,8 +881,14 @@ kbd {
 #chip-label { font-size: 9px; letter-spacing: 1px; color: var(--chip-color); }
 #chip-sub { font-size: 5px; letter-spacing: 1px; color: var(--ui-dim); }
 
-#status-text {
+#hud-center {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+#status-text {
   min-width: 0;
   font-size: 8px;
   letter-spacing: 1.5px;
@@ -1046,10 +1052,10 @@ kbd {
 #btn-sound-menu.muted { color: var(--ui-text); }
 #btn-sound-menu:focus-visible { outline: 2px solid var(--p2); outline-offset: 2px; }
 
-/* ── Piece description bar ──────────────────────────────── */
+/* ── Piece description bar (hangs below the HUD; inline in it on landscape phones) ── */
 #piece-desc {
-  position: fixed;
-  top: calc(var(--hud-h) + var(--safe-top));
+  position: absolute;
+  top: 100%;
   left: 0; right: 0;
   z-index: 19;
   font-size: 8px;
@@ -1633,6 +1639,46 @@ input:focus-visible {
   #reserve-pieces { gap: 10px; }
   .reserve-item { font-size: 8px; padding: 2px 6px 2px 3px; gap: 3px; }
   .reserve-item .sprite { width: 26px; height: 26px; }
+}
+
+/* Landscape phones: the board gets the height. A slimmer HUD with the piece
+   description inline under the status line, and a single-row tray with the
+   opponent's reserve folded in beside your pieces. */
+@media (max-height: 500px) and (orientation: landscape) {
+  :root { --hud-h: 44px; --tray-h: 64px; }
+  #hud-center { align-items: stretch; }
+  #status-text { line-height: 1.5; }
+  #piece-desc {
+    position: static;
+    padding: 0;
+    border: 0;
+    background: none;
+    backdrop-filter: none;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    line-height: 1.5;
+  }
+  #piece-desc.visible { max-height: 16px; padding: 2px 0 0; }
+  #piece-desc .sprite { width: 13px; height: 13px; margin: -3px 4px -3px 0; }
+  #piece-desc .desc-stack .sprite { width: 12px; height: 12px; margin: -3px 0 -3px 2px; }
+  #turn-banner { top: calc(var(--hud-h) + var(--safe-top) + 12px); }
+  #tray {
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    padding: 3px 12px calc(3px + var(--safe-bottom));
+  }
+  #reserve-row {
+    flex: 0 1 172px;
+    flex-direction: column;
+    gap: 3px;
+    min-height: 0;
+  }
+  #reserve-pieces { gap: 3px; }
+  .reserve-item { padding: 0 3px 0 1px; }
+  .reserve-item .sprite { width: 13px; height: 13px; }
+  #tray-pieces { flex: 1 1 auto; align-items: center; gap: 6px; }
+  .piece-slot { flex-basis: 50px; gap: 1px; padding-top: 2px; }
 }
 
 @media (hover: none) {
