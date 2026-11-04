@@ -20,7 +20,7 @@ export class Board {
     this.scale = 1;
 
     // ── Game data (written by app.js) ──
-    /** @type {Map<string, {player:1|2, type:string, emoji:string}>} */
+    /** @type {Map<string, Array<{player:1|2, type:string, emoji:string, image?:HTMLImageElement}>>} */
     this.pieces      = new Map();
     /** @type {Set<string>} hex keys to draw as placement/move targets */
     this.ghosts       = new Set();
@@ -48,6 +48,8 @@ export class Board {
 
     /** Callback fired on a clean tap: (q:number, r:number) => void */
     this.onTap = null;
+    /** Desktop hover callback: (q, r, clientX, clientY) or null when leaving. */
+    this.onHover = null;
 
     this._bindEvents();
   }
@@ -290,18 +292,15 @@ export class Board {
       const topIdx = stack.length - 1;
 
       // Top piece: always full-size, centered
-      const emojiSize = Math.round(this.SIZE * this.scale * 0.58);
-      ec.font        = `${emojiSize}px serif`;
-      ec.fillStyle   = '#ffffff';
+      const visualSize = Math.round(this.SIZE * this.scale * 0.92);
       ec.globalAlpha = 1;
-      ec.fillText(stack[topIdx].emoji, sx, sy + 1);
+      this._drawPieceVisual(ec, stack[topIdx], sx, sy, visualSize);
 
       // Buried pieces: badges arranged in the lower-right corner, bottom-to-top.
       // Each badge is placed slightly further from center so they fan out
       // and don't overlap each other.
       if (topIdx > 0) {
-        const badgeSize = Math.round(this.SIZE * this.scale * 0.28);
-        ec.font = `${badgeSize}px serif`;
+        const badgeSize = Math.round(this.SIZE * this.scale * 0.34);
 
         for (let i = 0; i < topIdx; i++) {
           // i=0 is the bottommost buried piece; i=topIdx-1 is just below the top.
@@ -310,13 +309,29 @@ export class Board {
           const dist   = this.SIZE * this.scale * (0.44 + (depth - 1) * 0.20);
           const badgeSx = sx + dist * 0.60;
           const badgeSy = sy + dist * 0.58;
-          ec.fillText(stack[i].emoji, badgeSx, badgeSy + 1);
+          this._drawPieceVisual(ec, stack[i], badgeSx, badgeSy + 1, badgeSize);
         }
       }
     }
 
     // Reset alpha
     ec.globalAlpha = 1;
+  }
+
+  _drawPieceVisual(ctx, piece, x, y, size) {
+    if (piece.image?.complete && piece.image.naturalWidth) {
+      const ratio = Math.min(size / piece.image.naturalWidth, size / piece.image.naturalHeight);
+      const width = piece.image.naturalWidth * ratio;
+      const height = piece.image.naturalHeight * ratio;
+      ctx.drawImage(piece.image, x - width / 2, y - height / 2, width, height);
+      return;
+    }
+
+    ctx.font = piece.kind === 'letter'
+      ? `700 ${Math.round(size * 0.44)}px "Press Start 2P", monospace`
+      : `${Math.round(size * 0.64)}px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", serif`;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(piece.text ?? piece.emoji, x, y);
   }
 
   /**
@@ -353,6 +368,7 @@ export class Board {
 
     c.addEventListener('pointerdown', e => {
       e.preventDefault();
+      this.onHover?.(null);
       c.setPointerCapture(e.pointerId);
       this._pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
@@ -368,6 +384,13 @@ export class Board {
 
     c.addEventListener('pointermove', e => {
       e.preventDefault();
+      if (!this._pts.has(e.pointerId)) {
+        if (e.pointerType === 'mouse' && this.onHover) {
+          const { q, r } = this.screenToHex(e.clientX, e.clientY);
+          this.onHover(q, r, e.clientX, e.clientY);
+        }
+        return;
+      }
       this._pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
       if (this._pts.size >= 2) {
@@ -411,17 +434,25 @@ export class Board {
 
       if (isTap && this.onTap) {
         const { q, r } = this.screenToHex(tapX, tapY);
-        this.onTap(q, r);
+        this.onTap(q, r, tapX, tapY);
       }
     });
 
     c.addEventListener('pointercancel', e => {
       this._pts.delete(e.pointerId);
+      this._pinchLast = 0;
+      if (this._pts.size === 0) {
+        this._dragOrigin = null;
+        this._hasMoved = false;
+      }
     });
+
+    c.addEventListener('pointerleave', () => this.onHover?.(null));
 
     // Desktop scroll-wheel zoom
     c.addEventListener('wheel', e => {
       e.preventDefault();
+      this.onHover?.(null);
       this._applyZoom(e.deltaY < 0 ? 1.12 : 0.89, e.clientX, e.clientY);
     }, { passive: false });
   }

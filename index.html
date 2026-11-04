@@ -16,56 +16,121 @@
 
   <!-- MENU SCREEN -->
   <div id="menu-screen" aria-hidden="true">
-    <div id="menu-title">
-      <span class="title-letter t-p1">H</span><span
-            class="title-letter t-p2">I</span><span
-            class="title-letter t-p1">V</span><span
-            class="title-letter t-p2">E</span>
-    </div>
-    <p id="menu-subtitle">CAPTURE THE QUEEN</p>
+    <main id="menu-shell">
+      <div id="menu-brand">
+        <p class="menu-eyebrow">THE ABSTRACT STRATEGY GAME</p>
+        <div id="menu-title" aria-label="Hive">
+          <span class="title-letter t-p1" aria-hidden="true">H</span><span
+                class="title-letter t-p2" aria-hidden="true">I</span><span
+                class="title-letter t-p1" aria-hidden="true">V</span><span
+                class="title-letter t-p2" aria-hidden="true">E</span>
+        </div>
+        <p id="menu-subtitle">SURROUND THE QUEEN. RULE THE HIVE.</p>
+      </div>
 
-    <div id="mode-row">
-      <button class="mode-btn selected" data-mode="LOCAL">
-        <span class="mode-icon">🏠</span>
-        <span class="mode-label">LOCAL</span>
-        <span class="mode-sub">PASS &amp; PLAY</span>
-      </button>
-      <button class="mode-btn" data-mode="HOST" data-disabled="true" disabled>
-        <span class="mode-icon">📡</span>
-        <span class="mode-label">HOST</span>
-        <span class="mode-sub">ONLINE</span>
-        <span class="soon-badge">SOON</span>
-      </button>
-      <button class="mode-btn" data-mode="JOIN" data-disabled="true" disabled>
-        <span class="mode-icon">🎮</span>
-        <span class="mode-label">JOIN</span>
-        <span class="mode-sub">BY CODE</span>
-        <span class="soon-badge">SOON</span>
-      </button>
-    </div>
+      <section id="menu-card" aria-label="Game setup">
+        <p class="section-kicker">CHOOSE HOW TO PLAY</p>
+        <div id="mode-row">
+          <button class="mode-btn selected" data-mode="LOCAL" aria-pressed="true">
+            <span class="mode-icon" aria-hidden="true">🏠</span>
+            <span class="mode-label">LOCAL</span>
+            <span class="mode-sub">PASS &amp; PLAY</span>
+          </button>
+          <button class="mode-btn" data-mode="HOST" aria-pressed="false">
+            <span class="mode-icon" aria-hidden="true">📡</span>
+            <span class="mode-label">HOST</span>
+            <span class="mode-sub">CREATE ROOM</span>
+          </button>
+          <button class="mode-btn" data-mode="JOIN" aria-pressed="false">
+            <span class="mode-icon" aria-hidden="true">🎮</span>
+            <span class="mode-label">JOIN</span>
+            <span class="mode-sub">ENTER CODE</span>
+          </button>
+        </div>
 
-    <div id="settings-panel"></div>
-    <button id="btn-start" class="ready">START GAME</button>
+        <div id="settings-panel"></div>
+        <button id="btn-start" class="ready">START GAME</button>
+
+        <div id="online-panel" aria-live="polite">
+          <p id="online-status"></p>
+          <button id="btn-cancel-online" style="display:none">CANCEL</button>
+        </div>
+        <button id="btn-rules" type="button">HOW TO PLAY</button>
+      </section>
+      <p id="menu-footnote">NO BOARD. NO CAPTURES. JUST STRATEGY.</p>
+    </main>
+  </div>
+
+  <!-- RULES DIALOG -->
+  <div id="rules-overlay" aria-hidden="true">
+    <section id="rules-dialog" role="dialog" aria-modal="true" aria-labelledby="rules-title">
+      <header id="rules-header">
+        <div>
+          <p class="rules-kicker">FIELD MANUAL</p>
+          <h2 id="rules-title">HOW TO PLAY</h2>
+        </div>
+        <button id="btn-close-rules" type="button" aria-label="Close rules">✕</button>
+      </header>
+
+      <div id="rules-content">
+        <section>
+          <h3>OBJECTIVE</h3>
+          <p>Completely surround your opponent’s Queen Bee. The six surrounding pieces can belong to either player.</p>
+        </section>
+        <section>
+          <h3>YOUR TURN</h3>
+          <p>Place one new piece or move one piece already in the hive. You cannot move pieces until your Queen has been placed.</p>
+        </section>
+        <section>
+          <h3>PLACING PIECES</h3>
+          <p>Your first piece touches the opponent’s first piece. After that, a newly placed piece must touch your color and cannot touch the opponent’s color. Place your Queen by your fourth turn. The optional tournament opening prevents either player from leading with the Queen.</p>
+        </section>
+        <section>
+          <h3>THE HIVE</h3>
+          <p>Every piece must remain connected as one hive. Sliding pieces cannot squeeze through a gap blocked on both sides.</p>
+        </section>
+
+        <section class="rules-piece-guide">
+          <h3>PIECE GUIDE</h3>
+          <dl>
+            <div><dt>QUEEN</dt><dd>Slides one space.</dd></div>
+            <div><dt>BEETLE</dt><dd>Moves one space and can climb onto the hive.</dd></div>
+            <div><dt>GRASSHOPPER</dt><dd>Jumps in a straight line over one or more pieces.</dd></div>
+            <div><dt>ANT</dt><dd>Slides any distance around the hive.</dd></div>
+            <div><dt>SPIDER</dt><dd>Slides exactly three spaces.</dd></div>
+            <div><dt>MOSQUITO</dt><dd>Copies the movement of an adjacent piece.</dd></div>
+            <div><dt>LADYBUG</dt><dd>Moves two spaces over the hive, then one space down.</dd></div>
+            <div><dt>PILLBUG</dt><dd>Slides one space or relocates an adjacent piece.</dd></div>
+          </dl>
+        </section>
+      </div>
+    </section>
   </div>
 
   <!-- GAME UI -->
   <header id="hud">
     <div id="player-tag" class="p1">P1</div>
     <div id="status-text">SELECT A PIECE</div>
+    <button class="hud-btn hud-action hidden" id="btn-pass">PASS</button>
     <button class="hud-btn hidden" id="btn-cancel" aria-label="Cancel selection">✕</button>
-    <button class="hud-btn" id="btn-resign" aria-label="Quit to menu">⬡</button>
+    <button class="hud-btn" id="btn-resign" aria-label="Open game menu">☰</button>
   </header>
 
   <div id="piece-desc" aria-live="polite"></div>
+  <div id="piece-tooltip" role="tooltip" aria-hidden="true">
+    <strong id="piece-tooltip-name"></strong>
+    <span id="piece-tooltip-copy"></span>
+  </div>
 
   <canvas id="board" aria-label="Hive game board"></canvas>
   <canvas id="emoji-layer" aria-hidden="true"></canvas>
+  <div id="board-hint" aria-live="polite">DRAG TO PAN · PINCH OR SCROLL TO ZOOM</div>
 
   <footer id="tray">
     <div id="tray-pieces"></div>
   </footer>
 
-  <div id="interstitial" aria-hidden="true">
+  <div id="interstitial" aria-hidden="true" role="button" tabindex="-1">
     <div class="inter-hex-ring" id="inter-ring"></div>
     <p id="inter-headline"></p>
     <p id="inter-sub">TAP TO CONTINUE</p>
@@ -75,13 +140,12 @@
   <div id="win-screen" aria-hidden="true">
     <p id="win-headline"></p>
     <div id="win-actions">
-      <button id="btn-play-again">PLAY AGAIN</button>
       <button id="btn-to-menu">MAIN MENU</button>
     </div>
   </div>
 
   <!-- RESIGN CONFIRM -->
-  <div id="resign-confirm" aria-hidden="true" role="dialog">
+  <div id="resign-confirm" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="resign-question">
     <div id="resign-dialog">
       <p id="resign-question">QUIT TO MENU?</p>
       <p id="resign-sub">current game will be lost</p>

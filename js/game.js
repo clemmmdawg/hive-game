@@ -597,8 +597,8 @@ export function getLegalPlacements(state, pieceType) {
 
   if ((supply[turn][pieceType] || 0) === 0) return [];
 
-  // Tournament rule: queen cannot be placed on turn 1 (first move of the game)
-  if (pieceType === PieceType.QUEEN && settings.tournamentRule && turnNumber === 1) return [];
+  // Tournament rule: neither player may open with their queen.
+  if (pieceType === PieceType.QUEEN && settings.tournamentRule && countPlacedByPlayer(state.board, turn) === 0) return [];
 
   // Forced queen placement: if this is turn 4 for this player, only queen is legal to place
   const placed = countPlacedByPlayer(state.board, turn);
@@ -706,7 +706,7 @@ export function getAllLegalActions(state) {
     for (const pieceType of Object.keys(supply[turn])) {
       if ((supply[turn][pieceType] || 0) === 0) continue;
       if (isTurn4 && pieceType !== PieceType.QUEEN) continue;
-      if (pieceType === PieceType.QUEEN && state.settings.tournamentRule && state.turnNumber === 1) continue;
+      if (pieceType === PieceType.QUEEN && state.settings.tournamentRule && placed === 0) continue;
       placements.set(pieceType, placementHexes);
     }
   }
@@ -761,6 +761,46 @@ export function checkWin(state) {
   if (p1QueenSurrounded) return 2; // P2 wins
   if (p2QueenSurrounded) return 1; // P1 wins
   return null;
+}
+
+// ── Serialization ────────────────────────────────────────────────────────────
+
+/**
+ * Serialize a GameState to a plain JSON-safe object.
+ * Converts the Map-based board to an array of [key, stack] pairs.
+ * Safe to pass through JSON.stringify / JSON.parse.
+ */
+export function serializeState(state) {
+  return {
+    board:                [...state.board.entries()],
+    supply:               state.supply,
+    turn:                 state.turn,
+    turnNumber:           state.turnNumber,
+    queenPlaced:          state.queenPlaced,
+    lastMovedHex:         state.lastMovedHex,
+    lastOpponentMovedHex: state.lastOpponentMovedHex,
+    pillbugThrewHex:      state.pillbugThrewHex,
+    winner:               state.winner,
+    settings:             state.settings,
+  };
+}
+
+/**
+ * Deserialize a plain object (from JSON) back into a live GameState with Map.
+ */
+export function deserializeState(data) {
+  return {
+    board:                new Map(data.board),
+    supply:               data.supply,
+    turn:                 data.turn,
+    turnNumber:           data.turnNumber,
+    queenPlaced:          data.queenPlaced,
+    lastMovedHex:         data.lastMovedHex,
+    lastOpponentMovedHex: data.lastOpponentMovedHex,
+    pillbugThrewHex:      data.pillbugThrewHex,
+    winner:               data.winner,
+    settings:             data.settings,
+  };
 }
 
 // ── State mutation ───────────────────────────────────────────────────────────
