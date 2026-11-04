@@ -80,7 +80,9 @@ Run with `npm start` (starts `server/index.js`; port 3000), `npm start -- 3001`,
 │   ├── hex.js          — Pure hex math (axial coords, neighbors, pixel conversion)
 │   ├── game.js         — Pure game logic (no DOM). Safe to import on the Node server (ESM)
 │   ├── board.js        — Canvas renderer + pointer/touch input (Board class)
-│   ├── app.js          — Application state machine, UI wiring, tray, HUD, undo, autosave
+│   ├── app.js          — Application state machine, UI wiring, tray, HUD, undo, autosave; creates winFx + reviewer
+│   ├── win-fx.js       — createWinFx(ctx): win sequence (impact, board dim, confetti) + result card + deferred card; pure winCopy / surroundedQueens
+│   ├── review.js       — createReview(ctx): game review (preview / replay bar / autoplay) + move-list sheet; pure reviewStatusText / sheetRounds / returnLabel
 │   ├── menu.js         — Main menu, settings panel, rules dialog, confirm dialog
 │   ├── sprites.js      — Insect sprite path data + spriteSVG() (DOM) / drawSprite() (canvas)
 │   ├── hints.js        — Pure: HUD status copy (statusText, dangerText, newDangers) + last-move diff (describeLastMove, inferAction)
@@ -95,7 +97,7 @@ Run with `npm start` (starts `server/index.js`; port 3000), `npm start -- 3001`,
 ├── scripts/sw-hash.mjs — Hashes the sw.js PRECACHE files into sw-manifest.json (`npm run sw:stamp`)
 ├── sw-manifest.json    — Recorded CACHE name + precache content hash (checked by test/pwa.test.js)
 ├── server/             — see Multiplayer
-└── test/               — node --test suites (rules, game, board, net, ui-logic, multiplayer, audio, history, pwa, boot)
+└── test/               — node --test suites (rules, game, board, net, ui-logic, multiplayer, audio, history, review-winfx, pwa, boot)
 ```
 
 ---
@@ -104,7 +106,7 @@ Run with `npm start` (starts `server/index.js`; port 3000), `npm start -- 3001`,
 
 `sw.js` precaches the shell (`PRECACHE`: `/`, `index.html`, `styles.css`, `manifest.json`, every `js/*.js`, icons, the self-hosted font) into cache `hive-vN` and serves it cache-first (query strings ignored, so `/?room=CODE` works offline). There are no third-party requests (the font is an `@font-face` in styles.css, preloaded by index.html). It never touches non-GET requests or `/ws`. A new worker waits; `app.js` shows a persistent toast with RELOAD (`pendingUpdate`: a transient `toast()` replaces it only until `clearToast()`, which re-shows the offer). RELOAD sets `reloadRequested`, posts `SKIP_WAITING` and reloads on `controllerchange` (also in the session that first installed the worker). The toast pill is `pointer-events: none`; only its button takes taps. Over the main menu it hangs from the top, clear of START.
 
-**Every deploy that changes a precached file must bump `CACHE` in `sw.js` (`hive-v3` -> `hive-v4`) and then run `npm run sw:stamp`**, which records a content hash of all `PRECACHE` files in `sw-manifest.json` (and refuses if files changed but `CACHE` did not). `test/pwa.test.js` fails when the precached files no longer match the recorded hash, so a forgotten bump is caught; otherwise returning visitors keep the old files. **When adding a runtime module, add it to `PRECACHE`** (`test/pwa.test.js` fails if a module reachable from `index.html` is missing). Optional `assets/pieces/*.png` art is not precached.
+**Every deploy that changes a precached file must bump `CACHE` in `sw.js` (`hive-v4` -> `hive-v5`) and then run `npm run sw:stamp`**, which records a content hash of all `PRECACHE` files in `sw-manifest.json` (and refuses if files changed but `CACHE` did not). `test/pwa.test.js` fails when the precached files no longer match the recorded hash, so a forgotten bump is caught; otherwise returning visitors keep the old files. **When adding a runtime module, add it to `PRECACHE`** (`test/pwa.test.js` fails if a module reachable from `index.html` is missing). Optional `assets/pieces/*.png` art is not precached.
 
 ## Architecture
 
@@ -114,6 +116,10 @@ Run with `npm start` (starts `server/index.js`; port 3000), `npm start -- 3001`,
 `board.js` knows nothing about game rules. It receives `pieces`, `ghosts`, `throwTargets`, and `selectedHex` from `app.js` and renders them. It fires `onTap(q, r)` callbacks upward.
 
 `app.js` is the glue layer. It owns `gameState` (a `game.js` GameState object) and `uiState` (interaction phase machine). Every action goes through `act()` → `applyAction()` (or the server) → `onStateChanged()`, which updates the renderer and last-move marker, autosaves local games, and shows the turn banner or win screen.
+
+**app.js seams (win-fx.js, review.js).** Both modules export a factory that takes an explicit context object — getters for live state (`state()`, `mode()`, `myPlayer()`, `moveLog()`, `reason()`) plus callbacks into app.js (`syncUI`, `toast`, `clearSelection`, …) — and keep only their own state; no module-level globals touch the DOM, so their pure helpers import in node tests (`test/review-winfx.test.js`). app.js creates `winFx = createWinFx({...})` (section "Win sequence + result card") and `reviewer = createReview({...})` (section "Game review + move list sheet"); the context literal there is the full list of what each module may reach. Add new win/draw reasons to `winCopy` (it reads app's `winReason` via `reason()`), new live timers that must not fire inside a review to `holdLive()`, and new pieces of live UI that the review must hide to `reviewer.sync()`'s caller (`syncUI`).
+- `winFx`: `play(move)` (slow-mo impact → card), `showCard({calm})`, `scheduleCard(ms, opts)`, `cardPending`, `presented`, `reset()` (new game/undo), `cancel()` (drop timers/touchdown/deferred), `settle()`, `openCard()`, `hide()`, `hideDim()`, `flushDeferred()` (call when something that covered the board closes), `touchdown` (board.onLand runs it), `holdResult` (get/set: HUD blank while the winning piece flies). `covered()` in its context decides deferral (☰ menu, sheet, review).
+- `reviewer`: `enter(index, {returnTo})`, `exit()`, `end()`, `leaveForLive()`, `seek(i)`, `startAutoplay({hold})`, `handleKey(event)` (false when not reviewing), `openSheet()`, `closeSheet({restoreFocus})`, `sheetOpen()`, `sync()`, `active`, `shownState` (what `syncBoardRenderer` draws while reviewing).
 
 ### Canvas architecture
 Two stacked canvases share the same fixed inset:
@@ -193,7 +199,7 @@ Pieces placed via `applyAction` carry a stable `id` (`wA1`, `bQ`; `w`=P1, `b`=P2
 
 **Notation markers:** the `MARKERS` table in notation.js is a deliberate fixed rotation/reflection of BoardSpace's pointy-top orientation onto this game's flat-top grid. Hive positions are invariant under rotation and reflection, so exported games replay as equivalent games elsewhere; do not "fix" the table to match one tool's orientation without changing `MARKERS` and its tests together.
 
-**Game review (replay.js + app.js "Game review"):** `createReplay(settings, actions, {index}) → { states, index, state, atEnd, step(±n), seek(i) }` (states[0] = empty board, N actions → N+1 states, clamped). `replayForGame(moveLog, liveState)` returns a replay only when re-applying the log from `createGame(liveState.settings)` reproduces the live board and turnNumber (else null — the UI shows "history unavailable"). app.js `review` state: `enterReview(index, {returnTo:'game'|'board'|'card'})`, `exitReview()`, `endReview()` (teardown, restores the live board/lastMove and recenters). While reviewing, `syncBoardRenderer` draws the reviewed position, taps/hover/undo/pass/keys that act are ignored, nothing autosaves or is sent, and any live state change (`onStateChanged`, ROOM_RESUMED, GAME_OVER) leaves the review first. The result card and the ☰ menu/sheet defer each other via `winDeferred` + `flushDeferredWin()`.
+**Game review (replay.js + review.js):** `createReplay(settings, actions, {index}) → { states, index, state, atEnd, step(±n), seek(i) }` (states[0] = empty board, N actions → N+1 states, clamped). `replayForGame(moveLog, liveState)` returns a replay only when re-applying the log from `createGame(liveState.settings)` reproduces the live board and turnNumber (else null — the UI shows "history unavailable"). review.js `review` state: `reviewer.enter(index, {returnTo:'game'|'board'|'card'})`, `reviewer.exit()`, `reviewer.end()` (teardown, restores the live board/lastMove and recenters). While reviewing, `syncBoardRenderer` draws the reviewed position, taps/hover/undo/pass/keys that act are ignored, nothing autosaves or is sent, and any live state change (`onStateChanged`, ROOM_RESUMED, GAME_OVER) leaves the review first. The result card and the ☰ menu/sheet defer each other via win-fx's `deferred` + `winFx.flushDeferred()`.
 
 ### GameState shape
 ```js
