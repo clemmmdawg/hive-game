@@ -230,8 +230,8 @@ test('spectator copy is neutral: PLAYER N, never YOU / OPPONENT', () => {
   assert.equal(isSpectator('ONLINE', 2), false);
   assert.equal(isSpectator('LOCAL', null), false);
 
-  assert.equal(statusText({ state, ...spec }), 'P1 TO MOVE');
-  assert.equal(statusText({ state: { ...state, turn: 2 }, ...spec }), 'P2 TO MOVE');
+  assert.equal(statusText({ state, ...spec }), 'P1\u00a0TO\u00a0MOVE');
+  assert.equal(statusText({ state: { ...state, turn: 2 }, ...spec }), 'P2\u00a0TO\u00a0MOVE');
   assert.equal(statusText({ state: { ...state, winner: 1 }, ...spec }), 'PLAYER 1 WINS');
   assert.equal(statusText({ state: { ...state, winner: 2 }, ...spec, winReason: 'RESIGN' }), 'PLAYER 1 RESIGNED — PLAYER 2 WINS');
   assert.equal(statusText({ state: { ...state, winner: 2 }, ...spec, winReason: 'TIMEOUT' }), 'P1 RAN OUT OF TIME');

@@ -154,7 +154,7 @@ let gameMode     = 'LOCAL'; // 'LOCAL' | 'ONLINE'
 let myPlayer     = 1;       // 1 or 2 — only meaningful in ONLINE mode; null = a spectator (watching, never acting)
 let history      = [];      // LOCAL only: states before each action, for undo
 let moveLog      = [];      // { notation, player, turnNumber, action } per move: local = recorded here, online = the server's history
-let winReason    = null;    // null | 'QUEEN' | 'RESIGN' | 'STALEMATE'
+let winReason    = null;    // null | 'QUEEN' | 'RESIGN' | 'STALEMATE' | 'REPETITION' | 'TIMEOUT'
 let passTimer    = null;    // pending automatic pass in LOCAL mode
 let dangerTimer  = null;   // queen-in-danger alarm for a move that did not fly
 let landingAlarm = null;   // …or raised by board.onLand when the piece that caused it touches down
@@ -452,6 +452,13 @@ export function startOnlineGame(settings, playerNum, serializedState, endReason 
   } else {
     showBanner(`YOU ARE PLAYER ${myPlayer}`, `p${myPlayer}`, PieceType.QUEEN, 1800);
   }
+}
+
+// The persistent "away" notices (opponent / spectated player disconnected) are moot once the game is over.
+function clearAwayToast() {
+  if (opponentAway || awayPlayers.size) clearToast();
+  opponentAway = false;
+  awayPlayers.clear();
 }
 
 function beginGameSession(lastMove) {
@@ -920,7 +927,7 @@ function renderClocks() {
   }
   if (!on) return;
   const now = Date.now();
-  if (gameMode === 'LOCAL' && clock.running && !gameState.winner && isFlagged(clock, clock.active, now)) flagLocal(now);
+  if (gameMode === 'LOCAL' && clock.running && !passTimer && !gameState.winner && isFlagged(clock, clock.active, now)) flagLocal(now);
   const over = !!gameState.winner;
   for (const p of [1, 2]) {
     const ms   = remainingFor(clock, p, now);
@@ -1659,6 +1666,7 @@ export function initNetHandlers() {
       if (lastMove) board.lastMove = lastMove;
       syncBoardRenderer();
       if (gameState.winner) {
+        clearToast(); // a stale "away" notice must not sit over the result
         winReason = winReasonFromServer(endReason);
         // Already over before the drop: show the result calmly. Ended while we were away: it is news.
         const calm = !prev || !!prev.winner;
@@ -1701,6 +1709,7 @@ export function initNetHandlers() {
     if (serverClock) setServerClock({ clock: serverClock, serverNow });
     else if (clock) clock = pauseClock(clock, Date.now()); // the game is over: the display stops too
     gameState = { ...gameState, winner };
+    clearAwayToast();
     winReason = winReasonFromServer(reason);
     clearSelection(false);
     hidePieceTooltip();
@@ -1743,7 +1752,7 @@ export function initNetHandlers() {
 
   // Server closed the room (timeout, etc.)
   net.on('ROOM_CLOSED', ({ reason } = {}) => exitToMenu({
-    notice: reason === 'PLAYERS_LEFT' ? 'THE PLAYERS LEFT — ROOM CLOSED' : 'The room was closed after a period of inactivity.',
+    notice: reason === 'PLAYERS_LEFT' ? 'The players left — room closed.' : 'The room was closed after a period of inactivity.',
   }));
 
   net.on('ERROR', ({ reason }) => {

@@ -61,7 +61,7 @@ export function statusText({ state, phase = 'IDLE', mode = 'LOCAL', myPlayer = 1
   if (watching) {
     if (queenPressure(state)[state.turn] === DANGER_AT) return dangerText(state.turn, { mode, myPlayer });
     if (repeated) return repeated;
-    return getAllLegalActions(state).mustPass ? `P${state.turn} HAS NO MOVES` : `P${state.turn} TO MOVE`;
+    return getAllLegalActions(state).mustPass ? `P${state.turn} HAS NO MOVES` : `P${state.turn}\u00a0TO\u00a0MOVE`;
   }
   if (getAllLegalActions(state).mustPass) return 'NO LEGAL MOVES — YOU MUST PASS';
 

@@ -42,7 +42,7 @@ Run with `npm start` (starts `server/index.js`; port 3000), `npm start -- 3001`,
 - Queen danger meter: six pips on each queen's rim (lit per occupied side; gold, amber pulse at 4, red pulse + halo + face wash at 5), mirrored by two HUD meters (`#queen-meters`); stepping up to 5 plays `danger` once at touchdown (from `board.onLand`, or when the flight is snapped home) with a red banner — the 12 ms landing buzz is skipped whenever an alarm (danger or win) fires on that landing — and the endangered mover's status reads "P1 QUEEN IN DANGER"
 - Win sequence: the winning move flies at 0.4× (capped at 1 s), a white shockwave + camera punch at touchdown, the board dims 45% round the fallen queen (`#board-dim`; an even dim when no queen is surrounded), then confetti + card — card ≤ 1.6 s (`winTiming`); the HUD holds the result until impact. Reduced motion: card after 300 ms, no slow-mo/shockwave. A finished game opened by reload/resume shows the card calmly (no sting, no confetti). If ☰ is open when the card is due, the card waits until it closes
 - Settings (expansions, tournament rule, clock preset) remembered in localStorage
-- Game clock (Fischer): menu CLOCK chips OFF / 5+0 / 10+5 / 15+10 / 30+0 (minutes + seconds per move). Each HUD queen meter becomes a player plate (meter + time, `#plate-N` / `#clock-N`; stacked P1-over-P2 on phones and landscape phones, side by side on wider screens); mm:ss, tenths (`09.4`) under 10 s; the side to move is lit in its colour; under 10 s the plate pulses red (none under reduced motion) and a soft `tick` plays once a second (online: only your own clock). Flag → the win sequence with "P1 RAN OUT OF TIME" (online "YOU / OPPONENT RAN OUT OF TIME"); the card's emblem is a red `STOPWATCH` sprite (menu-icon recipe). A local forced pass is charged only up to its banner (`announcedPass`). Local: the clock runs once the game screen shows and pauses while ☰, How to Play, a confirm dialog, the move sheet, a review/replay or a hidden page covers it (`clockHeld`, MutationObserver + visibilitychange); undo restores the clock snapshot kept with each history entry; autosave keeps the (paused) clock. Online: server-authoritative (see Multiplayer). Clock OFF → no clock UI. The display is written from the RAF loop only when its text/class changes (never touches the board layer)
+- Game clock (Fischer): menu CLOCK chips OFF / 5+0 / 10+5 / 15+10 / 30+0 (minutes + seconds per move). Each HUD queen meter becomes a player plate (meter + time, `#plate-N` / `#clock-N`; stacked P1-over-P2 on phones and landscape phones, side by side on wider screens); mm:ss, tenths (`09.4`) under 10 s; the side to move is lit in its colour; under 10 s the plate pulses red (none under reduced motion) and a soft `tick` plays once a second (online: only your own clock). Flag → the win sequence with "P1 RAN OUT OF TIME" (online "YOU / OPPONENT RAN OUT OF TIME"); the card's emblem is a red `STOPWATCH` sprite (menu-icon recipe). A local forced pass is charged only up to its banner (`announcedPass`), and the frame-loop flag check is skipped while the pass banner is pending (`passTimer`). Local: the clock runs once the game screen shows and pauses while ☰, How to Play, a confirm dialog, the move sheet, a review/replay or a hidden page covers it (`clockHeld`, MutationObserver + visibilitychange); undo restores the clock snapshot kept with each history entry; autosave keeps the (paused) clock. Online: server-authoritative (see Multiplayer). Clock OFF → no clock UI. The display is written from the RAF loop only when its text/class changes (never touches the board layer)
 - The REPETITION 2/3 banner shows once per game (`repetitionWarned`, reset on new game / rematch / continue / online start)
 - Room share: COPY CODE + SHARE/COPY LINK; `?room=CODE` opens JOIN with the code filled in
 - Main menu with mode selection, expansion toggles, tournament rule toggle
@@ -185,7 +185,8 @@ applyAction(state, action) → GameState
 
 // Check win condition
 checkWin(state) → null | 1 | 2 | 'DRAW'
-positionKey(state) → string                       // board stacks (no ids) + side to move + both supplies; REPETITION_LIMIT = 3
+positionKey(state) → string                       // board stacks (no ids) + side to move + both supplies (+ the pillbug throw restrictions when the pillbug is on); REPETITION_LIMIT = 3
+positionHash(state) → string                      // 11-char base36 cyrb53 of positionKey: the positionCounts key (hints.js repetitionCount uses it)
 queenPressure(state) → { 1: n|null, 2: n|null }   // occupied sides of each queen (null = not placed)
 queenSides(board, isOccupied?) → [{ key, player, sides[6], lit[6] }] // per-queen side occupancy in neighbors() order — the one source for queenPressure and board queenPips
 
@@ -217,7 +218,7 @@ Pieces placed via `applyAction` carry a stable `id` (`wA1`, `bQ`; `w`=P1, `b`=P2
   lastOpponentMovedHex: string | null,   // pillbug cannot throw this hex
   pillbugThrewHex:      string | null,   // this hex cannot move next turn
   winner:               null | 1 | 2 | 'DRAW',
-  positionCounts:       { [positionKey]: n },   // maintained by applyAction (incl. PASS/THROW); created by createGame, rebuilt as {current: 1} for old saves
+  positionCounts:       { [positionHash]: n },  // maintained by applyAction (incl. PASS/THROW); created by createGame; old saves and long-key (pre-hash) saves are rebuilt as {current: 1}
   drawReason:           null | 'REPETITION',    // set with winner 'DRAW' when a position is reached the 3rd time (a queen surround on that move wins instead)
   settings:             { expansions, tournamentRule, clock }
 }
@@ -427,14 +428,14 @@ SERVER → CLIENT:
                                                 shows GAME OPENED IN ANOTHER TAB and keeps the saved token;
                                                 NOT_A_PLAYER (a spectator sent an action); ROOM_FULL (16 spectators watching)
   SPECTATING          { code, gameState, settings, history, clock?, serverNow?, endReason? } — JOIN_ROOM to a room whose seats are taken
-  SPECTATORS          { count }               — to everyone in the room when a spectator joins/leaves (and to a resuming player when count > 0)
+  SPECTATORS          { count }               — to everyone in the room when a spectator joins/leaves (and always to a resuming player, 0 included, which clears a stale count)
   GAME_OVER           { winner, reason, clock?, serverNow? } — reason 'QUEEN'|'RESIGN'|'DRAW'|'REPETITION'|'TIMEOUT'  (REPETITION = automatic threefold draw; TIMEOUT = the side to move's clock ran out, carries the final clock)
 
   clock (timed rooms only) = js/clock.js clock in server time; clients rebaseClock(clock, serverNow, Date.now()).
   Body built by server.js roomSnapshot(room) (GAME_START / ROOM_RESUMED; reusable for any full-state message) / stateFields (GAME_STATE).
   OPPONENT_DISCONNECTED { player }            — `player` = the seat that dropped (a spectator reads "PLAYER N DISCONNECTED")
   OPPONENT_RECONNECTED  { player }
-  ROOM_CLOSED         {}                      — room expired or was closed; the server then closes the socket
+  ROOM_CLOSED         { reason: 'IDLE'|'PLAYERS_LEFT' } — room expired or was closed; the server then closes the socket
   WAITING_FOR_OPPONENT {}
 ```
 
@@ -444,7 +445,7 @@ SERVER → CLIENT:
 ### Spectators
 - `JOIN_ROOM` to a room with both seats taken (or `{spectate:true}`) → `SPECTATING` snapshot (same builder as ROOM_RESUMED: `roomSnapshot()`), then `SPECTATORS {count}` to everyone. At most `MAX_SPECTATORS` (16, rooms.js) per room, else `ERROR ROOM_FULL`. Spectators have no token and no seat (a seat never frees: tokens are permanent), receive every broadcast (`broadcast()` covers `room.spectators`), and every action message (PLACE/MOVE/THROW/PASS/RESIGN) gets `ERROR NOT_A_PLAYER`. They never touch `touchActivity`, so they cannot keep a room alive; cleanup sends them `ROOM_CLOSED`. `handleClose(socket)` (server.js, exported for tests) frees a seat or drops a spectator and rebroadcasts the count.
 - Client: `myPlayer === null` in ONLINE mode means spectator (`isSpectator(mode, myPlayer)`, hints.js; `watching()` in app.js). The pure copy helpers (`statusText`, `turnChipText`, `dangerText`, `resumeBanner`, `winCopy`, review `playerName`) fall back to the neutral local wording ("P1 TO MOVE", "PLAYER 1 WINS!", "Player 2 resigned."); the result card plays the `draw` sting (never `lose`) and offers REPLAY / VIEW BOARD / MAIN MENU. `body.spectating` hides the tray pieces and shows both reserve strips (`#reserve-row`, `#reserve-row-b`); the chip sub-line reads WATCHING; `#spectator-count` (👁 N, hidden at 0) is shown to every participant; ☰ has no Restart/Resign (quit = LEAVE ROOM, no confirm); board taps only inspect; `act()` is a no-op.
-- Reconnect: menu.js sets `_spectating` on SPECTATING and its `_connected` handler re-sends `JOIN_ROOM {code, spectate:true}` (no token is stored; a page reload leaves the room). app.js's SPECTATING handler re-applies the snapshot like ROOM_RESUMED (`resumeFromSnapshot`).
+- Reconnect: menu.js sets `_spectating` on SPECTATING and its `_connected` handler re-sends `JOIN_ROOM {code, spectate:true}` (no token is stored; the room code is kept in sessionStorage `hiveWatch`, so a page reload re-joins as a spectator via menu.js `_tryRejoinWatch`; leaving, a closed room or a fatal error clears it). app.js's SPECTATING handler re-applies the snapshot like ROOM_RESUMED (`resumeFromSnapshot`).
 
 ### Reconnection
 The server pings every 30 s and terminates silent sockets; `RESUME_ROOM` with a valid token replaces a still-open old socket (no `SEAT_OCCUPIED`). A seated socket sending CREATE/JOIN gets `ERROR ALREADY_IN_ROOM`. `server.js` exports `createHiveServer()` and never listens by itself; `server/index.js` is the entry point (a "run directly" guard in server.js silently exited 0 through symlinked paths).
@@ -487,4 +488,4 @@ Room code and player token are stored in `localStorage`. If the socket drops, `R
 - **Mosquito-as-pillbug throw UI** — the throw flow works logically but the mosquito's amber highlight only appears if `getLegalThrows` finds it adjacent to a pillbug. Needs testing with real game positions.
 - **Beetle gate check** — `canSlide` blocks a move only when both gate stacks reach `max(fromH, toH + 1)` (fromH includes the moving piece). A ground beetle can climb onto a piece between two single pieces; two height-2 stacks block it. Pillbug throws apply the same rule to the lift and the drop. Ground-to-ground slides into an empty hex additionally require at least one occupied gate (hive contact); the ladybug applies `canSlide` at each step using its level (stack height + 1).
 - **Spider backtrack prevention** — DFS uses a visited set per path, correctly prevents revisiting. However the spider cannot end on its starting hex even if 3 steps would bring it back; this is enforced but worth an explicit test.
-- **Draw by repetition** — automatic threefold draw (`positionKey` / `positionCounts` / `drawReason`). The key ignores piece ids and the pillbug throw restrictions (`lastOpponentMovedHex`, `pillbugThrewHex`), so two positions that differ only in those still count as the same.
+- **Draw by repetition** — automatic threefold draw (`positionKey` / `positionCounts` / `drawReason`). The key ignores piece ids; with the pillbug expansion on it also includes the throw restrictions (`lastOpponentMovedHex`, `pillbugThrewHex`), since they change the legal moves; `positionCounts` is keyed by `positionHash`.
