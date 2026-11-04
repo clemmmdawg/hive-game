@@ -618,3 +618,13 @@ test('after a manual zoom, reveals pan but keep the chosen zoom until recenter',
   settle(board);
   assert.ok(board.scale < 1, 'after recenter, reveals may zoom out again');
 });
+
+test('flightMs reports the running flight\'s tween duration, 0 when idle', async () => {
+  const board = boardWithMove();
+  assert.equal(board.flightMs(), 0);
+  const p = board.animateMove({ path: ['-1,0', '-1,1', '0,1', '1,1', '2,0'], kind: 'slide', toKey: '2,0' });
+  assert.equal(board.flightMs(), moveDuration('slide', 4));
+  board.finishAnimations();
+  await p;
+  assert.equal(board.flightMs(), 0);
+});

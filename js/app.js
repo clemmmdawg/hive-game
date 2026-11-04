@@ -612,7 +612,7 @@ function hideBoardDim() {
  */
 function playMoveSound(kind, inFlight, { alarm = false } = {}) {
   if (!inFlight) { sfx.play('place', { haptic: !alarm }); return; }
-  if (kind && kind !== 'place') sfx.play(kind, { haptic: false });
+  if (kind && kind !== 'place') sfx.play(kind, { haptic: false, duration: board.flightMs() });
 }
 
 /**

@@ -212,3 +212,17 @@ test('resume wakes a suspended context but never creates one', () => {
   sfx.resume();
   assert.equal(made[0].resumed, 1, 'a running context is left alone');
 });
+
+test('play(slide, { duration }) stretches the whoosh to the flight', () => {
+  const { ctx } = setup();
+  sfx.unlock();
+  const c = ctx();
+  sfx.play('slide');
+  const short = Math.max(...c.stops) - c.currentTime;
+  c.stops.length = 0;
+  c.currentTime += 1;
+  sfx.play('slide', { duration: 550 });
+  const long = Math.max(...c.stops) - c.currentTime;
+  assert.ok(short <= 0.4, `default ${short}`);
+  assert.ok(long >= 0.55 && long <= 0.7, `550 ms flight → ${long.toFixed(3)} s whoosh`);
+});

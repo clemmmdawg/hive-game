@@ -623,6 +623,11 @@ export class Board {
     });
   }
 
+  /** Tween duration (ms) of the newest running flight; 0 when nothing is in the air. */
+  flightMs() {
+    return this._flights.at(-1)?.dur ?? 0;
+  }
+
   /**
    * Complete every running move at once: pieces snap home (no landing FX) and
    * their promises resolve. `clearFx` also drops sparks, ripples and the nudge

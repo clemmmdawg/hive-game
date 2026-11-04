@@ -2,7 +2,8 @@
 //
 //   sfx.unlock()            create/resume the AudioContext (call from a user gesture)
 //   sfx.resume()            resume an existing, suspended context (e.g. tab visible again)
-//   sfx.play(name, opts?)   play a voice; opts.haptic=false skips the vibration
+//   sfx.play(name, opts?)   play a voice; opts.haptic=false skips the vibration,
+//                           opts.duration (ms) stretches the slide whoosh to the flight
 //   sfx.setMuted(bool)      mute sound and haptics; persisted under `hiveMuted`
 //   sfx.toggle() → muted    flip the mute flag
 //   sfx.muted               current flag
@@ -237,10 +238,11 @@ const VOICES = {
     tone(c, out, t + 0.01, { freq: N.E6, attack: 0.003, decay: 0.16, peak: 0.025 });
   },
 
-  /** Airy brush: band-passed noise swelling upward with a faint tonal glide. */
-  slide(c, out, t) {
-    noise(c, out, t, { from: 450, to: 1700, sweep: 0.26, Q: 0.9, attack: 0.14, decay: 0.13, peak: 0.42 });
-    tone(c, out, t, { freq: N.A3, to: N.E4, glide: 0.22, attack: 0.1, decay: 0.16, peak: 0.06 });
+  /** Airy brush: band-passed noise swelling upward with a faint tonal glide; held for a long flight (`duration`, s). */
+  slide(c, out, t, { duration = 0 } = {}) {
+    const hold = Math.max(0, duration - 0.27);
+    noise(c, out, t, { from: 450, to: 1700, sweep: 0.26 + hold * 0.9, Q: 0.9, attack: 0.14, hold, decay: 0.13, peak: 0.42 });
+    tone(c, out, t, { freq: N.A3, to: N.E4, glide: 0.22 + hold * 0.8, attack: 0.1, hold, decay: 0.16, peak: 0.06 });
   },
 
   /** Springy "fwip" upward plus a puff of air. */
@@ -352,8 +354,11 @@ export const sfx = {
     try { Promise.resolve(ctx.resume()).catch(() => {}); } catch { /* closed */ }
   },
 
-  /** Play `name` (see SOUND_NAMES). No-op before unlock, while muted, or for unknown names. */
-  play(name, { haptic = true } = {}) {
+  /**
+   * Play `name` (see SOUND_NAMES). No-op before unlock, while muted, or for unknown names.
+   * `duration` (ms) stretches a voice that follows a movement (the slide whoosh) to its length.
+   */
+  play(name, { haptic = true, duration = 0 } = {}) {
     const voice = VOICES[name];
     if (!voice || muted || !ctx || !bus) return;
     // A context the browser suspended (background tab) would replay a backlog on resume.
@@ -365,7 +370,7 @@ export const sfx = {
       const out = ctx.createGain();
       out.gain.value = 10 ** ((TRIM_DB[name] ?? 0) / 20);
       out.connect(bus.input);
-      voice(ctx, out, t + 0.005);
+      voice(ctx, out, t + 0.005, { duration: duration / 1000 });
     } catch { /* never let audio break the game */ }
     if (haptic && HAPTICS[name]) vibrate(HAPTICS[name]);
   },
