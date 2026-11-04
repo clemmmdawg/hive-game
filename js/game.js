@@ -612,10 +612,10 @@ export function createGame(settings = {}) {
       tournamentRule: !!settings.tournamentRule,
       clock:          settings.clock || { enabled: false },
     },
-    positionCounts:       {},       // positionKey -> times reached (threefold repetition draw)
+    positionCounts:       {},       // positionHash -> times reached (threefold repetition draw)
     drawReason:           null,     // 'REPETITION' when winner === 'DRAW' came from positionCounts
   };
-  state.positionCounts[positionKey(state)] = 1;
+  state.positionCounts[positionHash(state)] = 1;
   return state;
 }
 
@@ -624,7 +624,8 @@ export const REPETITION_LIMIT = 3;
 
 /**
  * Canonical string of a position for repetition counting: board stacks (hex key + bottom-to-top
- * player+type, piece ids excluded), side to move, and both supplies.
+ * player+type, piece ids excluded), side to move, and both supplies. With the pillbug expansion the
+ * throw restrictions (lastOpponentMovedHex, pillbugThrewHex) are part of it, since they change the legal moves.
  */
 export function positionKey(state) {
   const stacks = [...state.board.entries()]
@@ -632,7 +633,26 @@ export function positionKey(state) {
     .sort()
     .join(';');
   const supply = p => Object.keys(state.supply[p]).sort().map(t => `${t}${state.supply[p][t]}`).join(',');
-  return `${stacks}|${state.turn}|${supply(1)}|${supply(2)}`;
+  const restr = state.settings?.expansions?.pillbug ? `|${state.lastOpponentMovedHex ?? ''}|${state.pillbugThrewHex ?? ''}` : '';
+  return `${stacks}|${state.turn}|${supply(1)}|${supply(2)}${restr}`;
+}
+
+/**
+ * Compact 53-bit hash (cyrb53, deterministic in Node and browsers) of positionKey as a short base36 string.
+ * positionCounts is keyed by this so saves and GAME_STATE stay small. A collision (~2^-53 per pair) would at
+ * worst declare a repetition draw one occurrence early; it is ignored in practice.
+ */
+export function positionHash(state) {
+  const str = positionKey(state);
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
 }
 
 /**
@@ -1016,7 +1036,9 @@ export function deserializeState(data) {
     drawReason:           data.drawReason ?? null,
   });
   // Old saves carry no counts: the loaded position counts once.
-  if (!state.positionCounts) state.positionCounts = { [positionKey(state)]: 1 };
+  if (!state.positionCounts || Object.keys(state.positionCounts).some(k => k.length > 16)) {
+    state.positionCounts = { [positionHash(state)]: 1 }; // none, or the long-key form of an early build
+  }
   return state;
 }
 
@@ -1162,7 +1184,7 @@ export function applyAction(state, action) {
   };
 
   // Count the new position; a queen surround on the same move takes precedence over the repetition draw.
-  const key = positionKey(nextState);
+  const key = positionHash(nextState);
   const counts = { ...(state.positionCounts ?? {}) };
   counts[key] = (counts[key] ?? 0) + 1;
   nextState.positionCounts = counts;

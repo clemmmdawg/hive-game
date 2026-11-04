@@ -2,12 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  ActionType, PieceType, applyAction, createGame, deserializeState, positionKey, serializeState,
+  ActionType, PieceType, applyAction, createGame, deserializeState, getAllLegalActions, positionKey, positionHash, serializeState,
 } from '../js/game.js';
 import { statusText, winReasonFromServer, resumedWinReason } from '../js/hints.js';
 import { winCopy } from '../js/win-fx.js';
 import { createReplay, replayForGame } from '../js/replay.js';
 import { logEntry } from '../js/notation.js';
+import { encodeLocalSave } from '../js/local-save.js';
 
 const settings = { expansions: { mosquito: false, ladybug: false, pillbug: false }, tournamentRule: false, clock: { enabled: false } };
 const place = (pieceType, to) => ({ type: ActionType.PLACE, pieceType, to });
@@ -24,7 +25,7 @@ function play(actions, state = createGame(settings)) {
 
 test('createGame seeds the opening position once', () => {
   const s = createGame(settings);
-  assert.deepEqual(s.positionCounts, { [positionKey(s)]: 1 });
+  assert.deepEqual(s.positionCounts, { [positionHash(s)]: 1 });
 });
 
 test('positionKey ignores piece ids and distinguishes side to move and supply', () => {
@@ -37,7 +38,7 @@ test('positionKey ignores piece ids and distinguishes side to move and supply', 
 
 test('the third occurrence of a position is a repetition draw; the second only counts', () => {
   const start = play(SETUP);
-  const key = positionKey(start);
+  const key = positionHash(start);
   assert.equal(start.positionCounts[key], 1);
   const once = play(CYCLE, start);
   assert.equal(once.positionCounts[key], 2);
@@ -72,9 +73,9 @@ test('a queen surround on the move that would repeat wins instead of drawing', (
   const action = move('2,1', '0,1'); // not legal for a queen, but applyAction does not validate
   const probe = applyAction(s, action);
   assert.equal(probe.winner, 2);
-  s.positionCounts = { ...s.positionCounts, [positionKey(probe)]: 2 };
+  s.positionCounts = { ...s.positionCounts, [positionHash(probe)]: 2 };
   const again = applyAction(s, action);
-  assert.equal(again.positionCounts[positionKey(probe)], 3);
+  assert.equal(again.positionCounts[positionHash(probe)], 3);
   assert.equal(again.winner, 2);
   assert.equal(again.drawReason, null);
 });
@@ -87,14 +88,14 @@ test('counts survive serialize / deserialize; old saves rebuild { currentKey: 1 
   const old = JSON.parse(JSON.stringify(serializeState(s)));
   delete old.positionCounts; delete old.drawReason;
   const loaded = deserializeState(old);
-  assert.deepEqual(loaded.positionCounts, { [positionKey(loaded)]: 1 });
+  assert.deepEqual(loaded.positionCounts, { [positionHash(loaded)]: 1 });
   assert.equal(loaded.drawReason ?? null, null);
 });
 
 test('PASS and THROW count too', () => {
   const s = play(SETUP);
   const passed = applyAction(s, { type: ActionType.PASS });
-  assert.equal(passed.positionCounts[positionKey(passed)], 1);
+  assert.equal(passed.positionCounts[positionHash(passed)], 1);
   assert.equal(Object.values(passed.positionCounts).reduce((a, b) => a + b, 0), 6);
 });
 
@@ -131,4 +132,45 @@ test('the online waiting seat sees the 2/3 warning too', () => {
   const once = play(CYCLE, play(SETUP));
   assert.match(statusText({ state: once, mode: 'ONLINE', myPlayer: 2 }), /REPETITION 2\/3/);
   assert.equal(statusText({ state: play(SETUP), mode: 'ONLINE', myPlayer: 2 }), "OPPONENT'S TURN…");
+});
+
+test('positionHash is a short stable string; pillbug restrictions count only with the pillbug', () => {
+  const s = play(SETUP);
+  assert.match(positionHash(s), /^[0-9a-z]{1,11}$/);
+  assert.equal(positionHash(s), positionHash(play(SETUP)));
+  assert.equal(positionKey({ ...s, lastOpponentMovedHex: '9,9' }), positionKey(s));
+  const pb = { ...s, settings: { ...s.settings, expansions: { ...s.settings.expansions, pillbug: true } } };
+  assert.notEqual(positionKey({ ...pb, lastOpponentMovedHex: '9,9' }), positionKey(pb));
+  assert.notEqual(positionKey({ ...pb, pillbugThrewHex: '9,9' }), positionKey(pb));
+});
+
+test('old saves with long-key counts are rebuilt as { currentHash: 1 }', () => {
+  const s = play(SETUP);
+  const old = JSON.parse(JSON.stringify(serializeState(s)));
+  old.positionCounts = { [positionKey(s)]: 2 };
+  const loaded = deserializeState(old);
+  assert.deepEqual(loaded.positionCounts, { [positionHash(loaded)]: 1 });
+});
+
+test('saves stay small over a 220-ply game', () => {
+  let seed = 12345;
+  const rnd = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296;
+  let s = createGame({ ...settings, expansions: { mosquito: true, ladybug: true, pillbug: true } });
+  const history = [], moveLog = [];
+  for (let ply = 0; ply < 220 && !s.winner; ply++) {
+    const acts = getAllLegalActions(s);
+    const all = [];
+    for (const [pt, tos] of acts.placements) for (const to of tos) all.push(place(pt, to));
+    for (const [from, tos] of acts.moves) for (const to of tos) all.push(move(from, to));
+    for (const t of acts.throws) all.push({ type: ActionType.THROW, pillbugHex: t.pillbugHex, from: t.from, to: t.to });
+    if (acts.mustPass) all.push({ type: ActionType.PASS });
+    const safe = all.filter(a => !applyAction(s, a).winner);
+    if (!safe.length) break;
+    const a = safe[Math.floor(rnd() * safe.length)];
+    history.push(s); moveLog.push(logEntry(s, a));
+    s = applyAction(s, a);
+  }
+  assert.ok(moveLog.length >= 200, `played ${moveLog.length} plies`);
+  assert.ok(JSON.stringify(serializeState(s)).length < 8 * 1024);
+  assert.ok(encodeLocalSave({ settings: s.settings, state: s, history, moveLog }).length < 600 * 1024);
 });

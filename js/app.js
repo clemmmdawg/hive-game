@@ -9,7 +9,7 @@ import {
 } from './game.js';
 import { initMenu, showMenu, showConfirm, showRules, leaveOnlineSession, isOverlayOpen, copyText } from './menu.js';
 import {
-  statusText, describeLastMove, inferAction, winReasonFromServer, resumedWinReason, turnChipText,
+  statusText, repetitionCount, describeLastMove, inferAction, winReasonFromServer, resumedWinReason, turnChipText,
   dangerText, newDangers, resumeBanner,
 } from './hints.js';
 import { logEntry, undoLogEntry } from './notation.js';
@@ -642,6 +642,10 @@ function onStateChanged(prev, { animate = true, move = null } = {}) {
   }
   const landingMs = flying ? moveDuration(move.kind, move.path.length - 1) : 0;
   announceTurn(landingMs, dangers, landed);
+  // The position just reached has now occurred twice (the count only passes 2 once): say so (replaces the turn banner for both seats).
+  if (animate && repetitionCount(gameState) === 2) {
+    showBanner('REPETITION 2/3 — A THIRD TIME DRAWS', 'gold', PieceType.QUEEN, 2200);
+  }
 }
 
 /**
@@ -1110,7 +1114,7 @@ function syncUI() {
       state: gameState, phase: uiState.phase, mode: gameMode, myPlayer,
       blocker, throwCount, pieceName: PIECE_NAMES[type] ?? 'PIECE', winReason,
     });
-    const warn = (blocker && !throwCount) || (myTurn && actions.mustPass)
+    const warn = (blocker && !throwCount) || (myTurn && actions.mustPass) || /^REPETITION/.test(status.textContent)
       || (myTurn && !over && uiState.phase === 'IDLE' && /QUEEN NOW/.test(status.textContent));
     const danger = /IN DANGER/.test(status.textContent);
     status.className = danger ? 'alert' : warn ? 'warn' : (uiState.phase !== 'IDLE' || over) ? 'active' : '';

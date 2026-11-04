@@ -1,6 +1,6 @@
 // hints.js — Status-line copy for the HUD. Pure; no DOM.
 
-import { ActionType, getAllLegalActions, getLegalPlacements, getLegalMoves, getLegalThrows, queenPressure, positionKey, REPETITION_LIMIT } from './game.js';
+import { ActionType, getAllLegalActions, getLegalPlacements, getLegalMoves, getLegalThrows, queenPressure, positionHash, REPETITION_LIMIT } from './game.js';
 
 const BLOCKER_TEXT = {
   NOT_YOUR_PIECE:   "THAT'S NOT YOUR PIECE",
@@ -27,6 +27,11 @@ function placedCount(board, player) {
  * @param {string} [ctx.pieceName]  display name of the selected tray piece
  * @param {string|null} [ctx.winReason] 'QUEEN' | 'STALEMATE' | 'REPETITION' | 'RESIGN' | null — why the game ended
  */
+/** Times the current position has occurred (0 when unknown). */
+export function repetitionCount(state) {
+  return state.positionCounts?.[positionHash(state)] ?? 0;
+}
+
 export function statusText({ state, phase = 'IDLE', mode = 'LOCAL', myPlayer = 1, blocker = null, throwCount = 0, pieceName = 'PIECE', winReason = null }) {
   const online = mode === 'ONLINE';
 
@@ -44,7 +49,7 @@ export function statusText({ state, phase = 'IDLE', mode = 'LOCAL', myPlayer = 1
     if (online) return state.winner === myPlayer ? 'YOU WIN' : 'YOU LOSE';
     return `PLAYER ${state.winner} WINS`;
   }
-  const repeated = state.positionCounts?.[positionKey(state)] === REPETITION_LIMIT - 1
+  const repeated = repetitionCount(state) === REPETITION_LIMIT - 1
     ? `REPETITION ${REPETITION_LIMIT - 1}/${REPETITION_LIMIT}` : null;
   if (online && state.turn !== myPlayer) return repeated ?? "OPPONENT'S TURN…"; // both seats see the warning
   if (getAllLegalActions(state).mustPass) return 'NO LEGAL MOVES — YOU MUST PASS';
