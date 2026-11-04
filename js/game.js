@@ -178,6 +178,17 @@ function adjacentToHive(board, q, r, excludeKey = null) {
   return false;
 }
 
+/**
+ * One ground-level slide step for a piece that has been lifted off `board`
+ * (ant / spider pathfinding). Shared by the move generators and getMovePath so
+ * an animated route always uses exactly the legality rules of move generation.
+ */
+function slideStep(tempBoard, fromQ, fromR, toQ, toR) {
+  if (occupied(tempBoard, toQ, toR)) return false;
+  if (!adjacentToHive(tempBoard, toQ, toR)) return false;
+  return canSlide(tempBoard, fromQ, fromR, toQ, toR, 1); // piece is always height 1
+}
+
 // ── Movement generators ──────────────────────────────────────────────────────
 
 /**
@@ -281,9 +292,7 @@ function antMoves(board, fromKey) {
     for (const n of neighbors(cq, cr)) {
       const nk = hexKey(n.q, n.r);
       if (visited.has(nk)) continue;
-      if (occupied(tempBoard, n.q, n.r)) continue;
-      if (!adjacentToHive(tempBoard, n.q, n.r)) continue;
-      if (!canSlide(tempBoard, cq, cr, n.q, n.r, 1)) continue; // piece is always height 1
+      if (!slideStep(tempBoard, cq, cr, n.q, n.r)) continue;
 
       visited.add(nk);
       reachable.add(nk);
@@ -320,9 +329,7 @@ function spiderMoves(board, fromKey) {
     for (const n of neighbors(cq, cr)) {
       const nk = hexKey(n.q, n.r);
       if (visited.has(nk)) continue;
-      if (occupied(tempBoard, n.q, n.r)) continue;
-      if (!adjacentToHive(tempBoard, n.q, n.r)) continue;
-      if (!canSlide(tempBoard, cq, cr, n.q, n.r, 1)) continue; // piece is always height 1
+      if (!slideStep(tempBoard, cq, cr, n.q, n.r)) continue;
 
       visited.add(nk);
       dfs(n.q, n.r, depth + 1, visited);
@@ -347,8 +354,13 @@ function spiderMoves(board, fromKey) {
  * (stack height + 1) and its origin counts as empty.
  */
 function ladybugMoves(board, fromKey) {
+  return [...new Set(ladybugRoutes(board, fromKey).map(route => route[3]))];
+}
+
+/** Every legal ladybug route as [fromKey, step1, step2, landing]. */
+function ladybugRoutes(board, fromKey) {
   const { q, r } = parseKey(fromKey);
-  const results  = new Set();
+  const routes = [];
   const temp = new Map(board);
   temp.delete(fromKey);
   const level = (cq, cr) => heightAt(temp, cq, cr) + 1; // ladybug level while on hex
@@ -372,12 +384,12 @@ function ladybugMoves(board, fromKey) {
         if (n3k === fromKey) continue;
         if (occupied(temp, n3.q, n3.r)) continue;
         if (!canSlide(temp, n2.q, n2.r, n3.q, n3.r, level(n2.q, n2.r))) continue;
-        results.add(n3k);
+        routes.push([fromKey, n1k, n2k, n3k]);
       }
     }
   }
 
-  return [...results];
+  return routes;
 }
 
 /**
@@ -715,6 +727,112 @@ export function getLegalThrows(state) {
   }
 
   return result;
+}
+
+// ── Move paths (animation routes) ────────────────────────────────────────────
+
+/** Route for a piece behaving as `type` from `fromKey` to `toKey`, or null if that type cannot make the move. */
+function pathForType(board, fromKey, toKey, type) {
+  const { q, r } = parseKey(fromKey);
+  switch (type) {
+    case PieceType.QUEEN:
+    case PieceType.PILLBUG:
+      return queenMoves(board, fromKey).includes(toKey) ? { path: [fromKey, toKey], kind: 'slide' } : null;
+    case PieceType.BEETLE:
+      return beetleMoves(board, fromKey).includes(toKey) ? { path: [fromKey, toKey], kind: 'climb' } : null;
+    case PieceType.GRASSHOPPER: {
+      for (const [dq, dr] of DIRS) {
+        const path = [fromKey];
+        let cq = q + dq, cr = r + dr;
+        while (occupied(board, cq, cr)) { path.push(hexKey(cq, cr)); cq += dq; cr += dr; }
+        if (path.length > 1 && hexKey(cq, cr) === toKey) { path.push(toKey); return { path, kind: 'hop' }; }
+      }
+      return null;
+    }
+    case PieceType.ANT: {
+      const temp = new Map(board);
+      temp.delete(fromKey);
+      const parent = new Map([[fromKey, null]]);
+      const queue = [fromKey];
+      while (queue.length) {
+        const cur = queue.shift();
+        if (cur === toKey) break;
+        const { q: cq, r: cr } = parseKey(cur);
+        for (const n of neighbors(cq, cr)) {
+          const nk = hexKey(n.q, n.r);
+          if (parent.has(nk) || !slideStep(temp, cq, cr, n.q, n.r)) continue;
+          parent.set(nk, cur);
+          queue.push(nk);
+        }
+      }
+      if (!parent.has(toKey) || toKey === fromKey) return null;
+      const path = [];
+      for (let k = toKey; k !== null; k = parent.get(k)) path.unshift(k);
+      return { path, kind: 'slide' };
+    }
+    case PieceType.SPIDER: {
+      const temp = new Map(board);
+      temp.delete(fromKey);
+      const path = [fromKey];
+      const visited = new Set([fromKey]);
+      const dfs = (cq, cr, depth) => {
+        if (depth === 3) return hexKey(cq, cr) === toKey;
+        for (const n of neighbors(cq, cr)) {
+          const nk = hexKey(n.q, n.r);
+          if (visited.has(nk) || !slideStep(temp, cq, cr, n.q, n.r)) continue;
+          visited.add(nk); path.push(nk);
+          if (dfs(n.q, n.r, depth + 1)) return true;
+          visited.delete(nk); path.pop();
+        }
+        return false;
+      };
+      return dfs(q, r, 0) ? { path: [...path], kind: 'slide' } : null;
+    }
+    case PieceType.LADYBUG: {
+      const route = ladybugRoutes(board, fromKey).find(rt => rt[3] === toKey);
+      return route ? { path: route, kind: 'climb' } : null;
+    }
+    case PieceType.MOSQUITO: {
+      const stack = board.get(fromKey);
+      if (stack && stack.length > 1) return pathForType(board, fromKey, toKey, PieceType.BEETLE);
+      let best = null;
+      const seen = new Set();
+      for (const n of neighbors(q, r)) {
+        const ns = board.get(hexKey(n.q, n.r));
+        if (!ns) continue;
+        const t = topOf(ns).type;
+        if (t === PieceType.MOSQUITO || seen.has(t)) continue;
+        seen.add(t);
+        const cand = pathForType(board, fromKey, toKey, t);
+        if (cand && (!best || cand.path.length < best.path.length)) best = cand;
+      }
+      return best;
+    }
+    default: return null;
+  }
+}
+
+/**
+ * Route a piece takes for `action`, for animation. Returns
+ * { path: string[], kind: 'slide'|'hop'|'climb'|'throw'|'place' } (path includes
+ * start and end; hops list every jumped hex; throws are [from, pillbugHex, to])
+ * or null when the action is not legal in `state` (and always for PASS).
+ */
+export function getMovePath(state, action) {
+  if (!action) return null;
+  switch (action.type) {
+    case ActionType.PLACE:
+      return getLegalPlacements(state, action.pieceType).includes(action.to)
+        ? { path: [action.to], kind: 'place' } : null;
+    case ActionType.MOVE: {
+      if (!getLegalMoves(state, action.from).includes(action.to)) return null;
+      return pathForType(state.board, action.from, action.to, topOf(state.board.get(action.from)).type);
+    }
+    case ActionType.THROW:
+      return getLegalThrows(state).some(t => t.pillbugHex === action.pillbugHex && t.from === action.from && t.to === action.to)
+        ? { path: [action.from, action.pillbugHex, action.to], kind: 'throw' } : null;
+    default: return null;
+  }
 }
 
 /**

@@ -139,6 +139,11 @@ getAllLegalActions(state)            → { placements: Map, moves: Map, throws: 
 getMoveBlocker(state, fromKey)       → null | 'EMPTY' | 'NOT_YOUR_PIECE' | 'QUEEN_NOT_PLACED'
                                        | 'JUST_THROWN' | 'ONE_HIVE' | 'NO_MOVES'   // UI explanations
 
+// Animation route for an action (null if illegal, and always for PASS)
+getMovePath(state, action)           → { path: string[], kind: 'slide'|'hop'|'climb'|'throw'|'place' } | null
+                                       // path includes start+end; PLACE → [to]; THROW → [from, pillbugHex, to];
+                                       // hop lists every jumped hex; spider/ladybug length 4; ant = BFS shortest slide
+
 // Apply an action (immutable — returns new state)
 applyAction(state, action) → GameState
 
