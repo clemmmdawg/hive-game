@@ -39,6 +39,7 @@ import {
   touchActivity,
 } from './rooms.js';
 
+import { logEntry } from '../js/notation.js';
 import { validateAction, resolveResign } from './validator.js';
 import { resolveStaticPath } from './static.js';
 
@@ -214,6 +215,7 @@ export function handleMessage(socket, msg) {
 
       // Both players present — start the game
       room.gameState = createGame(room.settings);
+      room.history   = [];
       const snap     = serializeState(room.gameState);
 
       // Tell each player their assigned number
@@ -221,7 +223,7 @@ export function handleMessage(socket, msg) {
       sendTo(room, 2, { type: 'PLAYER_ASSIGNMENT', player: 2, token: room.tokens[1] });
 
       // Broadcast the initial game state to both
-      broadcast(room, { type: 'GAME_START', gameState: snap, settings: room.settings });
+      broadcast(room, { type: 'GAME_START', gameState: snap, settings: room.settings, history: [] });
 
       console.log(`[server] Room ${room.code} game started`);
       break;
@@ -245,6 +247,7 @@ export function handleMessage(socket, msg) {
         token: result.token,
         gameState: result.room.gameState ? serializeState(result.room.gameState) : null,
         settings: result.room.settings,
+        history: result.room.history,
         ...(result.room.endReason ? { endReason: result.room.endReason } : {}),
       }));
 
@@ -271,11 +274,12 @@ export function handleMessage(socket, msg) {
         return;
       }
 
+      room.history.push(logEntry(room.gameState, action));
       room.gameState = applyAction(room.gameState, action);
       touchActivity(room);
 
       const snap = serializeState(room.gameState);
-      broadcast(room, { type: 'GAME_STATE', gameState: snap });
+      broadcast(room, { type: 'GAME_STATE', gameState: snap, history: room.history });
 
       if (room.gameState.winner) {
         const winner = room.gameState.winner;

@@ -296,12 +296,12 @@ function _attachOnlineGameHandlers() {
     _saveSession();
   });
 
-  net.on('GAME_START', ({ gameState, settings }) => {
+  net.on('GAME_START', ({ gameState, settings, history }) => {
     _onlinePending = false;
     // Wire up in-game net handlers before handing off
     _callbacks.onNetReady();
     hideMenu();
-    _callbacks.onOnlineStart(settings, _myPlayer, gameState);
+    _callbacks.onOnlineStart(settings, _myPlayer, gameState, null, history ?? []);
   });
 
   net.on('_disconnected', () => {
@@ -313,7 +313,7 @@ function _attachOnlineGameHandlers() {
 
   net.on('WAITING_FOR_OPPONENT', ({ code }) => _showRoom(code));
 
-  net.on('ROOM_RESUMED', ({ player, token, gameState, settings, endReason }) => {
+  net.on('ROOM_RESUMED', ({ player, token, gameState, settings, endReason, history }) => {
     _myPlayer = player;
     _playerToken = token;
     _saveSession();
@@ -321,7 +321,7 @@ function _attachOnlineGameHandlers() {
       _onlinePending = false;
       _callbacks.onNetReady();
       hideMenu();
-      _callbacks.onOnlineStart(settings, player, gameState, endReason ?? null);
+      _callbacks.onOnlineStart(settings, player, gameState, endReason ?? null, history ?? []);
     } else {
       _showRoom(_roomCode);
     }

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { ActionType, PieceType, createGame, getLegalPlacements } from '../js/game.js';
+import { ActionType, PieceType, applyAction, createGame, getLegalPlacements } from '../js/game.js';
 import { validateAction } from '../server/validator.js';
 import { createRoom, joinRoom, removeSocket, resumeRoom } from '../server/rooms.js';
 
@@ -246,5 +246,51 @@ test('heartbeat terminates a client that never answers pings', async () => {
     const live = await srv.client();
     await closed(dead);
     assert.equal(live.readyState, 1);
+  } finally { await srv.stop(); }
+});
+
+test('GAME_STATE and ROOM_RESUMED carry the growing move history; resign adds no entry', async () => {
+  const srv = await startServer();
+  try {
+    const { a, b, code, tokenB } = await startGame(srv);
+    let state = createGame({});
+    const [to1] = getLegalPlacements(state, PieceType.ANT);
+    send(a, { type: 'PLACE_PIECE', pieceType: PieceType.ANT, to: to1 });
+    const first = await next(b, 'GAME_STATE');
+    assert.deepEqual(first.history.map(e => e.notation), ['wA1']);
+    assert.deepEqual(first.history[0].action, { type: 'PLACE', pieceType: 'ANT', to: to1 });
+    assert.equal(first.history[0].player, 1);
+
+    state = applyAction(state, first.history[0].action);
+    const [to2] = getLegalPlacements(state, PieceType.BEETLE);
+    send(b, { type: 'PLACE_PIECE', pieceType: PieceType.BEETLE, to: to2 });
+    await next(a, 'GAME_STATE'); // a's copy of the first broadcast
+    const second = await next(a, 'GAME_STATE');
+    assert.deepEqual(second.history.map(e => e.notation), ['wA1', second.history[1].notation]);
+    assert.equal(second.history[1].player, 2);
+
+    send(a, { type: 'PLACE_PIECE', pieceType: PieceType.ANT, to: '99,99' }); // rejected: not logged
+    await next(a, 'INVALID_MOVE');
+
+    const b2 = await srv.client();
+    send(b2, { type: 'RESUME_ROOM', code, token: tokenB });
+    const resumed = await next(b2, 'ROOM_RESUMED');
+    assert.deepEqual(resumed.history, second.history);
+
+    send(a, { type: 'RESIGN' });
+    await next(b2, 'GAME_OVER');
+    assert.equal(getRoom(code).history.length, 2);
+  } finally { await srv.stop(); }
+});
+
+test('GAME_START carries an empty history', async () => {
+  const srv = await startServer();
+  try {
+    const a = await srv.client();
+    send(a, { type: 'CREATE_ROOM', settings: {} });
+    const { code } = await next(a, 'ROOM_CREATED');
+    const b = await srv.client();
+    send(b, { type: 'JOIN_ROOM', code });
+    assert.deepEqual((await next(b, 'GAME_START')).history, []);
   } finally { await srv.stop(); }
 });

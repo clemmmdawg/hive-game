@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createGame, applyAction, serializeState, deserializeState } from '../js/game.js';
+import { createGame, applyAction, serializeState, deserializeState, ActionType, PieceType, getLegalPlacements } from '../js/game.js';
 import { toNotation, pieceIds, MARKERS } from '../js/notation.js';
 
 const place = (pieceType, to) => ({ type: 'PLACE', pieceType, to });
@@ -65,4 +65,49 @@ test('ids survive serialize round trip; id-less saves get deterministic ids', ()
   const a = pieceIds(legacy), b = pieceIds(legacy);
   assert.deepEqual(a, b);
   assert.equal(new Set([...a.values()].flat()).size, 2);
+});
+
+// ── Move log (Task 12) ───────────────────────────────────────────────────────
+
+import { logEntry, undoLogEntry } from '../js/notation.js';
+import { stampPieceIds } from '../js/game.js';
+
+test('logEntry keeps the action, notation, mover and turn number', () => {
+  const s = createGame({});
+  const [to] = getLegalPlacements(s, PieceType.ANT);
+  const action = { type: ActionType.PLACE, pieceType: PieceType.ANT, to };
+  assert.deepEqual(logEntry(s, action), { notation: 'wA1', player: 1, turnNumber: s.turnNumber, action });
+  assert.equal(logEntry(s, { type: ActionType.PASS }).notation, 'pass');
+});
+
+test('undoLogEntry pops the last move and any forced passes after it', () => {
+  const mv = n => ({ notation: n, action: { type: 'PLACE' } });
+  const ps = { notation: 'pass', action: { type: 'PASS' } };
+  assert.deepEqual(undoLogEntry([mv('a'), mv('b')]).map(e => e.notation), ['a']);
+  assert.deepEqual(undoLogEntry([mv('a'), mv('b'), ps]).map(e => e.notation), ['a']);
+  assert.deepEqual(undoLogEntry([mv('a'), ps, mv('b')]).map(e => e.notation), ['a', 'pass']);
+  assert.deepEqual(undoLogEntry([]), []);
+});
+
+test('legacy id-less states are stamped once on load, so notation is consistent', () => {
+  let s = createGame({});
+  for (const t of [PieceType.ANT, PieceType.ANT, PieceType.ANT]) {
+    const [to] = getLegalPlacements(s, t);
+    s = applyAction(s, { type: ActionType.PLACE, pieceType: t, to });
+  }
+  const raw = JSON.parse(JSON.stringify(serializeState(s)));
+  for (const [, stack] of raw.board) for (const p of stack) delete p.id;
+  const loaded = deserializeState(raw);
+  for (const stack of loaded.board.values()) for (const p of stack) assert.ok(p.id);
+  assert.equal(stampPieceIds(loaded), loaded, 'already stamped: same object');
+  // The next placement names pieces by the stamped ids, and an id-less prev state gives the same text.
+  const [dest] = getLegalPlacements(loaded, PieceType.BEETLE);
+  const act = { type: ActionType.PLACE, pieceType: PieceType.BEETLE, to: dest };
+  const n = toNotation(loaded, act);
+  const all = new Set([...loaded.board.values()].flat().map(p => p.id));
+  const refs = n.replace(/[/\\-]/g, ' ').split(' ').filter(Boolean).slice(1);
+  assert.ok(refs.length === 1 && all.has(refs[0]), n);
+  const bare = deserializeState(raw);
+  for (const stack of bare.board.values()) for (const p of stack) delete p.id;
+  assert.equal(toNotation(bare, act), n);
 });

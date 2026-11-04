@@ -979,7 +979,7 @@ export function serializeState(state) {
  * Deserialize a plain object (from JSON) back into a live GameState with Map.
  */
 export function deserializeState(data) {
-  return {
+  return stampPieceIds({
     board:                new Map(data.board),
     supply:               data.supply,
     turn:                 data.turn,
@@ -990,7 +990,7 @@ export function deserializeState(data) {
     pillbugThrewHex:      data.pillbugThrewHex,
     winner:               data.winner,
     settings:             data.settings,
-  };
+  });
 }
 
 // ── Piece identity ───────────────────────────────────────────────────────────
@@ -1004,6 +1004,33 @@ const UNNUMBERED = new Set(['QUEEN', 'MOSQUITO', 'LADYBUG', 'PILLBUG']);
 /** Notation id: 'w'/'b' + letter + placement number (Q, M, L, P unnumbered). */
 export function pieceId(player, type, n) {
   return (player === 1 ? 'w' : 'b') + LETTER[type] + (UNNUMBERED.has(type) ? '' : n);
+}
+
+/**
+ * Give every id-less piece (old saves, hand-built boards) its notation id, deterministically: hexes in
+ * sorted key order, bottom-to-top, numbering continues after ids already present. Returns the same state
+ * object when nothing is missing, otherwise a copy. Called once when a state is loaded, so later
+ * actions (which carry ids) never renumber.
+ */
+export function stampPieceIds(state) {
+  const boardEntries = [...state.board.entries()];
+  if (boardEntries.every(([, stack]) => stack.every(p => p.id))) return state;
+  const used = new Set();
+  for (const [, stack] of boardEntries) for (const p of stack) if (p.id) used.add(p.id);
+  const next = {};
+  const board = new Map();
+  for (const [k, stack] of boardEntries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+    board.set(k, stack.map(p => {
+      if (p.id) return p;
+      const tag = `${p.player}${p.type}`;
+      let n = next[tag] ?? 0, id;
+      do { id = pieceId(p.player, p.type, ++n); } while (UNNUMBERED.has(p.type) ? false : used.has(id));
+      next[tag] = n; used.add(id);
+      return { ...p, id };
+    }));
+  }
+  // Keep the original hex insertion order.
+  return { ...state, board: new Map(boardEntries.map(([k]) => [k, board.get(k)])) };
 }
 
 /** Pieces of this player/type already on the board (pieces never leave it, buried ones included). */

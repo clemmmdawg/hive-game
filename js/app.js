@@ -12,6 +12,7 @@ import {
   statusText, describeLastMove, inferAction, winReasonFromServer, resumedWinReason, turnChipText,
   dangerText, newDangers,
 } from './hints.js';
+import { logEntry, undoLogEntry } from './notation.js';
 import { encodeLocalSave, decodeLocalSave, MAX_UNDO } from './local-save.js';
 import { spriteSVG, drawSprite, SPECIES_COLOR, bodyFill } from './sprites.js';
 import * as net from './net.js';
@@ -124,6 +125,7 @@ let gameSettings = null;   // saved so "rematch" can reuse them
 let gameMode     = 'LOCAL'; // 'LOCAL' | 'ONLINE'
 let myPlayer     = 1;       // 1 or 2 — only meaningful in ONLINE mode
 let history      = [];      // LOCAL only: states before each action, for undo
+let moveLog      = [];      // { notation, player, turnNumber, action } per move: local = recorded here, online = the server's history
 let winPresented = false;
 let winReason    = null;    // null | 'QUEEN' | 'RESIGN' | 'STALEMATE'
 let passTimer    = null;    // pending automatic pass in LOCAL mode
@@ -281,6 +283,7 @@ function exitToMenu({ notice, keepSaved = false } = {}) {
   if (gameMode === 'ONLINE') leaveOnlineSession({ keepSaved });
   gameState = null;
   history = [];
+  moveLog = [];
   connectionNotice = null;
   opponentAway = false;
   updateInsets();
@@ -293,13 +296,14 @@ function exitToMenu({ notice, keepSaved = false } = {}) {
 /**
  * Start (or resume) a pass-and-play game.
  * @param {object} settings
- * @param {{state?: object, history?: object[]}} [restore] saved game to continue
+ * @param {{state?: object, history?: object[], moveLog?: object[]}} [restore] saved game to continue
  */
 function startGame(settings, restore = null) {
   cancelTimers();
   gameMode     = 'LOCAL';
   gameSettings = settings;
   history      = restore?.history ?? [];
+  moveLog      = restore?.moveLog ?? [];
   gameState    = restore?.state ?? createGame({
     expansions:     settings.expansions,
     tournamentRule: settings.tournamentRule,
@@ -316,13 +320,15 @@ function startGame(settings, restore = null) {
  * @param {number} playerNum       - 1 or 2
  * @param {object} serializedState - JSON-safe state from serializeState()
  * @param {string|null} [endReason] - server end reason when resuming a finished game
+ * @param {object[]} [serverHistory] - the room's move log so far (GAME_START: [], ROOM_RESUMED: all of it)
  */
-export function startOnlineGame(settings, playerNum, serializedState, endReason = null) {
+export function startOnlineGame(settings, playerNum, serializedState, endReason = null, serverHistory = []) {
   cancelTimers();
   gameMode     = 'ONLINE';
   myPlayer     = playerNum;
   gameSettings = settings;
   history      = [];
+  moveLog      = serverHistory ?? [];
   gameState    = deserializeState(serializedState);
   connectionNotice = null;
   opponentAway = false;
@@ -354,7 +360,7 @@ function beginGameSession(lastMove) {
 function saveLocal() {
   if (gameMode !== 'LOCAL' || !gameState) return;
   if (gameState.winner) { storageSet(LOCAL_SAVE_KEY, null); return; }
-  storageSet(LOCAL_SAVE_KEY, encodeLocalSave({ settings: gameSettings, state: gameState, history }));
+  storageSet(LOCAL_SAVE_KEY, encodeLocalSave({ settings: gameSettings, state: gameState, history, moveLog }));
 }
 
 function loadLocalSave() {
@@ -506,6 +512,7 @@ function act(action) {
   const prev = gameState;
   const move = getMovePath(prev, action);
   history.push(prev);
+  moveLog.push(logEntry(prev, action));
   if (history.length > MAX_UNDO) history.shift();
   gameState = applyAction(prev, action);
   onStateChanged(prev, { move });
@@ -657,6 +664,7 @@ function announceTurn(landingMs = 0, dangers = [], landed = null) {
     passTimer = setTimeout(() => {
       passTimer = null;
       if (gameState !== stuck) return; // undone or quit meanwhile
+      moveLog.push(logEntry(stuck, { type: ActionType.PASS }));
       gameState = applyAction(stuck, { type: ActionType.PASS });
       if (getAllLegalActions(gameState).mustPass) {
         // Neither side can act: the game can never progress.
@@ -717,6 +725,7 @@ function undo() {
   board.finishAnimations({ clearFx: true }); // no animation, and nothing left mid-air
   cancelTimers();
   const restored = history.pop();
+  moveLog = undoLogEntry(moveLog); // the move, plus any forced pass that followed it
   gameState    = restored;
   winPresented = false;
   winReason    = null;
@@ -1414,8 +1423,9 @@ export function initNetHandlers() {
   });
 
   // Authoritative game state after any action
-  net.on('GAME_STATE', ({ gameState: snap }) => {
+  net.on('GAME_STATE', ({ gameState: snap, history: serverHistory }) => {
     board.finishAnimations();
+    if (Array.isArray(serverHistory)) moveLog = serverHistory;
     const prev = gameState;
     gameState = deserializeState(snap);
     // Snapshots carry no action: recover it, and its route, from the previous state.
@@ -1423,8 +1433,9 @@ export function initNetHandlers() {
     onStateChanged(prev, { move });
   });
 
-  net.on('ROOM_RESUMED', ({ player, gameState: snap, endReason }) => {
+  net.on('ROOM_RESUMED', ({ player, gameState: snap, endReason, history: serverHistory }) => {
     myPlayer = player;
+    if (Array.isArray(serverHistory)) moveLog = serverHistory;
     connectionNotice = null;
     if (snap) {
       cancelTimers(); // nothing from before the drop (win impact, alarms, chime) may fire over the fresh state

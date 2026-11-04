@@ -239,3 +239,16 @@ test('turnChipText shows the result once the game is over', () => {
   assert.equal(turnChipText({ state: { winner: 1, turn: 2 }, mode: 'ONLINE', myPlayer: 2 }), 'YOU LOSE');
   assert.equal(turnChipText({ state: { winner: 'DRAW', turn: 2 }, mode: 'LOCAL' }), 'DRAW');
 });
+
+test('local save v2 round-trips the move log; v1 saves decode with an empty one', () => {
+  const state = createGame({});
+  const moveLog = [{ notation: 'wA1', player: 1, turnNumber: 1, action: { type: 'PLACE', pieceType: 'ANT', to: '0,0' } }];
+  const v2 = decodeLocalSave(encodeLocalSave({ settings: {}, state, history: [], moveLog }));
+  assert.deepEqual(v2.moveLog, moveLog);
+  assert.deepEqual(decodeLocalSave(encodeLocalSave({ settings: {}, state, history: [] })).moveLog, []);
+  const v1 = JSON.parse(encodeLocalSave({ settings: {}, state, history: [], moveLog }));
+  v1.v = 1; delete v1.moveLog;
+  assert.deepEqual(decodeLocalSave(JSON.stringify(v1)).moveLog, []);
+  v1.v = 2; v1.moveLog = 'junk';
+  assert.deepEqual(decodeLocalSave(JSON.stringify(v1)).moveLog, []);
+});

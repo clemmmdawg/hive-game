@@ -46,6 +46,7 @@ export function createRoom(settings) {
     sockets:      [null, null],   // index 0 = player 1, index 1 = player 2
     tokens:       [null, null],   // reconnect UUIDs parallel to sockets
     gameState:    null,           // set to a live GameState when game starts
+    history:      [],             // move log: { notation, player, turnNumber, action } per valid action (incl. PASS)
     settings,
     endReason:    null,           // 'QUEEN' | 'RESIGN' | 'DRAW' once finished
     idleTimer:    null,

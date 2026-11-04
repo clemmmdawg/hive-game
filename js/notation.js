@@ -2,10 +2,10 @@
 //
 // Identity: applyAction (game.js) stamps each piece with `id` ('wA1', 'bQ', ...) at placement, numbered per
 // player per type by placement order; the id travels with the piece through MOVE/THROW (pieces are copied
-// with spread). States without ids (old saves, hand-built boards) get ids assigned deterministically by
-// pieceIds(): hexes in sorted key order, bottom-to-top, numbering continues after any ids already present.
+// with spread). States without ids (old saves, hand-built boards) get ids from game.js stampPieceIds(),
+// which deserializeState applies once at load so prev/after states can never number differently.
 
-import { PieceType, ActionType, parseKey, hexKey, neighbors, applyAction, pieceId } from './game.js';
+import { PieceType, ActionType, parseKey, hexKey, neighbors, applyAction, pieceId, stampPieceIds } from './game.js';
 
 /**
  * Marker for where the moved piece sits relative to the reference piece, indexed by the direction
@@ -16,31 +16,17 @@ export const MARKERS = ['X-', 'X\\', '/X', '-X', '\\X', 'X/'];
 
 const OPPOSITE = i => (i + 3) % 6;
 
-/** @returns {Map<string, string[]>} hexKey -> id per stack layer (bottom first). */
+/** @returns {Map<string, string[]>} hexKey -> id per stack layer (bottom first); id-less pieces are stamped first. */
 export function pieceIds(state) {
-  const used = new Set();
-  for (const stack of state.board.values()) for (const p of stack) if (p.id) used.add(p.id);
-  const next = {};
   const out = new Map();
-  const keys = [...state.board.keys()].sort();
-  const hasMissing = keys.some(k => state.board.get(k).some(p => !p.id));
-  for (const k of keys) {
-    out.set(k, state.board.get(k).map(p => {
-      if (p.id) return p.id;
-      if (!hasMissing) return null;
-      const tag = `${p.player}${p.type}`;
-      let n = next[tag] ?? 0, id;
-      do { id = pieceId(p.player, p.type, ++n); } while (used.has(id) && n < 99);
-      next[tag] = n; used.add(id);
-      return id;
-    }));
-  }
+  for (const [k, stack] of stampPieceIds(state).board) out.set(k, stack.map(p => p.id));
   return out;
 }
 
 /** Notation for `action` taken in `prevState`, e.g. 'wA1', 'bS1 wA1-', 'wB1 bQ', 'pass'. */
 export function toNotation(prevState, action) {
   if (action.type === ActionType.PASS) return 'pass';
+  prevState = stampPieceIds(prevState); // afterState below inherits the same ids
   const ids = pieceIds(prevState);
   let id, to = action.to;
   if (action.type === ActionType.PLACE) {
@@ -63,4 +49,28 @@ export function toNotation(prevState, action) {
   const refId = pieceIds(afterState).get(refKey).at(-1);
   const marker = MARKERS[OPPOSITE(i)];
   return `${id} ${marker.replace('X', refId)}`;
+}
+
+/**
+ * One move-log entry for `action` taken in `prevState`. Keeps the action so a log can be replayed from
+ * createGame(settings) by re-applying actions.
+ * @returns {{ notation: string, player: 1|2, turnNumber: number, action: object }}
+ */
+export function logEntry(prevState, action) {
+  return {
+    notation:   toNotation(prevState, action),
+    player:     prevState.turn,
+    turnNumber: prevState.turnNumber,
+    action:     { ...action },
+  };
+}
+
+/**
+ * Drop what one local undo takes back: the last real move plus any forced passes that followed it
+ * (local passes are automatic and never get their own undo step). Returns a new array.
+ */
+export function undoLogEntry(moveLog) {
+  const log = [...moveLog];
+  while (log.length && log.pop().action.type === ActionType.PASS) { /* keep popping through passes */ }
+  return log;
 }
