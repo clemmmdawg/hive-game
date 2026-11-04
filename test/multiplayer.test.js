@@ -294,3 +294,29 @@ test('GAME_START carries an empty history', async () => {
     assert.deepEqual((await next(b, 'GAME_START')).history, []);
   } finally { await srv.stop(); }
 });
+
+test('a threefold repetition ends the online game with reason REPETITION (and resumes with it)', async () => {
+  const srv = await startServer();
+  try {
+    const { a, b, code, tokenB } = await startGame(srv);
+    const plays = [
+      ['PLACE_PIECE', { pieceType: 'QUEEN', to: '0,0' }], ['PLACE_PIECE', { pieceType: 'QUEEN', to: '1,0' }],
+      ['PLACE_PIECE', { pieceType: 'BEETLE', to: '-1,0' }], ['PLACE_PIECE', { pieceType: 'BEETLE', to: '2,0' }],
+    ];
+    const cycle = [
+      ['MOVE_PIECE', { from: '-1,0', to: '-1,1' }], ['MOVE_PIECE', { from: '2,0', to: '2,-1' }],
+      ['MOVE_PIECE', { from: '-1,1', to: '-1,0' }], ['MOVE_PIECE', { from: '2,-1', to: '2,0' }],
+    ];
+    const seq = [...plays, ...cycle, ...cycle];
+    for (let i = 0; i < seq.length; i++) {
+      send(i % 2 === 0 ? a : b, { type: seq[i][0], ...seq[i][1] });
+      await next(a, 'GAME_STATE');
+    }
+    const over = await next(a, 'GAME_OVER');
+    assert.equal(over.winner, 'DRAW');
+    assert.equal(over.reason, 'REPETITION');
+    const b2 = await srv.client();
+    send(b2, { type: 'RESUME_ROOM', code, token: tokenB });
+    assert.equal((await next(b2, 'ROOM_RESUMED')).endReason, 'REPETITION');
+  } finally { await srv.stop(); }
+});

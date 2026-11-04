@@ -270,7 +270,7 @@ export function handleMessage(socket, msg) {
 
       if (room.gameState.winner) {
         const winner = room.gameState.winner;
-        room.endReason = winner === 'DRAW' ? 'DRAW' : 'QUEEN';
+        room.endReason = winner !== 'DRAW' ? 'QUEEN' : room.gameState.drawReason === 'REPETITION' ? 'REPETITION' : 'DRAW';
         broadcast(room, { type: 'GAME_OVER', winner, reason: room.endReason });
         console.log(`[server] Room ${room.code} game over — winner: ${room.gameState.winner}`);
       }

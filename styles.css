@@ -1311,6 +1311,7 @@ kbd {
   text-align: center;
   box-shadow: 0 0 6px var(--c-glow);
 }
+.edge-hint.hover::before { background: rgba(5, 5, 15, .95); box-shadow: 0 0 12px var(--c-glow), inset 0 0 8px var(--c-glow); }
 .edge-hint:focus-visible { outline: none; }
 .edge-hint:focus-visible::before { outline: 2px solid #fff; outline-offset: 3px; }
 @keyframes edge-hint-in { from { opacity: 0; scale: .6; } to { opacity: 1; scale: 1; } }

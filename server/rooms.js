@@ -48,7 +48,7 @@ export function createRoom(settings) {
     gameState:    null,           // set to a live GameState when game starts
     history:      [],             // move log: { notation, player, turnNumber, action } per valid action (incl. PASS)
     settings,
-    endReason:    null,           // 'QUEEN' | 'RESIGN' | 'DRAW' once finished
+    endReason:    null,           // 'QUEEN' | 'RESIGN' | 'DRAW' | 'REPETITION' once finished
     idleTimer:    null,
     createdAt:    Date.now(),
     lastActivity: Date.now(),

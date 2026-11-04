@@ -855,6 +855,7 @@ board.onTap = (q, r, clientX, clientY) => {
 };
 
 board.onHover = (q, r, clientX, clientY) => {
+  hoverEdgeHint(q == null ? null : clientX, clientY);
   if (q == null || !gameState || reviewer.active) { hidePieceTooltip(); return; }
   const key = hexKey(q, r);
   if (gameState.board.has(key)) showStackTooltip(key, clientX, clientY);
@@ -896,6 +897,7 @@ board.onIndicators = list => {
 const EDGE_HINT_HIT = 24; // px: the 44 px button, plus a little
 
 function showEdgeCluster(cluster) {
+  closeGameMenu(); // like any other board tap
   hidePieceTooltip();
   hideBoardHint();
   // Keep the selected piece (and every other target) in frame too when it all fits.
@@ -906,14 +908,27 @@ function showEdgeCluster(cluster) {
  * The chevron buttons are pointer-events: none, so touches and drags land on the board (a drag that
  * starts on one pans as usual); a clean tap on one is caught here, before the board handles it.
  */
-function tapEdgeHint(x, y) {
+function edgeHintAt(x, y) {
   let best = null, bestD = EDGE_HINT_HIT;
   for (const c of board.indicators) {
     const d = Math.hypot(c.x - x, c.y - y);
     if (d <= bestD) { best = c; bestD = d; }
   }
+  return best;
+}
+
+function tapEdgeHint(x, y) {
+  const best = edgeHintAt(x, y);
   if (best) showEdgeCluster(best);
   return !!best;
+}
+
+/** Desktop hover: the buttons let pointers through, so the board hit-tests them for the pointer cursor and .hover state. */
+function hoverEdgeHint(x, y) {
+  const hit = x == null ? null : edgeHintAt(x, y);
+  const index = hit ? board.indicators.indexOf(hit) : -1;
+  [...edgeHints.children].forEach((btn, i) => btn.classList.toggle('hover', i === index));
+  $('board').style.cursor = hit ? 'pointer' : '';
 }
 
 // Keyboard (Enter / Space on a focused chevron).

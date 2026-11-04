@@ -9,7 +9,7 @@
 //   createWinFx({
 //     board,                          the Board (shockwave, dim spotlight, reduced motion)
 //     state(), mode(), myPlayer(),    the live game: GameState, 'LOCAL'|'ONLINE', 1|2
-//     reason(),                       app's win reason: null|'QUEEN'|'RESIGN'|'STALEMATE'
+//     reason(),                       app's win reason: null|'QUEEN'|'RESIGN'|'STALEMATE'|'REPETITION'
 //     moveLog(),                      the move log (REPLAY is offered when it rebuilds the game)
 //     covered(),                      true while ☰ / move sheet / review would cover the card
 //     beforeCard(),                   called just before the card opens (hides the tooltip)
@@ -47,7 +47,9 @@ export function winCopy({ state, mode, myPlayer, reason }) {
       headline: "IT'S A DRAW",
       reason: reason === 'STALEMATE'
         ? 'Neither player has a legal move left.'
-        : 'Both queens were surrounded on the same move.',
+        : reason === 'REPETITION' || state.drawReason === 'REPETITION'
+          ? 'The same position occurred three times.'
+          : 'Both queens were surrounded on the same move.',
       emblem: PieceType.QUEEN,
     };
   }

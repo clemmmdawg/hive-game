@@ -597,7 +597,7 @@ export function createGame(settings = {}) {
     return s;
   };
 
-  return {
+  const state = {
     board:                new Map(),
     supply:               { 1: makeSupply(), 2: makeSupply() },
     turn:                 1,
@@ -612,7 +612,27 @@ export function createGame(settings = {}) {
       tournamentRule: !!settings.tournamentRule,
       clock:          settings.clock || { enabled: false },
     },
+    positionCounts:       {},       // positionKey -> times reached (threefold repetition draw)
+    drawReason:           null,     // 'REPETITION' when winner === 'DRAW' came from positionCounts
   };
+  state.positionCounts[positionKey(state)] = 1;
+  return state;
+}
+
+/** How many times a position may occur before the game is drawn. */
+export const REPETITION_LIMIT = 3;
+
+/**
+ * Canonical string of a position for repetition counting: board stacks (hex key + bottom-to-top
+ * player+type, piece ids excluded), side to move, and both supplies.
+ */
+export function positionKey(state) {
+  const stacks = [...state.board.entries()]
+    .map(([k, st]) => `${k}:${st.map(p => `${p.player}${p.type}`).join('/')}`)
+    .sort()
+    .join(';');
+  const supply = p => Object.keys(state.supply[p]).sort().map(t => `${t}${state.supply[p][t]}`).join(',');
+  return `${stacks}|${state.turn}|${supply(1)}|${supply(2)}`;
 }
 
 /**
@@ -972,6 +992,8 @@ export function serializeState(state) {
     pillbugThrewHex:      state.pillbugThrewHex,
     winner:               state.winner,
     settings:             state.settings,
+    positionCounts:       state.positionCounts,
+    drawReason:           state.drawReason ?? null,
   };
 }
 
@@ -979,7 +1001,7 @@ export function serializeState(state) {
  * Deserialize a plain object (from JSON) back into a live GameState with Map.
  */
 export function deserializeState(data) {
-  return stampPieceIds({
+  const state = stampPieceIds({
     board:                new Map(data.board),
     supply:               data.supply,
     turn:                 data.turn,
@@ -990,7 +1012,12 @@ export function deserializeState(data) {
     pillbugThrewHex:      data.pillbugThrewHex,
     winner:               data.winner,
     settings:             data.settings,
+    positionCounts:       data.positionCounts,
+    drawReason:           data.drawReason ?? null,
   });
+  // Old saves carry no counts: the loaded position counts once.
+  if (!state.positionCounts) state.positionCounts = { [positionKey(state)]: 1 };
+  return state;
 }
 
 // ── Piece identity ───────────────────────────────────────────────────────────
@@ -1131,9 +1158,20 @@ export function applyAction(state, action) {
     lastOpponentMovedHex,
     pillbugThrewHex,
     winner:               null,
+    drawReason:           null,
   };
 
+  // Count the new position; a queen surround on the same move takes precedence over the repetition draw.
+  const key = positionKey(nextState);
+  const counts = { ...(state.positionCounts ?? {}) };
+  counts[key] = (counts[key] ?? 0) + 1;
+  nextState.positionCounts = counts;
+
   nextState.winner = checkWin(nextState);
+  if (!nextState.winner && counts[key] >= REPETITION_LIMIT) {
+    nextState.winner = 'DRAW';
+    nextState.drawReason = 'REPETITION';
+  }
 
   return nextState;
 }

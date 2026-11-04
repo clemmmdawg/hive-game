@@ -1,6 +1,6 @@
 // hints.js — Status-line copy for the HUD. Pure; no DOM.
 
-import { ActionType, getAllLegalActions, getLegalPlacements, getLegalMoves, getLegalThrows, queenPressure } from './game.js';
+import { ActionType, getAllLegalActions, getLegalPlacements, getLegalMoves, getLegalThrows, queenPressure, positionKey, REPETITION_LIMIT } from './game.js';
 
 const BLOCKER_TEXT = {
   NOT_YOUR_PIECE:   "THAT'S NOT YOUR PIECE",
@@ -25,13 +25,15 @@ function placedCount(board, player) {
  * @param {string|null} [ctx.blocker]  getMoveBlocker() result for the selected piece
  * @param {number} [ctx.throwCount] throwable neighbours of the selected piece
  * @param {string} [ctx.pieceName]  display name of the selected tray piece
- * @param {string|null} [ctx.winReason] 'QUEEN' | 'STALEMATE' | 'RESIGN' | null — why the game ended
+ * @param {string|null} [ctx.winReason] 'QUEEN' | 'STALEMATE' | 'REPETITION' | 'RESIGN' | null — why the game ended
  */
 export function statusText({ state, phase = 'IDLE', mode = 'LOCAL', myPlayer = 1, blocker = null, throwCount = 0, pieceName = 'PIECE', winReason = null }) {
   const online = mode === 'ONLINE';
 
   if (state.winner === 'DRAW') {
-    return winReason === 'STALEMATE' ? 'DRAW — NO MOVES LEFT' : 'DRAW — BOTH QUEENS SURROUNDED';
+    if (winReason === 'STALEMATE') return 'DRAW — NO MOVES LEFT';
+    if (winReason === 'REPETITION' || state.drawReason === 'REPETITION') return 'DRAW — THREEFOLD REPETITION';
+    return 'DRAW — BOTH QUEENS SURROUNDED';
   }
   if (state.winner) {
     if (winReason === 'RESIGN') {
@@ -42,7 +44,9 @@ export function statusText({ state, phase = 'IDLE', mode = 'LOCAL', myPlayer = 1
     if (online) return state.winner === myPlayer ? 'YOU WIN' : 'YOU LOSE';
     return `PLAYER ${state.winner} WINS`;
   }
-  if (online && state.turn !== myPlayer) return "OPPONENT'S TURN…";
+  const repeated = state.positionCounts?.[positionKey(state)] === REPETITION_LIMIT - 1
+    ? `REPETITION ${REPETITION_LIMIT - 1}/${REPETITION_LIMIT}` : null;
+  if (online && state.turn !== myPlayer) return repeated ?? "OPPONENT'S TURN…"; // both seats see the warning
   if (getAllLegalActions(state).mustPass) return 'NO LEGAL MOVES — YOU MUST PASS';
 
   if (phase === 'TRAY')  return `TAP A GREEN HEX TO PLACE ${pieceName}`;
@@ -55,6 +59,8 @@ export function statusText({ state, phase = 'IDLE', mode = 'LOCAL', myPlayer = 1
   }
 
   if (queenPressure(state)[state.turn] === DANGER_AT) return dangerText(state.turn, { mode, myPlayer });
+
+  if (repeated) return repeated;
 
   const placed = placedCount(state.board, state.turn);
   if (placed === 0) return 'PLACE YOUR FIRST PIECE';
@@ -88,10 +94,11 @@ export function newDangers(prev, next) {
 /**
  * Map a server end reason (GAME_OVER.reason / ROOM_RESUMED.endReason) onto the
  * client's winReason. A server 'DRAW' means both queens fell together.
- * @returns {'QUEEN'|'RESIGN'|null}
+ * @returns {'QUEEN'|'REPETITION'|'RESIGN'|null}
  */
 export function winReasonFromServer(reason) {
   if (reason === 'RESIGN') return 'RESIGN';
+  if (reason === 'REPETITION') return 'REPETITION';
   if (reason === 'QUEEN' || reason === 'DRAW') return 'QUEEN';
   return null;
 }

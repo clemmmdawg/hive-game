@@ -16,7 +16,7 @@ Run with `npm start` (starts `server/index.js`; port 3000), `npm start -- 3001`,
 - Freedom to Move / gate check (height-aware for beetle stacks)
 - Forced queen placement by turn 4 (gold-pulsing queen in the tray + HUD warning)
 - Tournament opening rule (optional toggle)
-- Win/draw detection
+- Win/draw detection, including automatic threefold-repetition draw (status line shows `REPETITION 2/3` once a position has occurred twice; draw copy "DRAW — THREEFOLD REPETITION")
 - Must-pass turn handling (auto-pass banner locally; explicit PASS button online; mutual no-move = draw locally)
 - Pan and pinch-zoom on the board canvas
 - Per-player piece tray with legal-placement gating
@@ -183,6 +183,7 @@ applyAction(state, action) → GameState
 
 // Check win condition
 checkWin(state) → null | 1 | 2 | 'DRAW'
+positionKey(state) → string                       // board stacks (no ids) + side to move + both supplies; REPETITION_LIMIT = 3
 queenPressure(state) → { 1: n|null, 2: n|null }   // occupied sides of each queen (null = not placed)
 queenSides(board, isOccupied?) → [{ key, player, sides[6], lit[6] }] // per-queen side occupancy in neighbors() order — the one source for queenPressure and board queenPips
 
@@ -214,6 +215,8 @@ Pieces placed via `applyAction` carry a stable `id` (`wA1`, `bQ`; `w`=P1, `b`=P2
   lastOpponentMovedHex: string | null,   // pillbug cannot throw this hex
   pillbugThrewHex:      string | null,   // this hex cannot move next turn
   winner:               null | 1 | 2 | 'DRAW',
+  positionCounts:       { [positionKey]: n },   // maintained by applyAction (incl. PASS/THROW); created by createGame, rebuilt as {current: 1} for old saves
+  drawReason:           null | 'REPETITION',    // set with winner 'DRAW' when a position is reached the 3rd time (a queen surround on that move wins instead)
   settings:             { expansions, tournamentRule, clock }
 }
 ```
@@ -410,7 +413,7 @@ CLIENT → SERVER:
 
 SERVER → CLIENT:
   ROOM_CREATED        { code, player, token }
-  ROOM_RESUMED        { code, player, token, gameState, settings, endReason?, history }  — endReason 'QUEEN'|'RESIGN'|'DRAW' if finished
+  ROOM_RESUMED        { code, player, token, gameState, settings, endReason?, history }  — endReason 'QUEEN'|'RESIGN'|'DRAW'|'REPETITION' if finished
   PLAYER_ASSIGNMENT   { player, token }
   GAME_START          { gameState, settings, history: [] }
   GAME_STATE          { gameState, history }  — after every valid action; history = full move log so far
@@ -419,7 +422,7 @@ SERVER → CLIENT:
   ERROR               { reason }              — e.g. INVALID_MESSAGE; SEAT_TAKEN (+ close code 4001) when a newer
                                                 connection resumed your seat: net.js does not reconnect, the app
                                                 shows GAME OPENED IN ANOTHER TAB and keeps the saved token
-  GAME_OVER           { winner, reason }      — reason 'QUEEN'|'RESIGN'|'DRAW'
+  GAME_OVER           { winner, reason }      — reason 'QUEEN'|'RESIGN'|'DRAW'|'REPETITION'  (REPETITION = automatic threefold draw)
   OPPONENT_DISCONNECTED {}
   OPPONENT_RECONNECTED  {}
   ROOM_CLOSED         {}                      — room expired or was closed; the server then closes the socket
@@ -466,4 +469,4 @@ Room code and player token are stored in `localStorage`. If the socket drops, `R
 - **Mosquito-as-pillbug throw UI** — the throw flow works logically but the mosquito's amber highlight only appears if `getLegalThrows` finds it adjacent to a pillbug. Needs testing with real game positions.
 - **Beetle gate check** — `canSlide` blocks a move only when both gate stacks reach `max(fromH, toH + 1)` (fromH includes the moving piece). A ground beetle can climb onto a piece between two single pieces; two height-2 stacks block it. Pillbug throws apply the same rule to the lift and the drop. Ground-to-ground slides into an empty hex additionally require at least one occupied gate (hive contact); the ladybug applies `canSlide` at each step using its level (stack height + 1).
 - **Spider backtrack prevention** — DFS uses a visited set per path, correctly prevents revisiting. However the spider cannot end on its starting hex even if 3 steps would bring it back; this is enforced but worth an explicit test.
-- **Draw by repetition** — not implemented. Official rules allow agreeing to a draw if both players are stuck in a forced repetition loop. Low priority.
+- **Draw by repetition** — automatic threefold draw (`positionKey` / `positionCounts` / `drawReason`). The key ignores piece ids and the pillbug throw restrictions (`lastOpponentMovedHex`, `pillbugThrewHex`), so two positions that differ only in those still count as the same.
