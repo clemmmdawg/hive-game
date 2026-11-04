@@ -432,6 +432,7 @@ export class Board {
   _contentBounds() {
     const keys = [...this.pieces.keys(), ...this.ghosts];
     if (this.lastMove?.from) keys.push(this.lastMove.from);
+    if (!this.pieces.size) keys.push('0,0'); // the dashed first-placement hint
     return hiveBounds(keys, this.SIZE, this.SIZE * LAYER_PAD);
   }
 
