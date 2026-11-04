@@ -44,3 +44,29 @@ test('index.html links the favicon and apple-touch-icon', async () => {
   assert.match(html, /<link rel="icon" type="image\/png" sizes="32x32" href="assets\/icons\/favicon-32\.png">/);
   assert.match(html, /<link rel="apple-touch-icon" href="assets\/icons\/apple-touch-icon-180\.png">/);
 });
+
+test('icon rim gradient passes through a vivid violet, not grey-lavender', async () => {
+  const svg = await readFile(path.join(ICON_DIR, 'icon.svg'), 'utf8');
+  const stops = [...svg.matchAll(/<linearGradient id="rim"[^]*?<\/linearGradient>/g)][0][0];
+  assert.match(stops, /offset="0\.5" stop-color="#b36bff"/);
+});
+
+test('generated SVG has no float noise in numbers', async () => {
+  const svg = await readFile(path.join(ICON_DIR, 'icon.svg'), 'utf8');
+  assert.doesNotMatch(svg, /\d\.\d{4,}/);
+});
+
+test('favicon-32 is transparent outside the hex', async () => {
+  const { inflateSync } = await import('node:zlib');
+  const buf = await readFile(path.join(ICON_DIR, 'favicon-32.png'));
+  assert.equal(buf[25], 6, 'RGBA colour type');
+  const idat = [];
+  for (let at = 8; at < buf.length;) {
+    const len = buf.readUInt32BE(at), type = buf.toString('ascii', at + 4, at + 8);
+    if (type === 'IDAT') idat.push(buf.subarray(at + 8, at + 8 + len));
+    at += 12 + len;
+  }
+  const raw = inflateSync(Buffer.concat(idat));
+  // Row 0 has no prior row, so its first pixel is stored raw whatever the filter: alpha is byte 4.
+  assert.equal(raw[1 + 3], 0, 'top-left corner alpha');
+});
