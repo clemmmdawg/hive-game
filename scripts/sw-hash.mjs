@@ -4,6 +4,7 @@
 
 import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -17,17 +18,34 @@ export async function readSw() {
   return { cache, files };
 }
 
+const TEXT_EXT = /\.(html|css|js|mjs|json|svg|txt|webmanifest)$/i;
+
+/** File bytes as hashed: text files with CRLF line endings normalised to LF (a Windows checkout hashes the same). */
+function hashBytes(rel, buf) {
+  return TEXT_EXT.test(rel) ? Buffer.from(buf.toString('utf8').replace(/\r\n/g, '\n'), 'utf8') : buf;
+}
+
 /** sha256 over every precached file (path + bytes), '/' being index.html, in sorted order. */
-export async function precacheHash(files) {
+export async function precacheHash(files, root = ROOT) {
   const h = createHash('sha256');
   for (const url of [...new Set(files)].sort()) {
     const rel = url === '/' ? 'index.html' : url.slice(1);
-    h.update(url + '\0').update(await readFile(path.join(ROOT, rel))).update('\0');
+    h.update(url + '\0').update(hashBytes(rel, await readFile(path.join(root, rel)))).update('\0');
   }
   return h.digest('hex');
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+/** True when `argv1` (process.argv[1]) runs the module at `metaUrl`, also through symlinks. */
+export function isMainModule(metaUrl, argv1) {
+  if (!argv1) return false;
+  try {
+    return realpathSync(path.resolve(argv1)) === realpathSync(fileURLToPath(metaUrl));
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule(import.meta.url, process.argv[1])) {
   const manifestPath = path.join(ROOT, 'sw-manifest.json');
   const { cache, files } = await readSw();
   const hash = await precacheHash(files);

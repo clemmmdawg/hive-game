@@ -130,7 +130,7 @@ test('win is an arpeggio of about 1.2 s', () => {
   assert.ok(len >= 1.0 && len <= 1.4, `win lasts ${len}`);
 });
 
-test('haptics: 12 ms on piece motion, patterns on danger and win, nothing on UI clicks', () => {
+test('haptics: 12 ms on piece motion, patterns on danger, win and draw, nothing on UI clicks', () => {
   const { buzz } = setup();
   sfx.unlock();
   for (const name of ['place', 'slide', 'hop', 'climb', 'throw']) {
@@ -140,8 +140,9 @@ test('haptics: 12 ms on piece motion, patterns on danger and win, nothing on UI 
   }
   buzz.length = 0; sfx.play('danger'); assert.deepEqual(buzz, [[30, 40, 30]]);
   buzz.length = 0; sfx.play('win');    assert.deepEqual(buzz, [[40, 60, 80]]);
+  buzz.length = 0; sfx.play('draw');   assert.deepEqual(buzz, [[30, 30]]);
   buzz.length = 0;
-  for (const name of ['select', 'deselect', 'invalid', 'turn', 'lose', 'draw']) sfx.play(name);
+  for (const name of ['select', 'deselect', 'invalid', 'turn', 'lose']) sfx.play(name);
   assert.deepEqual(buzz, []);
 });
 

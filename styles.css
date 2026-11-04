@@ -1227,6 +1227,79 @@ kbd {
 }
 #board-hint.visible { opacity: 1; }
 
+/* ── Off-screen target chevrons (board.onIndicators → app.js) ──
+   One per edge cluster of legal targets outside the playable area: a dark disc with a neon rim,
+   a chevron turned toward the targets (--a) and a count. Tapping pans them into view. */
+#edge-hints { position: fixed; inset: 0; z-index: 15; pointer-events: none; }
+.edge-hint {
+  --c: var(--ghost);
+  --c-glow: rgba(57, 255, 20, .45);
+  position: absolute;
+  left: 0; top: 0;
+  width: 44px; height: 44px;
+  margin: -22px 0 0 -22px;           /* (x, y) from the transform is the centre */
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--c);
+  pointer-events: auto;
+  cursor: pointer;
+  animation: edge-hint-in .22s var(--ease-out) both;
+  -webkit-tap-highlight-color: transparent;
+}
+.edge-hint.throw { --c: var(--amber); --c-glow: rgba(255, 179, 0, .45); }
+.edge-hint::before {                  /* the disc */
+  content: '';
+  position: absolute;
+  inset: 8px;
+  border-radius: 50%;
+  background: rgba(5, 5, 15, .82);
+  border: 1.5px solid var(--c);
+  box-shadow: 0 0 6px var(--c-glow), inset 0 0 5px var(--c-glow);
+}
+.edge-hint::after {                   /* breathing halo: opacity only, so it stays on the compositor */
+  content: '';
+  position: absolute;
+  inset: 8px;
+  border-radius: 50%;
+  box-shadow: 0 0 14px 2px var(--c-glow);
+  opacity: 0;
+  animation: edge-hint-pulse 1.6s ease-in-out infinite;
+  pointer-events: none;
+}
+.edge-hint .eh-chevron {
+  position: absolute;
+  left: 50%; top: 50%;
+  width: 16px; height: 16px;
+  margin: -8px 0 0 -8px;
+  transform: rotate(var(--a, 0rad)) translateX(1px);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 0 3px var(--c-glow));
+}
+.edge-hint .eh-count {
+  position: absolute;
+  right: 1px; top: 2px;
+  min-width: 15px; height: 15px;
+  padding: 0 3px;
+  border-radius: 8px;
+  background: var(--c);
+  color: #05050f;
+  font: 7px/15px var(--font);
+  text-align: center;
+  box-shadow: 0 0 6px var(--c-glow);
+}
+.edge-hint:hover::before { background: rgba(20, 40, 20, .9); }
+.edge-hint.throw:hover::before { background: rgba(40, 30, 5, .9); }
+.edge-hint:active::before { transform: scale(.92); }
+.edge-hint:focus-visible { outline: none; }
+.edge-hint:focus-visible::before { outline: 2px solid #fff; outline-offset: 3px; }
+@keyframes edge-hint-in { from { opacity: 0; scale: .6; } to { opacity: 1; scale: 1; } }
+@keyframes edge-hint-pulse { 50% { opacity: 1; } }
+
 .float-btn {
   position: fixed;
   z-index: 18;
@@ -1273,9 +1346,11 @@ kbd {
 #toast.visible { opacity: 1; transform: translate(-50%, 0); }
 #toast.has-action { display: flex; align-items: center; gap: 12px; }
 #toast.has-action .toast-action { pointer-events: auto; } /* only the button takes taps; the pill never blocks */
-/* Over the main menu the bottom is START / CONTINUE: hang the toast from the top instead. */
-body:has(#menu-screen.active) #toast { top: calc(var(--safe-top) + 12px); bottom: auto; transform: translate(-50%, -10px); }
-body:has(#menu-screen.active) #toast.visible { transform: translate(-50%, 0); }
+/* Over the main menu: dock at the very bottom, under START and clear of the HIVE logo; while it shows,
+   the menu gains room below so START (and HOW TO PLAY) can always scroll out from under it. */
+body:has(#menu-screen.active) #toast { bottom: calc(var(--safe-bottom) + 12px); }
+body:has(#menu-screen.active):has(#toast.visible) #menu-screen { padding-bottom: calc(max(28px, var(--safe-bottom)) + 76px); }
+#menu-screen { transition: opacity .35s ease, padding-bottom .25s var(--ease-out); }
 .toast-action {
   min-height: 32px;
   padding: 0 12px;
@@ -1601,6 +1676,7 @@ body.reviewing #tray { opacity: 0; pointer-events: none; transform: translateY(8
 body.reviewing #btn-recenter { bottom: calc(var(--rb-h, 150px) + 12px); }
 body.reviewing #toast { bottom: calc(var(--rb-h, 150px) + 14px); }
 body.sheet-open #toast { top: calc(var(--hud-h) + var(--safe-top) + 10px); bottom: auto; } /* clear of the move rows */
+body.reviewing.sheet-open #toast { top: calc(var(--hud-h) + var(--safe-top) + 60px); } /* …and of the review exit pill */
 #hud.reviewing::after { background: linear-gradient(90deg, transparent, var(--gold), transparent); }
 #hud.reviewing #turn-chip { border-style: dashed; }
 
@@ -1853,6 +1929,7 @@ body.sheet-open #toast { top: calc(var(--hud-h) + var(--safe-top) + 10px); botto
   gap: 10px;
   padding: 12px 16px calc(12px + var(--safe-bottom));
   border-top: 1px solid var(--ui-border);
+  background: rgb(14, 15, 34); /* opaque: the replay bar / tray never shows through the buttons */
 }
 #moves-actions .btn { flex: 1 1 0; min-height: 42px; }
 #moves-actions .icon { width: 14px; height: 14px; }
@@ -1979,6 +2056,9 @@ input:focus-visible {
    opponent's reserve folded in beside your pieces. */
 @media (max-height: 500px) and (orientation: landscape) {
   :root { --hud-h: 44px; --tray-h: 64px; }
+  /* Short screens: the sheet starts right under the exit pill, so a toast sits beside the pill instead. */
+  body.reviewing.sheet-open #toast { top: calc(var(--hud-h) + var(--safe-top) + 10px); left: auto; right: 16px; }
+  body.reviewing.sheet-open #toast, body.reviewing.sheet-open #toast.visible { transform: none; }
   #hud-center { align-items: stretch; }
   #status-text { line-height: 1.5; }
   #piece-desc {

@@ -10,7 +10,7 @@ import {
 import { initMenu, showMenu, showConfirm, showRules, leaveOnlineSession, isOverlayOpen, copyText } from './menu.js';
 import {
   statusText, describeLastMove, inferAction, winReasonFromServer, resumedWinReason, turnChipText,
-  dangerText, newDangers,
+  dangerText, newDangers, resumeBanner,
 } from './hints.js';
 import { logEntry, undoLogEntry } from './notation.js';
 import { encodeLocalSave, decodeLocalSave, MAX_UNDO } from './local-save.js';
@@ -109,6 +109,23 @@ function updateInsets() {
   board.insets = !gameState ? { top: 0, bottom: 0 }
     : reviewer.active ? { top: Math.round($('review-pill').getBoundingClientRect().bottom), bottom: bar }
     : { top: $('hud').offsetHeight, bottom: $('tray').offsetHeight };
+  updateOverlayInsets();
+}
+
+/**
+ * The off-screen chevrons also keep clear of the piece bar hanging under the HUD (inline on
+ * landscape phones) and of the floating recenter button in the bottom-right corner.
+ */
+function updateOverlayInsets() {
+  const desc = $('piece-desc');
+  const hangs = !!gameState && desc.classList.contains('visible') && getComputedStyle(desc).position === 'absolute';
+  const { top, bottom } = board.insets;
+  // scrollHeight is the bar's full content height even mid slide-in; + its padding.
+  const overlayTop = hangs ? top + desc.scrollHeight + 12 : top;
+  const btn = $('btn-recenter').getBoundingClientRect();
+  // A 44 px chevron centred this far from the corner clears the button by ~6 px.
+  const cornerBR = btn.width ? Math.max(window.innerWidth - btn.left, window.innerHeight - bottom - btn.top) + 28 : undefined;
+  board.overlayInsets = { top: overlayTop, bottom, cornerBR };
 }
 
 board.resize(window.innerWidth, window.innerHeight);
@@ -833,6 +850,46 @@ board.onHover = (q, r, clientX, clientY) => {
 
 board.onViewChange = () => hideBoardHint();
 
+// ── Off-screen target chevrons ─────────────────────────
+
+// board.js works out where legal targets lie outside the playable area (offscreenTargets); these
+// are its chevrons as buttons: tapping one pans its targets into view. Buttons are reused while
+// the list changes (a pan moves them; only new ones fade in).
+const edgeHints = $('edge-hints');
+const CHEVRON = '<svg class="eh-chevron" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M5.5 3l5 5-5 5"/></svg>';
+
+board.onIndicators = list => {
+  const buttons = [...edgeHints.children];
+  list.forEach((c, i) => {
+    let btn = buttons[i];
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'edge-hint';
+      btn.innerHTML = `${CHEVRON}<span class="eh-count" aria-hidden="true"></span>`;
+      edgeHints.append(btn);
+    }
+    btn.dataset.index = String(i);
+    btn.classList.toggle('throw', c.kind === 'throw');
+    btn.style.transform = `translate(${c.x.toFixed(1)}px, ${c.y.toFixed(1)}px)`;
+    btn.style.setProperty('--a', `${c.angle.toFixed(3)}rad`);
+    btn.lastElementChild.textContent = String(c.count);
+    const what = c.kind === 'throw' ? 'piece to throw' : 'target';
+    btn.setAttribute('aria-label', `${c.count} ${what}${c.count === 1 ? '' : 's'} off screen (${c.edge}) — show`);
+  });
+  for (const extra of buttons.slice(list.length)) extra.remove();
+};
+
+edgeHints.addEventListener('click', event => {
+  const btn = event.target.closest('.edge-hint');
+  const cluster = btn && board.indicators[Number(btn.dataset.index)];
+  if (!cluster) return;
+  hidePieceTooltip();
+  hideBoardHint();
+  // Keep the selected piece (and every other target) in frame too when it all fits.
+  board.showTargets(cluster.keys, [board.selectedHex, ...board.ghosts, ...board.throwTargets].filter(Boolean));
+});
+
 // ── Tray rendering ─────────────────────────────────────
 
 /** Whose pieces the tray shows: your own online, the player to move locally. */
@@ -1032,6 +1089,7 @@ function syncUI() {
     desc.textContent = '';
     desc.classList.remove('visible');
   }
+  updateOverlayInsets();
 
   // Contextual buttons
   $('btn-pass').classList.toggle('hidden', !(online && myTurn && actions.mustPass && !over));
@@ -1344,6 +1402,11 @@ export function initNetHandlers() {
     }
     syncUI();
     toast('RECONNECTED', 'good', 1400);
+    // Back in the game: say whose move it is (the board may have changed while we were away).
+    const banner = gameState && !reviewer.active && resumeBanner({
+      state: gameState, myPlayer, mustPass: gameState.turn === myPlayer && getAllLegalActions(gameState).mustPass,
+    });
+    if (banner) showBanner(banner.text, banner.color, PieceType.QUEEN, 1600);
   });
 
   // Server confirmed game over (win, or resign)

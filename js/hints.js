@@ -113,6 +113,17 @@ export function turnChipText({ state, mode = 'LOCAL', myPlayer = 1 }) {
 }
 
 /**
+ * Turn banner after an online reconnect (ROOM_RESUMED): whose move it is now.
+ * Colour is the mover's (`p1`/`p2`), or `gold` when you have no legal move and must tap PASS.
+ * @returns {{text:string, color:string}|null} null once the game is over (the result card speaks)
+ */
+export function resumeBanner({ state, myPlayer, mustPass = false }) {
+  if (state.winner) return null;
+  if (state.turn !== myPlayer) return { text: "OPPONENT'S TURN", color: `p${state.turn}` };
+  return mustPass ? { text: 'NO MOVES — TAP PASS', color: 'gold' } : { text: 'YOUR TURN', color: `p${state.turn}` };
+}
+
+/**
  * Work out what changed between two snapshots so the board can mark it.
  * Online play only receives snapshots, so the source hex is found by diffing.
  * @returns {{ from: string|null, to: string, player: 1|2 }|null} null when nothing moved (e.g. a pass)

@@ -22,6 +22,7 @@ const HAPTICS = {
   place: 12, slide: 12, hop: 12, climb: 12, throw: 12,
   danger: [30, 40, 30],
   win: [40, 60, 80],
+  draw: [30, 30],
 };
 
 // ── Environment hooks (overridable from tests) ─────────────────────────────

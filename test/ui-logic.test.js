@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { ActionType, PieceType, applyAction, createGame, getLegalPlacements, getLegalMoves, getLegalThrows } from '../js/game.js';
-import { statusText, dangerText, newDangers, describeLastMove, inferAction, winReasonFromServer, resumedWinReason, turnChipText } from '../js/hints.js';
+import { statusText, dangerText, newDangers, describeLastMove, inferAction, winReasonFromServer, resumedWinReason, turnChipText, resumeBanner } from '../js/hints.js';
 import { encodeLocalSave, decodeLocalSave, MAX_UNDO } from '../js/local-save.js';
 
 const P = (player, type) => ({ player, type });
@@ -251,4 +251,14 @@ test('local save v2 round-trips the move log; v1 saves decode with an empty one'
   assert.deepEqual(decodeLocalSave(JSON.stringify(v1)).moveLog, []);
   v1.v = 2; v1.moveLog = 'junk';
   assert.deepEqual(decodeLocalSave(JSON.stringify(v1)).moveLog, []);
+});
+
+// ── Reconnect turn banner ────────────────────────────────────────────────────
+
+test('resumeBanner: after a reconnect, says whose turn it is (and when you must pass)', () => {
+  const state = createGame({});
+  assert.deepEqual(resumeBanner({ state, myPlayer: 1 }), { text: 'YOUR TURN', color: 'p1' });
+  assert.deepEqual(resumeBanner({ state, myPlayer: 2 }), { text: "OPPONENT'S TURN", color: 'p1' });
+  assert.deepEqual(resumeBanner({ state, myPlayer: 1, mustPass: true }), { text: 'NO MOVES — TAP PASS', color: 'gold' });
+  assert.equal(resumeBanner({ state: { ...state, winner: 2 }, myPlayer: 1 }), null);
 });
