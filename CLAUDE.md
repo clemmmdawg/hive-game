@@ -82,6 +82,7 @@ Run with `npm start` (port 3000), `npm start -- 3001`, or `npm start -- --port 3
 │   ├── menu.js         — Main menu, settings panel, rules dialog, confirm dialog
 │   ├── sprites.js      — Insect sprite path data + spriteSVG() (DOM) / drawSprite() (canvas)
 │   ├── hints.js        — Pure: HUD status copy (statusText, dangerText, newDangers) + last-move diff (describeLastMove, inferAction)
+│   ├── notation.js     — Pure: toNotation(prevState, action) / pieceIds(state); BoardSpace-style move text, imports only game.js
 │   ├── local-save.js   — Pure: encode/decode the local game + undo history for localStorage
 │   ├── audio.js        — WebAudio synth sound effects + haptics + persisted mute (`sfx`)
 │   └── net.js          — WebSocket client (see Multiplayer)
@@ -173,6 +174,8 @@ hexKey(q, r) → string
 parseKey(key) → { q, r }
 neighbors(q, r) → { q, r }[]
 ```
+
+Pieces placed via `applyAction` carry a stable `id` (`wA1`, `bQ`; `w`=P1, `b`=P2, numbered by placement order per type, Q/M/L/P unnumbered) that follows the piece through MOVE/THROW; `notation.js` `pieceIds()` assigns ids deterministically for id-less (old) states.
 
 ### GameState shape
 ```js

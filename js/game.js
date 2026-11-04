@@ -993,6 +993,26 @@ export function deserializeState(data) {
   };
 }
 
+// ── Piece identity ───────────────────────────────────────────────────────────
+
+const LETTER = {
+  QUEEN: 'Q', BEETLE: 'B', ANT: 'A', SPIDER: 'S',
+  GRASSHOPPER: 'G', MOSQUITO: 'M', LADYBUG: 'L', PILLBUG: 'P',
+};
+const UNNUMBERED = new Set(['QUEEN', 'MOSQUITO', 'LADYBUG', 'PILLBUG']);
+
+/** Notation id: 'w'/'b' + letter + placement number (Q, M, L, P unnumbered). */
+export function pieceId(player, type, n) {
+  return (player === 1 ? 'w' : 'b') + LETTER[type] + (UNNUMBERED.has(type) ? '' : n);
+}
+
+/** Pieces of this player/type already on the board (pieces never leave it, buried ones included). */
+function countPlaced(board, player, type) {
+  let n = 0;
+  for (const stack of board.values()) for (const p of stack) if (p.player === player && p.type === type) n++;
+  return n;
+}
+
 // ── State mutation ───────────────────────────────────────────────────────────
 
 /**
@@ -1023,7 +1043,8 @@ export function applyAction(state, action) {
     const { q, r } = parseKey(to);
 
     // Add new piece to board
-    board.set(to, [{ player: turn, type: pieceType }]);
+    // `id` is stable identity for notation/replay (see notation.js): player+letter+placement number.
+    board.set(to, [{ player: turn, type: pieceType, id: pieceId(turn, pieceType, countPlaced(board, turn, pieceType) + 1) }]);
     supply[turn][pieceType]--;
 
     if (pieceType === PieceType.QUEEN) queenPlaced[turn] = true;
