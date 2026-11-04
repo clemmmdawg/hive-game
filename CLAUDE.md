@@ -350,6 +350,6 @@ Room code and player token are stored in `localStorage`. If the socket drops, `R
 ## Known Bugs / Edge Cases to Watch
 
 - **Mosquito-as-pillbug throw UI** — the throw flow works logically but the mosquito's amber highlight only appears if `getLegalThrows` finds it adjacent to a pillbug. Needs testing with real game positions.
-- **Beetle gate check** — `canSlide` blocks a move only when both gate stacks reach `max(fromH, toH + 1)` (fromH includes the moving piece). A ground beetle can climb onto a piece between two single pieces; two height-2 stacks block it. Pillbug throws apply the same rule to the lift and the drop.
+- **Beetle gate check** — `canSlide` blocks a move only when both gate stacks reach `max(fromH, toH + 1)` (fromH includes the moving piece). A ground beetle can climb onto a piece between two single pieces; two height-2 stacks block it. Pillbug throws apply the same rule to the lift and the drop. Ground-to-ground slides into an empty hex additionally require at least one occupied gate (hive contact); the ladybug applies `canSlide` at each step using its level (stack height + 1).
 - **Spider backtrack prevention** — DFS uses a visited set per path, correctly prevents revisiting. However the spider cannot end on its starting hex even if 3 steps would bring it back; this is enforced but worth an explicit test.
 - **Draw by repetition** — not implemented. Official rules allow agreeing to a draw if both players are stuck in a forced repetition loop. Low priority.

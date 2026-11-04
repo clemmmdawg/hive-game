@@ -98,6 +98,12 @@ function occupied(board, q, r) { return board.has(hexKey(q, r)); }
  * stacks reach that level. Ground slides need both gates occupied; a beetle
  * climbing onto a single piece passes over single-height gates and is only
  * blocked by two stacks of height 2.
+ *
+ * Additionally, a ground-to-ground slide (moving piece at level 1, target
+ * empty) must keep contact with the hive: at least one common neighbor must
+ * be occupied, otherwise the piece would pivot around nothing. Callers never
+ * count the moving piece as a gate (gates are the two neighbors common to
+ * both hexes, never the origin).
  */
 export function canSlide(board, fromQ, fromR, toQ, toR, fromHOverride) {
   const dq = toQ - fromQ, dr = toR - fromR;
@@ -115,6 +121,9 @@ export function canSlide(board, fromQ, fromR, toQ, toR, fromHOverride) {
   const toH   = heightAt(board, toQ,   toR);
   const need  = Math.max(fromH, toH + 1);
   if (need === 0) return true; // zero-height piece; no gate can block it
+
+  // Ground slide into an empty hex: must stay in contact with the hive
+  if (need <= 1 && h1 === 0 && h2 === 0) return false;
 
   // Blocked only if BOTH gates are at least as tall as the highest endpoint
   return !(h1 >= need && h2 >= need);
@@ -332,28 +341,37 @@ function spiderMoves(board, fromKey) {
  * Steps 1–2: must move to an occupied hex (climbing across the hive).
  * Step 3: must move to an empty hex (landing back at ground level).
  * Cannot land on its own starting hex.
- * No gate/sliding check while on top (it's climbing, not sliding).
+ * Freedom to Move still applies at height: each step is blocked when both
+ * common-neighbor stacks reach the higher of the from/to levels. The ladybug
+ * is lifted off the board while pathfinding, so its level on a hex is
+ * (stack height + 1) and its origin counts as empty.
  */
 function ladybugMoves(board, fromKey) {
   const { q, r } = parseKey(fromKey);
   const results  = new Set();
+  const temp = new Map(board);
+  temp.delete(fromKey);
+  const level = (cq, cr) => heightAt(temp, cq, cr) + 1; // ladybug level while on hex
 
   // Step 1: climb onto any adjacent occupied hex
   for (const n1 of neighbors(q, r)) {
     const n1k = hexKey(n1.q, n1.r);
-    if (!occupied(board, n1.q, n1.r)) continue;
+    if (!occupied(temp, n1.q, n1.r)) continue;
+    if (!canSlide(temp, q, r, n1.q, n1.r, 1)) continue;
 
     // Step 2: move to any occupied hex adjacent to n1 (not back to fromKey)
     for (const n2 of neighbors(n1.q, n1.r)) {
       const n2k = hexKey(n2.q, n2.r);
       if (n2k === fromKey) continue; // can't step back onto starting hex
-      if (!occupied(board, n2.q, n2.r)) continue;
+      if (!occupied(temp, n2.q, n2.r)) continue;
+      if (!canSlide(temp, n1.q, n1.r, n2.q, n2.r, level(n1.q, n1.r))) continue;
 
       // Step 3: land on any empty hex adjacent to n2 (not the starting hex)
       for (const n3 of neighbors(n2.q, n2.r)) {
         const n3k = hexKey(n3.q, n3.r);
         if (n3k === fromKey) continue;
-        if (occupied(board, n3.q, n3.r)) continue;
+        if (occupied(temp, n3.q, n3.r)) continue;
+        if (!canSlide(temp, n2.q, n2.r, n3.q, n3.r, level(n2.q, n2.r))) continue;
         results.add(n3k);
       }
     }
