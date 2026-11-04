@@ -56,6 +56,8 @@ Run with `npm start` (port 3000), `npm start -- 3001`, or `npm start -- --port 3
 - CRT scanline + vignette overlay
 - Twinkling starfield background
 - Automated rule, validator, room lifecycle, net reconnect, board input/camera, audio, UI-logic and move-history replay tests
+- Installable PWA: `manifest.json` (standalone, theme `#05050f`, 192/512/maskable icons), offline shell via `sw.js`, update toast with RELOAD
+- Hidden `#win-screen` / `#resign-confirm` / `#moves-sheet` are `inert` (not in the Tab order) until opened
 - Static server serves only an allowlist (`index.html`, `styles.css`, `js/`, `assets/`, PWA files)
 
 ### Known Limitations / Not Yet Built
@@ -65,7 +67,7 @@ Run with `npm start` (port 3000), `npm start -- 3001`, or `npm start -- --port 3
 - `assets/pieces/queen.png` and `spider.png` are missing (`?pieceArt=png` falls back to emoji for those)
 - No spectator mode
 - Mosquito throw (mosquito adjacent to pillbug) UI not fully tested
-- `sw.js` and `manifest.json` not yet created (PWA install not functional)
+- Online play needs the network: offline, HOST/JOIN show "OFFLINE — LOCAL PLAY ONLY" (local play, CONTINUE and the pixel font work from cache)
 
 ---
 
@@ -95,6 +97,12 @@ Run with `npm start` (port 3000), `npm start -- 3001`, or `npm start -- --port 3
 ```
 
 ---
+
+## PWA / service worker
+
+`sw.js` precaches the shell (`PRECACHE`: `/`, `index.html`, `styles.css`, `manifest.json`, every `js/*.js`, icons) into cache `hive-vN`, serves it cache-first (query strings ignored, so `/?room=CODE` works offline), and caches the Google Font stylesheet/files stale-while-revalidate in `hive-fonts`. It never touches non-GET requests or `/ws`. A new worker waits; `app.js` shows a persistent toast with RELOAD, which posts `SKIP_WAITING` and reloads on `controllerchange`.
+
+**Every deploy that changes a precached file must bump `CACHE` in `sw.js` (`hive-v1` -> `hive-v2`)**, otherwise returning visitors keep the old files. **When adding a runtime module, add it to `PRECACHE`** (`test/pwa.test.js` fails if a module reachable from `index.html` is missing). Optional `assets/pieces/*.png` art is not precached.
 
 ## Architecture
 
@@ -411,7 +419,7 @@ Room code and player token are stored in `localStorage`. If the socket drops, `R
 ### v1.1
 - [ ] Clock/timer (Absolute, Fischer, Bronstein) — UI already in settings, needs `clock.js` and HUD display
 - [ ] Spectator mode — broadcast game state to extra room sockets read-only
-- [ ] PWA install — wire up `sw.js` (service worker) and `manifest.json`
+- [x] PWA install — `sw.js` + `manifest.json`
 
 ### v2
 - [ ] Persistent rooms — pause/resume games across sessions (Litestream JSON)

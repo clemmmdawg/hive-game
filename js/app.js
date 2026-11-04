@@ -221,6 +221,39 @@ function toast(text, kind = '', ms = 2200) {
   el.className = `visible ${kind}`;
   toastTimer = ms ? setTimeout(clearToast, ms) : null;
 }
+/** A persistent toast with a RELOAD button for a freshly installed service worker. */
+function showUpdateToast(worker) {
+  toast('NEW VERSION READY', 'good', 0);
+  const el  = $('toast');
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'toast-action';
+  btn.textContent = 'RELOAD';
+  btn.addEventListener('click', () => { btn.disabled = true; worker.postMessage('SKIP_WAITING'); });
+  el.append(btn);
+  el.classList.add('has-action');
+}
+
+/** Register the offline worker; a waiting update is offered, never forced (a game may be in progress). */
+function initServiceWorker() {
+  if (!('serviceWorker' in navigator) || !/^https?:$/.test(location.protocol)) return;
+  let reloading = false;
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController || reloading) return; // first install claiming the page needs no reload
+    reloading = true;
+    location.reload();
+  });
+  navigator.serviceWorker.register('sw.js').then(reg => {
+    const offer = () => { if (reg.waiting && navigator.serviceWorker.controller) showUpdateToast(reg.waiting); };
+    offer();
+    reg.addEventListener('updatefound', () => {
+      const worker = reg.installing;
+      worker?.addEventListener('statechange', () => { if (worker.state === 'installed') offer(); });
+    });
+  }).catch(() => {});
+}
+
 function clearToast() {
   if (toastTimer) clearTimeout(toastTimer);
   toastTimer = null;
@@ -925,6 +958,7 @@ function openWinCard() {
   $('btn-rematch').hidden       = gameMode !== 'LOCAL';
   $('btn-replay').hidden        = !moveLog.length || !replayForGame(moveLog, gameState);
   screen.setAttribute('aria-hidden', 'false');
+  screen.inert = false;
   screen.classList.add('active');
 }
 
@@ -932,6 +966,7 @@ function hideWinScreen() {
   const screen = $('win-screen');
   screen.classList.remove('active');
   screen.setAttribute('aria-hidden', 'true');
+  screen.inert = true;
   stopConfetti();
   hideBoardDim();
 }
@@ -1975,6 +2010,7 @@ export function initNetHandlers() {
 for (const slot of document.querySelectorAll('[data-sprite]')) slot.innerHTML = spriteSVG(slot.dataset.sprite);
 syncSoundUI();
 hideGame();
+initServiceWorker();
 
 initMenu({
   onLocalStart:        startGame,

@@ -1260,6 +1260,20 @@ kbd {
   transition: opacity .2s, transform .2s var(--ease-out);
 }
 #toast.visible { opacity: 1; transform: translate(-50%, 0); }
+#toast.has-action { display: flex; align-items: center; gap: 12px; pointer-events: all; }
+.toast-action {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+.toast-action:hover, .toast-action:focus-visible { background: rgba(255,255,255,.12); }
+.toast-action:disabled { opacity: .5; cursor: default; }
 #toast.warn  { border-color: rgba(255,179,0,.5); color: var(--amber); }
 #toast.error { border-color: rgba(255,77,94,.5); color: #ff9aa4; }
 #toast.good  { border-color: rgba(57,255,20,.45); color: var(--ghost); }

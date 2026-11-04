@@ -122,12 +122,14 @@ export function showConfirm({ title, body, confirmLabel, cancelLabel = 'KEEP PLA
   $('resign-sub').textContent      = body;
   yes.textContent = confirmLabel;
   no.textContent  = cancelLabel;
+  el.inert = false;
   el.classList.add('active');
   el.setAttribute('aria-hidden', 'false');
 
   function cleanup() {
     el.classList.remove('active');
     el.setAttribute('aria-hidden', 'true');
+    el.inert = true;
     yes.removeEventListener('click', handleYes);
     no.removeEventListener('click',  handleNo);
     el.removeEventListener('keydown', handleKeydown);
@@ -240,9 +242,17 @@ function _handleStart() {
   }
 }
 
+/** Online modes need the network: say so instead of hanging on a socket that cannot open. */
+function _offline() {
+  if (navigator.onLine !== false) return false;
+  _showError('OFFLINE — LOCAL PLAY ONLY');
+  return true;
+}
+
 // ── HOST flow ───────────────────────────────────────────
 
 function _startHostFlow() {
+  if (_offline()) return;
   _beginOnline('CONNECTING…');
 
   net.on('_connected', () => {
@@ -268,6 +278,7 @@ function _startHostFlow() {
 // ── JOIN flow ───────────────────────────────────────────
 
 function _startJoinFlow() {
+  if (_offline()) return;
   const code = _joinCode.toUpperCase().trim();
   if (code.length !== 4) {
     _showError('Enter the 4-character room code from your host.');
@@ -488,6 +499,7 @@ function _tryResumeSavedSession() {
   let saved;
   try { saved = JSON.parse(storageGet(SESSION_KEY)); } catch { return; }
   if (!saved?.code || !saved?.token) return;
+  if (_offline()) return; // keep the saved seat for when the network is back
 
   _roomCode = String(saved.code).toUpperCase().replace(CODE_CHARS, '').slice(0, 4);
   _playerToken = String(saved.token);
