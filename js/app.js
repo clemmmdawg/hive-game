@@ -13,7 +13,7 @@ import {
   dangerText, newDangers,
 } from './hints.js';
 import { logEntry, undoLogEntry } from './notation.js';
-import { replayForGame, plyInfo, movesText } from './replay.js';
+import { replayForGame, plyInfo, movesText, notationHTML, escapeHTML } from './replay.js';
 import { encodeLocalSave, decodeLocalSave, MAX_UNDO } from './local-save.js';
 import { spriteSVG, drawSprite, SPECIES_COLOR, bodyFill } from './sprites.js';
 import * as net from './net.js';
@@ -992,7 +992,7 @@ function rematch() {
 }
 
 $('btn-rematch').addEventListener('click', rematch);
-$('btn-replay').addEventListener('click', () => { if (enterReview(0, { returnTo: 'card' })) startAutoplay(); });
+$('btn-replay').addEventListener('click', () => { if (enterReview(0, { returnTo: 'card' })) startAutoplay({ hold: true }); });
 $('btn-to-menu').addEventListener('click', () => exitToMenu());
 $('btn-view-board').addEventListener('click', () => {
   hideWinScreen();
@@ -1411,20 +1411,17 @@ $('btn-pass').addEventListener('click', () => {
 // GAME") and REPLAY on the result card (✕ / Esc returns to the card). The board shows a position
 // rebuilt from the move log (js/replay.js); the live gameState is never touched, nothing is saved or
 // sent, and leaving puts the live board back (selection cleared, cached layer re-rendered).
-// `review`: { replay, log, returnTo: 'game'|'board'|'card', liveLastMove, playing, playTimer }
+// `review`: { replay, log, returnTo: 'game'|'board'|'card', liveLastMove, playing, played, playTimer }
+// (`played`: autoplay has run, so a mid-game preview is now a replay and the HUD chip says so)
 
 const AUTOPLAY_MS = 900;
+const REPLAY_HOLD_MS = 600; // a replay from the top lingers on the empty board before move 1
 const movesSheet  = $('moves-sheet');
 let sheetInerted  = [];
 let sheetReturnFocus = null;
 
 const playerName = p => (gameMode === 'ONLINE' ? (p === myPlayer ? 'YOU' : 'OPPONENT') : `P${p}`);
-const escapeHTML = text => String(text).replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
-
-/** Notation with each piece id tinted in its owner's colour ('wA1' P1, 'bQ' P2). */
-function notationHTML(text) {
-  return escapeHTML(text).replace(/\b([wb])([QBGASMLP]\d?)/g, (_, side, rest) => `<b class="nid ${side === 'w' ? 'p1' : 'p2'}">${side}${rest}</b>`);
-}
+const pieceOwnerName = p => (gameMode === 'ONLINE' ? (p === myPlayer ? 'YOUR' : 'OPPONENT\'S') : `P${p}`);
 
 /**
  * Enter the review at position `index` (0 = empty board, i = after the i-th move).
@@ -1457,7 +1454,7 @@ function enterReview(index, { returnTo } = {}) {
   board.finishAnimations({ clearFx: true });
   clearSelection(false);
 
-  review = { replay, log, returnTo, liveLastMove: board.lastMove, playing: false, playTimer: null };
+  review = { replay, log, returnTo, liveLastMove: board.lastMove, playing: false, played: false, playTimer: null };
   document.body.classList.add('reviewing');
   $('replay-bar').hidden = false;
   $('review-pill').hidden = false;
@@ -1558,16 +1555,19 @@ function seekReview(index, { animate = false } = {}) {
   showReviewPosition(index, { animate });
 }
 
-function startAutoplay() {
+/** @param {{ hold?: boolean }} opts hold: stay on the current position for a beat before stepping */
+function startAutoplay({ hold = false } = {}) {
   if (!review) return;
-  review.playing = true;
+  review.playing = review.played = true;
   if (review.replay.atEnd) {
     showReviewPosition(0); // from the top, like a video player
     scheduleAutoplay();
+  } else if (hold) {
+    scheduleAutoplay(REPLAY_HOLD_MS);
   } else {
     autoplayStep();
   }
-  syncPlayButton();
+  syncReviewUI();
 }
 
 function autoplayStep() {
@@ -1577,9 +1577,9 @@ function autoplayStep() {
   else scheduleAutoplay();
 }
 
-function scheduleAutoplay() {
+function scheduleAutoplay(ms = AUTOPLAY_MS) {
   if (review.playTimer) clearTimeout(review.playTimer);
-  review.playTimer = setTimeout(autoplayStep, AUTOPLAY_MS);
+  review.playTimer = setTimeout(autoplayStep, ms);
 }
 
 function stopAutoplay() {
@@ -1602,7 +1602,7 @@ function syncPlayButton() {
   btn.setAttribute('aria-label', playing ? 'Pause' : 'Play');
 }
 
-const VERB = { PLACE: 'PLACED', MOVE: 'MOVED', THROW: 'THREW' };
+const VERB = { PLACE: 'PLACED', MOVE: 'MOVED' };
 
 /** Replay bar, HUD and exit pill for the position under review (syncUI calls this last). */
 function syncReviewUI() {
@@ -1615,7 +1615,10 @@ function syncReviewUI() {
   // Replay bar
   const bar = $('replay-bar');
   bar.dataset.player = info ? String(info.player) : '';
-  $('rb-count').textContent = i ? `MOVE ${i} / ${n}` : `START · ${n} MOVE${n === 1 ? '' : 'S'}`;
+  // Long and compact forms; CSS shows the compact one where the one-row landscape bar is tight.
+  $('rb-count').innerHTML = i
+    ? `<span class="rb-long">MOVE ${i} / ${n}</span><span class="rb-short">${i}/${n}</span>`
+    : `<span class="rb-long">START · ${n} MOVE${n === 1 ? '' : 'S'}</span><span class="rb-short">START</span>`;
   $('rb-notation').innerHTML = info ? notationHTML(info.text) : 'EMPTY BOARD';
   $('rb-tile').innerHTML = info?.type ? spriteSVG(info.type) : '';
   $('rb-tile').classList.toggle('blank', !info?.type);
@@ -1633,13 +1636,15 @@ function syncReviewUI() {
   const shownPlayer = info?.player ?? 1;
   $('hud').className = `game-visible turn-p${shownPlayer} reviewing`;
   $('turn-chip').className = info ? `p${info.player}` : 'p1 waiting';
-  $('chip-label').textContent = review.returnTo === 'game' ? 'PREVIEW' : 'REPLAY';
+  $('chip-label').textContent = review.returnTo === 'game' && !review.played ? 'PREVIEW' : 'REPLAY';
   $('chip-sub').textContent = `MOVE ${i}/${n}`;
   const status = $('status-text');
   status.className = 'active';
   status.textContent = !info ? 'OPENING · EMPTY BOARD'
     : info.pass ? `${playerName(info.player)} PASSED`
-    : `${playerName(info.player)} ${VERB[entry.action.type] ?? 'PLAYED'} ${PIECE_NAMES[info.type] ?? info.type}`;
+    : entry.action?.type === ActionType.THROW // a throw moves either side's piece: say whose
+      ? `${playerName(info.player)} THREW ${pieceOwnerName(info.owner)} ${PIECE_NAMES[info.type] ?? info.type}`
+      : `${playerName(info.player)} ${VERB[entry.action?.type] ?? 'PLAYED'} ${PIECE_NAMES[info.type] ?? info.type}`;
   if (i === n && gameState.winner) status.textContent += ` · ${turnChipText({ state: gameState, mode: gameMode, myPlayer })}`;
   $('piece-desc').classList.remove('visible');
   renderQueenMeters(r.state);
@@ -1687,7 +1692,7 @@ $('rb-last').addEventListener('click', () => seekReview(review.replay.states.len
 $('rb-play').addEventListener('click', toggleAutoplay);
 $('rb-slider').addEventListener('input', event => seekReview(Number(event.target.value)));
 $('rb-moves').addEventListener('click', () => openMovesSheet());
-$('rb-copy').addEventListener('click', copyMoves);
+$('rb-copy').addEventListener('click', () => copyMoves());
 
 // ── Move list sheet ────────────────────────────────────
 
@@ -1704,7 +1709,8 @@ function openMovesSheet() {
   movesSheet.inert = false;
   movesSheet.classList.add('active');
   movesSheet.setAttribute('aria-hidden', 'false');
-  // Modal: everything else is inert while it is open (the toast stays live for COPY).
+  // Modal: everything else is inert while it is open (the toast stays live: an update's RELOAD).
+  document.body.classList.add('sheet-open'); // toasts move up to the HUD, clear of the rows
   sheetInerted = [...document.body.children].filter(el => el !== movesSheet && el !== $('toast') && !el.inert);
   for (const el of sheetInerted) el.inert = true;
   const current = $('moves-list').querySelector('.mv-ply.current:not(:disabled)');
@@ -1717,6 +1723,7 @@ function closeMovesSheet({ restoreFocus = true } = {}) {
   movesSheet.classList.remove('active');
   movesSheet.setAttribute('aria-hidden', 'true');
   movesSheet.inert = true; // its buttons leave the tab order while it is closed
+  document.body.classList.remove('sheet-open');
   for (const el of sheetInerted) el.inert = false;
   sheetInerted = [];
   if (restoreFocus) {
@@ -1764,7 +1771,7 @@ function renderMovesSheet() {
     : `<li class="mv-empty">${playable ? 'NO MOVES YET' : 'NO MOVES RECORDED SINCE RESUMING'}</li>`;
 
   $('btn-copy-moves').disabled = !log.length;
-  $('btn-moves-replay').hidden = !playable || !log.length;
+  $('btn-moves-replay').hidden = !playable || !log.length || !!review; // the replay bar already plays it
   if (focused) $('moves-list').querySelector(`[data-index="${focused}"]`)?.focus({ preventScroll: true });
 }
 
@@ -1786,19 +1793,37 @@ function movesTitle() {
   return `HIVE · P1 (w) vs P2 (b) · ${result}${exps.length ? ` · +${exps.join(' +')}` : ''}`;
 }
 
-async function copyMoves() {
+/** @param {{ inline?: boolean }} opts inline: answer on the sheet's own button (a toast would cover its rows) */
+async function copyMoves({ inline = false } = {}) {
   const log = review ? review.log : moveLog;
   if (!gameState || !log.length) { toast('NO MOVES TO COPY YET', 'warn', 1400); return; }
   const ok = await copyText(movesText(log, { title: movesTitle() }));
-  toast(ok ? `${log.length} MOVE${log.length === 1 ? '' : 'S'} COPIED` : 'COULD NOT COPY THE MOVES', ok ? 'good' : 'error', 1600);
+  if (inline) flashCopyButton(ok);
+  else toast(ok ? `${log.length} MOVE${log.length === 1 ? '' : 'S'} COPIED` : 'COULD NOT COPY THE MOVES', ok ? 'good' : 'error', 1600);
+}
+
+const COPY_MOVES_HTML = $('btn-copy-moves').innerHTML;
+const CHECK_ICON = '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
+let copyFlashTimer = null;
+/** "COPIED" (or "COPY FAILED") on the sheet's COPY MOVES button for a moment. */
+function flashCopyButton(ok) {
+  const btn = $('btn-copy-moves');
+  if (copyFlashTimer) clearTimeout(copyFlashTimer);
+  btn.innerHTML = ok ? `${CHECK_ICON} COPIED` : 'COPY FAILED';
+  btn.classList.toggle('copied', ok);
+  btn.classList.toggle('copy-failed', !ok);
+  copyFlashTimer = setTimeout(() => {
+    copyFlashTimer = null;
+    btn.innerHTML = COPY_MOVES_HTML;
+    btn.classList.remove('copied', 'copy-failed');
+  }, 1600);
 }
 
 $('btn-close-moves').addEventListener('click', () => closeMovesSheet());
-$('btn-copy-moves').addEventListener('click', copyMoves);
+$('btn-copy-moves').addEventListener('click', () => copyMoves({ inline: true }));
 $('btn-moves-replay').addEventListener('click', () => {
   closeMovesSheet({ restoreFocus: false });
-  if (review) { seekReview(0); startAutoplay(); }
-  else if (enterReview(0)) startAutoplay();
+  if (enterReview(0)) startAutoplay({ hold: true });
 });
 movesSheet.addEventListener('click', event => {
   if (event.target === movesSheet) { closeMovesSheet(); return; } // the scrim

@@ -62,19 +62,34 @@ const TYPE_BY_LETTER = {
 };
 
 /**
- * Display data for one log entry: who moved, which piece (the first notation id names it, so it works
- * for any log, replayable or not), and the text to show.
- * @returns {{ player: 1|2, type: string|null, text: string, pass: boolean }}
+ * Display data for one log entry: who moved, which piece and whose it is (the first notation id names
+ * it, so it works for any log, replayable or not; a pillbug throw moves the opponent's piece), and the
+ * text to show.
+ * @returns {{ player: 1|2, owner: 1|2|null, type: string|null, text: string, pass: boolean }}
  */
 export function plyInfo(entry) {
   const pass = entry.action?.type === ActionType.PASS || entry.notation === 'pass';
-  const letter = /^[wb]([QBGASMLP])/.exec(entry.notation ?? '')?.[1];
+  const [, side, letter] = /^([wb])([QBGASMLP])/.exec(entry.notation ?? '') ?? [];
   return {
     player: entry.player,
+    owner:  pass ? null : side ? (side === 'w' ? 1 : 2) : entry.player, // differs from player on a throw
     type:   pass ? null : TYPE_BY_LETTER[letter] ?? entry.action?.pieceType ?? null,
     text:   pass ? 'PASS' : entry.notation,
     pass,
   };
+}
+
+export const escapeHTML = text => String(text).replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
+
+/**
+ * Notation as HTML: each piece id tinted in its owner's colour ('wA1' P1, 'bQ' P2), and a direction
+ * marker (/ \ -) kept with its reference id in that colour, in an .nmk that CSS thickens to match.
+ */
+export function notationHTML(text) {
+  return escapeHTML(text).replace(/([\/\\-]?)\b([wb][QBGASMLP]\d?)([\/\\-]?)/g, (_, pre, id, post) => {
+    const mark = m => (m ? `<i class="nmk">${m}</i>` : '');
+    return `<b class="nid ${id[0] === 'w' ? 'p1' : 'p2'}">${mark(pre)}${id}${mark(post)}</b>`;
+  });
 }
 
 /** Plain-text game record: an optional title line, then '1. wA1', '2. bS1 wA1-', … one ply per line. */

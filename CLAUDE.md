@@ -46,7 +46,7 @@ Run with `npm start` (port 3000), `npm start -- 3001`, or `npm start -- --port 3
 - Server-authoritative online multiplayer with room codes
 - Token-based seat recovery after transient disconnects
 - Responsive refined-neon UI with reduced-motion and focus-visible support
-- Move list + game review: ☰ MOVES opens a slide-up sheet (numbered rounds, sprite + notation, COPY MOVES); tapping a move previews that position read-only (BACK TO GAME pill); REPLAY on the win card autoplays the game (900 ms/move, steps fly along getMovePath routes) with a scrubber bar (⏮ ◀ ▶/❚❚ ▶ ⏭, slider); Esc / ✕ returns to where review began. Logs that do not rebuild the live game (resumed v1 saves) are listed but not previewable
+- Move list + game review: ☰ MOVES opens a slide-up sheet (numbered rounds, sprite + notation, COPY MOVES); tapping a move previews that position read-only (BACK TO GAME pill); REPLAY on the win card (or the sheet, mid-game) holds the empty board ~600 ms then autoplays the game (900 ms/move, steps fly along getMovePath routes) with a scrubber bar (⏮ ◀ ▶/❚❚ ▶ ⏭, slider); Esc / ✕ returns to where review began. The HUD chip reads PREVIEW for a tapped move and REPLAY once autoplay has run; the sheet hides its REPLAY button while reviewing; a throw reads "P2 THREW P1 BEETLE"; the landscape replay bar shows a compact "19/38" so the full notation fits. Logs that do not rebuild the live game (resumed v1 saves) are listed but not previewable
 - ☰ game menu: Moves, How to Play, Recenter, Restart/Rematch (local), Quit (local, keeps save) / Resign (online)
 - Piece description bar (`#piece-desc`, inside `#hud-center`; hangs below the HUD, inline on landscape phones) slides in on selection
 - Hover/focus/tap piece tooltips for tray and board pieces
@@ -86,7 +86,7 @@ Run with `npm start` (port 3000), `npm start -- 3001`, or `npm start -- --port 3
 │   ├── sprites.js      — Insect sprite path data + spriteSVG() (DOM) / drawSprite() (canvas)
 │   ├── hints.js        — Pure: HUD status copy (statusText, dangerText, newDangers) + last-move diff (describeLastMove, inferAction)
 │   ├── notation.js     — Pure: toNotation / pieceIds / logEntry / undoLogEntry; BoardSpace-style move text and move-log entries, imports only game.js
-│   ├── replay.js       — Pure: createReplay / replayForGame / sameBoard / plyInfo / movesText; rebuilds positions from the move log (game review), imports only game.js
+│   ├── replay.js       — Pure: createReplay / replayForGame / sameBoard / plyInfo (player, owner, type) / movesText / notationHTML; rebuilds positions from the move log (game review), imports only game.js
 │   ├── local-save.js   — Pure: encode/decode the local game + undo history + move log for localStorage (save VERSION 2; v1 loads with an empty log)
 │   ├── audio.js        — WebAudio synth sound effects + haptics + persisted mute (`sfx`)
 │   └── net.js          — WebSocket client (see Multiplayer)

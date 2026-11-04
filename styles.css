@@ -1593,11 +1593,14 @@ body:has(#menu-screen.active) #toast.visible { transform: translate(-50%, 0); }
 .nid { font-weight: normal; }
 .nid.p1 { color: color-mix(in srgb, var(--p1) 70%, #fff); }
 .nid.p2 { color: color-mix(in srgb, var(--p2) 70%, #fff); }
+/* Direction markers: the pixel font draws / \ - one font-pixel thin; a 1-font-pixel shadow gives them the ids' weight */
+.nmk { font-style: normal; text-shadow: .125em 0 currentColor; }
 
 /* Reviewing: the replay bar takes the tray's place */
 body.reviewing #tray { opacity: 0; pointer-events: none; transform: translateY(8px); }
 body.reviewing #btn-recenter { bottom: calc(var(--rb-h, 150px) + 12px); }
 body.reviewing #toast { bottom: calc(var(--rb-h, 150px) + 14px); }
+body.sheet-open #toast { top: calc(var(--hud-h) + var(--safe-top) + 10px); bottom: auto; } /* clear of the move rows */
 #hud.reviewing::after { background: linear-gradient(90deg, transparent, var(--gold), transparent); }
 #hud.reviewing #turn-chip { border-style: dashed; }
 
@@ -1667,7 +1670,8 @@ body.reviewing #toast { bottom: calc(var(--rb-h, 150px) + 14px); }
 #rb-tile.blank { --rim: #4a4e70; filter: none; }
 .mini-tile.blank::after { background: radial-gradient(circle at 50% 30%, #10101f, #07070f 75%); }
 .rb-text { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
-#rb-count { font-size: 6px; letter-spacing: 1.5px; color: var(--ui-dim); }
+#rb-count { font-size: 6px; letter-spacing: 1.5px; color: var(--ui-dim); white-space: nowrap; }
+.rb-short { display: none; }
 #rb-notation {
   font-size: 11px;
   letter-spacing: 1px;
@@ -1853,6 +1857,8 @@ body.reviewing #toast { bottom: calc(var(--rb-h, 150px) + 14px); }
 #moves-actions .btn { flex: 1 1 0; min-height: 42px; }
 #moves-actions .icon { width: 14px; height: 14px; }
 #btn-moves-replay .icon, #btn-replay .icon { fill: currentColor; }
+#btn-copy-moves.copied { border-color: rgba(57,255,20,.55); color: var(--ghost); }
+#btn-copy-moves.copy-failed { border-color: rgba(255,77,94,.55); color: #ff9aa4; }
 
 /* Wide screens: one control row under the scrubber */
 @media (min-width: 700px) {
@@ -2007,10 +2013,16 @@ input:focus-visible {
   #tray-pieces { flex: 1 1 auto; align-items: center; gap: 6px; }
   .piece-slot { flex-basis: 50px; gap: 1px; padding-top: 2px; }
   #replay-bar {
-    grid-template-columns: minmax(120px, 1fr) minmax(120px, 2fr) auto auto;
+    /* The label sizes to its content (the full notation; 160px fits the usual ones, so the slider
+       holds still while stepping); the slider takes what is left. */
+    grid-template-columns: minmax(160px, auto) minmax(48px, 1fr) auto auto;
     grid-template-areas: "label slider transport tools";
+    column-gap: 10px;
     padding: 6px 14px calc(6px + var(--safe-bottom));
   }
+  #rb-label { gap: 8px; }
+  #rb-count .rb-long { display: none; }
+  #rb-count .rb-short { display: inline; }
   #rb-tile { width: 32px; }
   .rb-transport { gap: 6px; }
   .rb-btn { width: 42px; height: 38px; }

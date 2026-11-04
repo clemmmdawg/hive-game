@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createGame, applyAction, getAllLegalActions, ActionType, PieceType } from '../js/game.js';
 import { logEntry } from '../js/notation.js';
-import { createReplay, replayForGame, sameBoard, plyInfo, movesText } from '../js/replay.js';
+import { createReplay, replayForGame, sameBoard, plyInfo, movesText, notationHTML } from '../js/replay.js';
 
 const place = (pieceType, to) => ({ type: ActionType.PLACE, pieceType, to });
 const move = (from, to) => ({ type: ActionType.MOVE, from, to });
@@ -131,11 +131,33 @@ test('sameBoard compares players and types per stack layer, not ids', () => {
 
 test('plyInfo: moved piece type, owner and text', () => {
   const { log } = record(OPENING);
-  assert.deepEqual(plyInfo(log[0]), { player: 1, type: PieceType.ANT, text: 'wA1', pass: false });
+  assert.deepEqual(plyInfo(log[0]), { player: 1, owner: 1, type: PieceType.ANT, text: 'wA1', pass: false });
   assert.equal(plyInfo(log[1]).type, PieceType.SPIDER);
   assert.equal(plyInfo(log[4]).type, PieceType.QUEEN, 'a move names the piece moved');
   assert.deepEqual(plyInfo({ notation: 'pass', player: 2, turnNumber: 7, action: { type: 'PASS' } }),
-    { player: 2, type: null, text: 'PASS', pass: true });
+    { player: 2, owner: null, type: null, text: 'PASS', pass: true });
+});
+
+test('plyInfo: a throw names the thrown piece and its owner, not the thrower', () => {
+  let throws = 0;
+  for (const seed of [3, 5, 7, 11, 13, 17, 19, 23]) {
+    const { settings, actions } = randomGame(80, seed);
+    let state = createGame(settings);
+    for (const a of actions) {
+      const info = plyInfo(logEntry(state, a));
+      if (a.type === ActionType.THROW) {
+        throws++;
+        const thrown = state.board.get(a.from).at(-1);
+        assert.equal(info.owner, thrown.player, `seed ${seed}: owner of the thrown piece`);
+        assert.equal(info.type, thrown.type);
+        assert.equal(info.player, state.turn, 'player is still the thrower');
+      } else if (a.type !== ActionType.PASS) {
+        assert.equal(info.owner, state.turn);
+      }
+      state = applyAction(state, a);
+    }
+  }
+  assert.ok(throws > 0, 'the sample games include throws');
 });
 
 test('movesText: one numbered ply per line, with an optional title', () => {
@@ -143,4 +165,14 @@ test('movesText: one numbered ply per line, with an optional title', () => {
   assert.equal(movesText(log), `1. ${log[0].notation}\n2. ${log[1].notation}\n3. ${log[2].notation}`);
   assert.equal(movesText(log, { title: 'HIVE' }).split('\n')[0], 'HIVE');
   assert.equal(movesText([]), '');
+});
+
+test('notationHTML: ids in their owner\'s colour, direction markers inked with their reference id', () => {
+  assert.equal(notationHTML('wA1'), '<b class="nid p1">wA1</b>');
+  assert.equal(notationHTML('bL bA1/'), '<b class="nid p2">bL</b> <b class="nid p2">bA1<i class="nmk">/</i></b>');
+  assert.equal(notationHTML('wB1 \\bQ'), '<b class="nid p1">wB1</b> <b class="nid p2"><i class="nmk">\\</i>bQ</b>');
+  assert.equal(notationHTML('bG2 -wS1'), '<b class="nid p2">bG2</b> <b class="nid p1"><i class="nmk">-</i>wS1</b>');
+  assert.equal(notationHTML('wB1 bG2'), '<b class="nid p1">wB1</b> <b class="nid p2">bG2</b>', 'a climb has no marker');
+  assert.equal(notationHTML('PASS'), 'PASS');
+  assert.equal(notationHTML('<x>'), '&#60;x&#62;', 'escaped');
 });
